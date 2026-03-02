@@ -1,0 +1,138 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 700">
+  <defs>
+    <style>
+      .title { font-family: Arial, sans-serif; font-size: 24px; font-weight: bold; fill: #2c3e50; }
+      .subtitle { font-family: Arial, sans-serif; font-size: 14px; fill: #7f8c8d; }
+      .box-label { font-family: Arial, sans-serif; font-size: 16px; font-weight: bold; fill: #fff; }
+      .item-label { font-family: Arial, sans-serif; font-size: 12px; fill: #34495e; }
+      .arrow { stroke: #95a5a6; stroke-width: 2; marker-end: url(#arrowhead); }
+      .zone-label { font-family: Arial, sans-serif; font-size: 18px; font-weight: bold; fill: #95a5a6; text-transform: uppercase; letter-spacing: 2px; }
+      .note { font-family: Arial, sans-serif; font-size: 11px; fill: #e74c3c; font-style: italic; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#95a5a6"/>
+    </marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="3" dy="3" stdDeviation="3" flood-opacity="0.2"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="100%" height="100%" fill="#f8f9fa"/>
+  
+  <!-- Title -->
+  <text x="500" y="40" text-anchor="middle" class="title">CMP 监控、诊断与可观测性架构 (Chapter 4)</text>
+  <text x="500" y="65" text-anchor="middle" class="subtitle">Data Sources, Diagnostic Logic & Alerting Flow</text>
+
+  <!-- Zones -->
+  <!-- Zone 1: Supplier Space -->
+  <rect x="50" y="100" width="250" height="550" rx="10" fill="#ecf0f1" stroke="#bdc3c7" stroke-dasharray="5,5"/>
+  <text x="175" y="130" text-anchor="middle" class="zone-label">Data Sources</text>
+  <text x="175" y="150" text-anchor="middle" class="subtitle">(Supplier / Operator)</text>
+
+  <!-- Zone 2: Reseller System -->
+  <rect x="350" y="100" width="350" height="550" rx="10" fill="#fff" stroke="#27ae60" stroke-width="2"/>
+  <text x="525" y="130" text-anchor="middle" class="zone-label" fill="#27ae60">Processing Core</text>
+  <text x="525" y="150" text-anchor="middle" class="subtitle">(Reseller System)</text>
+
+  <!-- Zone 3: User Space -->
+  <rect x="750" y="100" width="200" height="550" rx="10" fill="#ecf0f1" stroke="#bdc3c7" stroke-dasharray="5,5"/>
+  <text x="850" y="130" text-anchor="middle" class="zone-label">Outputs</text>
+  <text x="850" y="150" text-anchor="middle" class="subtitle">(Enterprise / Ops)</text>
+
+  <!-- Component: Supplier CMP -->
+  <g transform="translate(75, 200)">
+    <rect width="200" height="100" rx="5" fill="#3498db" filter="url(#shadow)"/>
+    <text x="100" y="30" text-anchor="middle" class="box-label">Supplier CMP</text>
+    <text x="100" y="55" text-anchor="middle" fill="#ecf0f1" font-size="12">权威数据源</text>
+    
+    <!-- Interfaces -->
+    <rect x="180" y="20" width="40" height="20" fill="#e74c3c" rx="2"/>
+    <text x="200" y="34" text-anchor="middle" fill="white" font-size="10" font-weight="bold">API</text>
+    <rect x="180" y="60" width="40" height="20" fill="#f39c12" rx="2"/>
+    <text x="200" y="74" text-anchor="middle" fill="white" font-size="10" font-weight="bold">SFTP</text>
+  </g>
+
+  <!-- Component: Management API Data -->
+  <g transform="translate(75, 350)">
+    <rect width="200" height="80" rx="5" fill="#fff" stroke="#3498db" stroke-width="2"/>
+    <text x="10" y="25" class="item-label" font-weight="bold">1. Management API</text>
+    <text x="10" y="45" class="item-label">• SIM Status (Lifecycle)</text>
+    <text x="10" y="65" class="item-label">• Subscription (Plan/APN)</text>
+  </g>
+
+  <!-- Component: CDR Files Data -->
+  <g transform="translate(75, 450)">
+    <rect width="200" height="80" rx="5" fill="#fff" stroke="#f39c12" stroke-width="2"/>
+    <text x="10" y="25" class="item-label" font-weight="bold">2. CDR Files</text>
+    <text x="10" y="45" class="item-label">• Session Details (Time/Vol)</text>
+    <text x="10" y="65" class="item-label">• Visited Network (Roaming)</text>
+  </g>
+
+  <!-- Component: Diagnostic Engine -->
+  <g transform="translate(375, 200)">
+    <rect width="300" height="180" rx="5" fill="#2ecc71" filter="url(#shadow)"/>
+    <text x="150" y="30" text-anchor="middle" class="box-label">Diagnostic Engine</text>
+    <line x1="20" y1="45" x2="280" y2="45" stroke="#fff" stroke-width="1"/>
+    
+    <text x="30" y="70" fill="white" font-size="14" font-weight="bold">核心诊断项 (Items):</text>
+    <text x="30" y="95" fill="white" font-size="12">1. 状态核对 (Status Sync Check)</text>
+    <text x="30" y="115" fill="white" font-size="12">2. 订阅一致性 (Plan/APN Verify)</text>
+    <text x="30" y="135" fill="white" font-size="12">3. 用量活跃度 (Activity Analysis)</text>
+    <text x="30" y="155" fill="white" font-size="12">4. 网络覆盖检查 (Coverage/Zone)</text>
+  </g>
+
+  <!-- Component: Monitoring & Alerting -->
+  <g transform="translate(375, 420)">
+    <rect width="300" height="150" rx="5" fill="#16a085" filter="url(#shadow)"/>
+    <text x="150" y="30" text-anchor="middle" class="box-label">Monitoring &amp; Alerting</text>
+    <line x1="20" y1="45" x2="280" y2="45" stroke="#fff" stroke-width="1"/>
+
+    <text x="30" y="70" fill="white" font-size="14" font-weight="bold">触发条件 (Triggers):</text>
+    <text x="30" y="95" fill="white" font-size="12">• 异常漫游 (Unexpected Roaming)</text>
+    <text x="30" y="115" fill="white" font-size="12">• 流量池枯竭 (Pool Exhaustion)</text>
+    <text x="30" y="135" fill="white" font-size="12">• 沉默卡占比 (Silent SIM Ratio)</text>
+  </g>
+
+  <!-- Component: Outputs -->
+  <g transform="translate(775, 200)">
+    <rect width="150" height="60" rx="5" fill="#9b59b6" filter="url(#shadow)"/>
+    <text x="75" y="35" text-anchor="middle" class="box-label" font-size="14">诊断工具</text>
+    <text x="75" y="52" text-anchor="middle" fill="#fff" font-size="10">(On-demand)</text>
+  </g>
+
+  <g transform="translate(775, 300)">
+    <rect width="150" height="60" rx="5" fill="#e67e22" filter="url(#shadow)"/>
+    <text x="75" y="35" text-anchor="middle" class="box-label" font-size="14">实时告警</text>
+    <text x="75" y="52" text-anchor="middle" fill="#fff" font-size="10">(Email / Webhook)</text>
+  </g>
+
+  <g transform="translate(775, 400)">
+    <rect width="150" height="60" rx="5" fill="#34495e" filter="url(#shadow)"/>
+    <text x="75" y="35" text-anchor="middle" class="box-label" font-size="14">运营报表</text>
+    <text x="75" y="52" text-anchor="middle" fill="#fff" font-size="10">(Trends / Top SIM)</text>
+  </g>
+
+  <!-- Constraints Note -->
+  <g transform="translate(375, 600)">
+    <rect width="300" height="40" rx="5" fill="#fdeaea" stroke="#e74c3c"/>
+    <text x="150" y="25" text-anchor="middle" class="note">Constraints: No signaling codes (HLR/PGW) access</text>
+  </g>
+
+  <!-- Arrows & Flows -->
+  <!-- API Flow -->
+  <line x1="275" y1="220" x2="375" y2="290" class="arrow"/>
+  <text x="300" y="245" font-size="10" fill="#3498db" font-weight="bold">API Sync</text>
+
+  <!-- CDR Flow -->
+  <line x1="275" y1="490" x2="375" y2="495" class="arrow"/>
+  <text x="300" y="485" font-size="10" fill="#f39c12" font-weight="bold">Batch / Stream</text>
+
+  <!-- Diagnostic to Output -->
+  <line x1="675" y1="230" x2="775" y2="230" class="arrow"/>
+  
+  <!-- Monitoring to Output -->
+  <line x1="675" y1="495" x2="775" y2="330" class="arrow"/>
+  <line x1="675" y1="495" x2="775" y2="430" class="arrow"/>
+
+</svg>

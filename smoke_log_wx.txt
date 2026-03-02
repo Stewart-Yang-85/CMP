@@ -1,0 +1,66 @@
+Main started
+App created
+Server listening
+Testing WX sync daily usage...
+wx-sync-daily-usage response: {"jobId":"85926fcd-1138-4bcc-8a75-0715af8ef0b2","processed":2,"total":2}
+WX sync daily usage passed
+Testing WX sync sim info batch...
+wx-sync-sim-info-batch response: {"jobId":"f87d513e-d3a6-45bd-a501-e1b7b85c7376","processed":2,"total":2}
+WX sync sim info batch passed
+Testing WX sim status...
+sim-status response: {"code":"00000","success":true,"message":"操作成功","data":{"iccid":"893107032536638556","state":"Active","status":"Activty","activateTime":"2025-04-27T12:44:12","lastChangeStateTime":"2026-02-04T01:13:01"}}
+SMOKE TEST FAILED: Error: sim status iccid must match
+    at assert (file:///D:/AgentProjects/04_Project_CMP1/tools/wx_smoke_test.js:49:11)
+    at main (file:///D:/AgentProjects/04_Project_CMP1/tools/wx_smoke_test.js:111:11)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+Main started
+App created
+Server listening
+Testing WX sync daily usage...
+wx-sync-daily-usage response: {"jobId":"c68a5dd7-7fd2-4072-a670-90ab803be063","processed":2,"total":2}
+WX sync daily usage passed
+Testing WX sync sim info batch...
+wx-sync-sim-info-batch response: {"jobId":"bad957e9-f8b5-4227-b55f-f425afc64cd3","processed":2,"total":2}
+WX sync sim info batch passed
+Testing WX sim status...
+sim-status response: {"code":"00000","success":true,"message":"操作成功","data":{"iccid":"893107032536638556","state":"Active","status":"Activty","activateTime":"2025-04-27T12:44:12","lastChangeStateTime":"2026-02-04T01:13:01"}}
+SMOKE TEST FAILED: Error: sim status iccid must match
+    at assert (file:///D:/AgentProjects/04_Project_CMP1/tools/wx_smoke_test.js:49:11)
+    at main (file:///D:/AgentProjects/04_Project_CMP1/tools/wx_smoke_test.js:111:11)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+Main started
+App created
+Server listening
+Testing WX sync daily usage...
+wx-sync-daily-usage response: {"jobId":"e23e7fef-7796-44e5-a596-399963114f1f","processed":2,"total":2}
+WX sync daily usage passed
+Testing WX sync sim info batch...
+wx-sync-sim-info-batch response: {"jobId":"5586aaf4-3643-4a50-a7f7-89ac4ef190bf","processed":2,"total":2}
+WX sync sim info batch passed
+Testing WX sim status...
+sim-status response: {"code":"00000","success":true,"message":"操作成功","data":{"iccid":"893107032536638556","state":"Active","status":"Activty","activateTime":"2025-04-27T12:44:12","lastChangeStateTime":"2026-02-04T01:13:01"}}
+WX sim status passed
+Main started
+App created
+Server listening
+Testing WX sync daily usage...
+wx-sync-daily-usage response: {"jobId":"6279ee0a-3eb0-4e13-baec-eb61908707d2","processed":2,"total":2}
+WX sync daily usage passed
+Testing WX sync sim info batch...
+wx-sync-sim-info-batch response: {"jobId":"ca303e44-9baa-41aa-bba9-5a000154fa94","processed":2,"total":2}
+WX sync sim info batch passed
+Testing WX sim status...
+sim-status response: {"code":"00000","success":true,"message":"操作成功","data":{"iccid":"893107032536638556","state":"Active","status":"Activty","activateTime":"2025-04-27T12:44:12","lastChangeStateTime":"2026-02-04T01:13:01"}}
+WX sim status passed
+Main started
+App created
+Server listening
+Testing WX sync daily usage...
+wx-sync-daily-usage response: {"jobId":"5f739f72-533a-4456-9e36-4572250c724c","processed":0,"total":0}
+WX sync daily usage passed
+Testing WX sync sim info batch...
+wx-sync-sim-info-batch response: {"jobId":"f4f78c10-adef-4ad1-bdbc-c26ce2e0aed8","processed":84,"total":84}
+WX sync sim info batch passed
+Testing WX sim status...
+sim-status response: {"code":"00000","success":true,"message":"操作成功","data":{"iccid":"893107032536638556","state":"Suspended","status":"Stop","activateTime":"2025-04-27T12:44:12","lastChangeStateTime":"2026-02-25T02:46:05"}}
+WX sim status passed

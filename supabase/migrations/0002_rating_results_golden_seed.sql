@@ -1,0 +1,12 @@
+insert into rating_results (calculation_id, iccid, visited_mccmnc, input_ref, classification, charged_kb, rate_per_kb, amount, currency)
+values
+  ('golden_case_U-01','89860000000000000000','234-15','golden:U-01','IN_PACKAGE',102400,null,0.00,'USD'),
+  ('golden_case_U-02','89860000000000000001','208-01','golden:U-02','IN_PACKAGE',102400,null,0.00,'USD'),
+  ('golden_case_U-03','89860000000000000002','262-02','golden:U-03','IN_PACKAGE',102400,null,0.00,'USD'),
+  ('golden_case_U-04','89860000000000000003','208-01','golden:U-04','IN_PACKAGE',102400,null,0.00,'USD'),
+  ('golden_case_U-07','89860000000000000006','234-15','golden:U-07','OVERAGE',10240,0.01,102.40,'USD'),
+  ('golden_case_U-08','89860000000000000007','424-02','golden:U-08','PAYG',10240,0.02,204.80,'USD'),
+  ('golden_case_U-05','89860000000000000004','424-02','golden:U-05','PAYG',10240,0.02,204.80,'USD'),
+  ('golden_case_U-06','89860000000000000005','999-99','golden:U-06','PAYG_RULE_MISSING',10240,null,0.00,'USD')
+on conflict do nothing;
+

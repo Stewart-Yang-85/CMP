@@ -1,0 +1,17 @@
+{
+  "name": "@cmp/openapi",
+  "version": "1.0.0",
+  "description": "IoT CMP OpenAPI specification artifact",
+  "private": false,
+  "license": "UNLICENSED",
+  "files": [
+    "openapi.yaml",
+    "openapi.json",
+    "openapitools.json",
+    "openapi-generator.config.json",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "restricted"
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WXZHONGGENG API Schema",
+  "type": "object",
+  "definitions": {
+    "iccid": {
+      "type": "string",
+      "pattern": "^[0-9]{18,20}$",
+      "description": "Integrated Circuit Card Identifier"
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{1,2}-\\d{1,2}$",
+      "description": "Date string (YYYY-MM-DD or YYYY-M-D)"
+    }
+  },
+  "properties": {
+    "getUsage": {
+      "description": "Batch daily usage query",
+      "type": "object",
+      "properties": {
+        "request": {
+          "type": "object",
+          "properties": {
+            "iccids": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/iccid" },
+              "minItems": 1
+            },
+            "date": { "$ref": "#/definitions/date" }
+          },
+          "required": ["iccids", "date"]
+        },
+        "response": {
+          "type": "object",
+          "properties": {
+            "code": { "type": "string" },
+            "success": { "type": "boolean" },
+            "message": { "type": "string" },
+            "data": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "iccid": { "$ref": "#/definitions/iccid" },
+                  "usedFlow": { "type": "number", "minimum": 0, "description": "Total usage in KB?" }
+                },
+                "required": ["iccid"]
+              }
+            }
+          },
+          "required": ["success"]
+        }
+      }
+    },
+    "getSimStatus": {
+      "description": "Single SIM info query",
+      "type": "object",
+      "properties": {
+        "request": {
+          "type": "object",
+          "properties": {
+            "iccid": { "$ref": "#/definitions/iccid" }
+          },
+          "required": ["iccid"]
+        },
+        "response": {
+          "type": "object",
+          "properties": {
+            "code": { "type": "string" },
+            "success": { "type": "boolean" },
+            "data": {
+              "type": "object",
+              "properties": {
+                "iccid": { "$ref": "#/definitions/iccid" },
+                "imsi": { "type": "string" },
+                "msisdn": { "type": "string" },
+                "ispType": { "type": "string" }
+              }
+            }
+          },
+          "required": ["success"]
+        }
+      }
+    }
+  }
+}

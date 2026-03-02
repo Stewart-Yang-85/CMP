@@ -1,0 +1,191 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 950">
+  <defs>
+    <style>
+      .title { font-family: Arial, sans-serif; font-size: 26px; font-weight: 700; fill: #1f2d3d; }
+      .subtitle { font-family: Arial, sans-serif; font-size: 13px; fill: #6b7785; }
+      .section { fill: #f7f8fa; stroke: #e2e6ea; stroke-width: 2; }
+      .section-title { font-family: Arial, sans-serif; font-size: 14px; font-weight: 700; fill: #1f2d3d; }
+      .chip { font-family: Arial, sans-serif; font-size: 11px; fill: #1f2d3d; }
+      .box { filter: url(#shadow); }
+      .box-title { font-family: Arial, sans-serif; font-size: 13px; font-weight: 700; fill: #ffffff; }
+      .box-line { font-family: Arial, sans-serif; font-size: 11px; fill: #ffffff; opacity: 0.96; }
+      .link { stroke: #9aa4af; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .link-dashed { stroke: #9aa4af; stroke-width: 2; stroke-dasharray: 6,6; fill: none; marker-end: url(#arrow); }
+    </style>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="3" dy="3" stdDeviation="3" flood-opacity="0.18"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#9aa4af"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1400" height="950" fill="#ffffff"/>
+
+  <text x="700" y="46" text-anchor="middle" class="title">Northbound API Overview</text>
+  <text x="700" y="70" text-anchor="middle" class="subtitle">Visual summary of iot-cmp-api.yaml (OpenAPI 3.0). Grouped by domain; arrows indicate typical call flows.</text>
+
+  <g transform="translate(40, 100)">
+    <rect x="0" y="0" width="1320" height="90" rx="10" class="section"/>
+    <text x="16" y="28" class="section-title">Security &amp; Base URL</text>
+
+    <g class="box" transform="translate(20, 40)">
+      <rect x="0" y="0" width="420" height="40" rx="8" fill="#34495e"/>
+      <text x="12" y="25" class="box-title">Servers</text>
+      <text x="110" y="25" class="box-line">https://api.iot-cmp.com/v1  |  https://sandbox-api.iot-cmp.com/v1</text>
+    </g>
+
+    <g class="box" transform="translate(470, 40)">
+      <rect x="0" y="0" width="410" height="40" rx="8" fill="#34495e"/>
+      <text x="12" y="25" class="box-title">Auth</text>
+      <text x="90" y="25" class="box-line">Bearer JWT  OR  X-API-Key</text>
+    </g>
+
+    <g class="box" transform="translate(910, 40)">
+      <rect x="0" y="0" width="380" height="40" rx="8" fill="#34495e"/>
+      <text x="12" y="25" class="box-title">Conventions</text>
+      <text x="140" y="25" class="box-line">Async operations return jobId</text>
+    </g>
+  </g>
+
+  <g transform="translate(40, 215)">
+    <rect x="0" y="0" width="430" height="190" rx="10" class="section"/>
+    <text x="16" y="28" class="section-title">Authentication</text>
+
+    <g class="box" transform="translate(20, 55)">
+      <rect x="0" y="0" width="390" height="110" rx="8" fill="#2f80ed"/>
+      <text x="12" y="24" class="box-title">POST /auth/token</text>
+      <text x="12" y="46" class="box-line">Request: { clientId, clientSecret }</text>
+      <text x="12" y="64" class="box-line">Response: { accessToken, expiresIn }</text>
+      <text x="12" y="82" class="box-line">Security: none (token exchange)</text>
+    </g>
+  </g>
+
+  <g transform="translate(500, 215)">
+    <rect x="0" y="0" width="860" height="310" rx="10" class="section"/>
+    <text x="16" y="28" class="section-title">SIM Management</text>
+
+    <g class="box" transform="translate(20, 55)">
+      <rect x="0" y="0" width="400" height="110" rx="8" fill="#27ae60"/>
+      <text x="12" y="24" class="box-title">GET /sims</text>
+      <text x="12" y="46" class="box-line">Filters: iccid, msisdn, status</text>
+      <text x="12" y="64" class="box-line">Paging: page, limit</text>
+      <text x="12" y="82" class="box-line">Response: { items: SimCard[], total }</text>
+    </g>
+
+    <g class="box" transform="translate(440, 55)">
+      <rect x="0" y="0" width="400" height="110" rx="8" fill="#27ae60"/>
+      <text x="12" y="24" class="box-title">GET /sims/{iccid}</text>
+      <text x="12" y="46" class="box-line">Response: SimCard</text>
+      <text x="12" y="64" class="box-line">404 if not found</text>
+      <text x="12" y="82" class="box-line">Use for details view</text>
+    </g>
+
+    <g class="box" transform="translate(20, 185)">
+      <rect x="0" y="0" width="400" height="110" rx="8" fill="#27ae60"/>
+      <text x="12" y="24" class="box-title">PATCH /sims/{iccid}</text>
+      <text x="12" y="46" class="box-line">Body: { status: ACTIVATED | DEACTIVATED }</text>
+      <text x="12" y="64" class="box-line">Response: { jobId, status }</text>
+      <text x="12" y="82" class="box-line">400 invalid transition</text>
+    </g>
+
+    <g class="box" transform="translate(440, 185)">
+      <rect x="0" y="0" width="400" height="110" rx="8" fill="#27ae60"/>
+      <text x="12" y="24" class="box-title">PUT /sims/{iccid}/plan</text>
+      <text x="12" y="46" class="box-line">Body: { newPlanCode, effectiveDate }</text>
+      <text x="12" y="64" class="box-line">effectiveDate: IMMEDIATE | NEXT_CYCLE</text>
+      <text x="12" y="82" class="box-line">Response: { success, effectiveDate }</text>
+    </g>
+  </g>
+
+  <g transform="translate(40, 430)">
+    <rect x="0" y="0" width="430" height="250" rx="10" class="section"/>
+    <text x="16" y="28" class="section-title">Async Jobs</text>
+
+    <g class="box" transform="translate(20, 55)">
+      <rect x="0" y="0" width="390" height="150" rx="8" fill="#9b59b6"/>
+      <text x="12" y="24" class="box-title">GET /jobs/{jobId}</text>
+      <text x="12" y="46" class="box-line">Status: QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED</text>
+      <text x="12" y="64" class="box-line">Progress: { processed, total }</text>
+      <text x="12" y="82" class="box-line">errorSummary when FAILED</text>
+      <text x="12" y="100" class="box-line">Used by: SIM status change, bulk jobs</text>
+    </g>
+  </g>
+
+  <g transform="translate(500, 550)">
+    <rect x="0" y="0" width="860" height="210" rx="10" class="section"/>
+    <text x="16" y="28" class="section-title">Usage</text>
+
+    <g class="box" transform="translate(20, 55)">
+      <rect x="0" y="0" width="400" height="120" rx="8" fill="#f2994a"/>
+      <text x="12" y="24" class="box-title">GET /sims/{iccid}/usage</text>
+      <text x="12" y="46" class="box-line">Query: startDate, endDate</text>
+      <text x="12" y="64" class="box-line">Response: DataUsageRecord[]</text>
+      <text x="12" y="82" class="box-line">Fields: uplinkBytes, downlinkBytes, totalBytes</text>
+    </g>
+
+    <g class="box" transform="translate(440, 55)">
+      <rect x="0" y="0" width="400" height="120" rx="8" fill="#f2994a"/>
+      <text x="12" y="24" class="box-title">GET /sims/{iccid}/balance</text>
+      <text x="12" y="46" class="box-line">Response: BalanceInfo</text>
+      <text x="12" y="64" class="box-line">Fields: accountBalance, dataBalanceBytes, smsBalanceCount</text>
+      <text x="12" y="82" class="box-line">Near-real-time, depends on upstream</text>
+    </g>
+  </g>
+
+  <g transform="translate(500, 785)">
+    <rect x="0" y="0" width="860" height="140" rx="10" class="section"/>
+    <text x="16" y="28" class="section-title">Diagnostics (API-based)</text>
+
+    <g class="box" transform="translate(20, 55)">
+      <rect x="0" y="0" width="270" height="70" rx="8" fill="#e74c3c"/>
+      <text x="12" y="24" class="box-title">GET /sims/{iccid}/connectivity-status</text>
+      <text x="12" y="46" class="box-line">Response: ConnectionStatus</text>
+    </g>
+
+    <g class="box" transform="translate(310, 55)">
+      <rect x="0" y="0" width="260" height="70" rx="8" fill="#e74c3c"/>
+      <text x="12" y="24" class="box-title">POST /sims/{iccid}:reset-connection</text>
+      <text x="12" y="46" class="box-line">Response: { success, message }</text>
+    </g>
+
+    <g class="box" transform="translate(590, 55)">
+      <rect x="0" y="0" width="250" height="70" rx="8" fill="#e74c3c"/>
+      <text x="12" y="24" class="box-title">GET /sims/{iccid}/location</text>
+      <text x="12" y="46" class="box-line">visitedMccMnc, updatedAt</text>
+    </g>
+
+    <g class="box" transform="translate(860, 55)">
+      <rect x="0" y="0" width="260" height="70" rx="8" fill="#e74c3c"/>
+      <text x="12" y="24" class="box-title">GET /sims/{iccid}/location-history</text>
+      <text x="12" y="46" class="box-line">Query: startDate, endDate</text>
+    </g>
+  </g>
+
+  <g transform="translate(40, 705)">
+    <rect x="0" y="0" width="430" height="220" rx="10" class="section"/>
+    <text x="16" y="28" class="section-title">Billing (Invoices)</text>
+
+    <g class="box" transform="translate(20, 55)">
+      <rect x="0" y="0" width="390" height="60" rx="8" fill="#1abc9c"/>
+      <text x="12" y="24" class="box-title">GET /bills</text>
+      <text x="12" y="44" class="box-line">Query: period, status</text>
+    </g>
+
+    <g class="box" transform="translate(20, 125)">
+      <rect x="0" y="0" width="390" height="70" rx="8" fill="#1abc9c"/>
+      <text x="12" y="24" class="box-title">GET /bills/{billId}  |  GET /bills/{billId}/files</text>
+      <text x="12" y="46" class="box-line">Details + file URLs</text>
+    </g>
+  </g>
+
+  <path class="link" d="M 235 370 L 500 310"/>
+  <path class="link" d="M 700 410 L 235 485"/>
+  <path class="link" d="M 700 410 L 235 575"/>
+
+  <path class="link" d="M 235 575 L 235 760"/>
+
+  <path class="link-dashed" d="M 700 410 L 700 550"/>
+  <path class="link-dashed" d="M 900 410 L 900 550"/>
+  <path class="link-dashed" d="M 700 760 L 700 785"/>
+</svg>

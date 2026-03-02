@@ -1,0 +1,598 @@
+[
+  {
+    "productCode": "012cadca-dc5e-4102-ae3c-c1d62d022ea2",
+    "productName": "50GB_Monthly Recurring Unlimited_ZONE-5_PPU_CE"
+  },
+  {
+    "productCode": "4d7c8e87-ed91-42d7-a941-95d87026c6ad",
+    "productName": "10GB_Monthly Recurring Unlimited_ZONE-7_PPU_CE"
+  },
+  {
+    "productCode": "7190df1e-a91d-4832-adbf-129d75923d8c",
+    "productName": "10GB_Monthly Recurring Unlimited_ZONE-1_PPU_CE"
+  },
+  {
+    "productCode": "aa173d59-ec17-4938-a204-592c473957f3",
+    "productName": "50GB_Monthly Recurring Unlimited_ZONE-2_PPU_CE"
+  },
+  {
+    "productCode": "7c32ec09-d1c8-43e2-8484-d1396613b8ff",
+    "productName": "10GB_Monthly Recurring Unlimited_ZONE-3_PPU_CE"
+  },
+  {
+    "productCode": "b3d4f7f0-c2eb-43cb-8477-df6b11e8dc97",
+    "productName": "10GB_Monthly Recurring Unlimited_ZONE-4_PPU_CE"
+  },
+  {
+    "productCode": "cf219fee-1193-4dde-87a3-e2b22661ece2",
+    "productName": "50GB_Monthly Recurring Unlimited_ZONE-6_PPU_CE"
+  },
+  {
+    "productCode": "463c054b-71e6-4987-a526-84d799385e2c",
+    "productName": "50GB_Monthly Recurring Unlimited_ZONE-1_PPU_CE"
+  },
+  {
+    "productCode": "796e775b-51f5-485c-9e0f-67b0439de6ee",
+    "productName": "50GB_Monthly Recurring Unlimited_ZONE-3_PPU_CE"
+  },
+  {
+    "productCode": "768eb9f3-6949-46ff-b409-c8cf5410e513",
+    "productName": "10GB_Monthly Recurring Unlimited_ZONE-5_PPU_CE"
+  },
+  {
+    "productCode": "8e35a69c-b1ac-4646-a30f-a9623613224e",
+    "productName": "50GB_Monthly Recurring Unlimited_ZONE-4_PPU_CE"
+  },
+  {
+    "productCode": "c3ad8990-bef0-488d-823d-956f0d305b14",
+    "productName": "50GB_Monthly Recurring Unlimited_ZONE-7_PPU_CE"
+  },
+  {
+    "productCode": "4009fe46-b5fd-4d96-a79f-36d38fbbedba",
+    "productName": "10GB_Monthly Recurring Unlimited_ZONE-2_PPU_CE"
+  },
+  {
+    "productCode": "844aac70-eb55-43bb-a5ae-f9e828f47d80",
+    "productName": "10GB_Monthly Recurring Unlimited_ZONE-6_PPU_CE"
+  },
+  {
+    "productCode": "fe6e4d7e-7bb0-4553-b33f-69875b435b64",
+    "productName": "10GB_For One Month_ZONE-50_PPU_CE"
+  },
+  {
+    "productCode": "d597da9c-a464-468b-be37-57a155833e8b",
+    "productName": "3GB_Monthly Recurring Unlimited_ZONE-1_PPU_CE"
+  },
+  {
+    "productCode": "a77108e0-aa24-43f5-af1d-9b83c8fe3c8c",
+    "productName": "800MB_Monthly Recurring Unlimited_ZONE-1_PPU_CE"
+  },
+  {
+    "productCode": "118e2d16-dbe5-4fa5-b17b-1a46d5c2388c",
+    "productName": "3GB_Monthly Recurring Unlimited_ZONE-3_PPU_CE"
+  },
+  {
+    "productCode": "b1e7f788-d76b-4c5c-aab3-a827c251cec2",
+    "productName": "3GB_Monthly Recurring Unlimited_ZONE-2_PPU_CE"
+  },
+  {
+    "productCode": "1eb3e9bf-f6e7-46a3-a478-b1425827dfd7",
+    "productName": "800MB_Monthly Recurring Unlimited_ZONE-2_PPU_CE"
+  },
+  {
+    "productCode": "79b80455-9162-455c-b86e-09f916b61ddb",
+    "productName": "1GB_Monthly Recurring Unlimited_ZONE-2_PPU_CE"
+  },
+  {
+    "productCode": "36703c09-d016-46ec-922a-75271f75a62d",
+    "productName": "1GB_Monthly Recurring Unlimited_ZONE-4_PPU_CE"
+  },
+  {
+    "productCode": "4c9dab47-1193-4539-8126-071e50db41f1",
+    "productName": "800MB_Monthly Recurring Unlimited_ZONE-3_PPU_CE"
+  },
+  {
+    "productCode": "2a1045df-a921-4a1b-a639-8f0baaa8c9f5",
+    "productName": "3GB_Monthly Recurring Unlimited_ZONE-4_PPU_CE"
+  },
+  {
+    "productCode": "a7879dcc-ba6b-4049-8d69-bb5fe51a1fbb",
+    "productName": "1GB_Monthly Recurring Unlimited_ZONE-3_PPU_CE"
+  },
+  {
+    "productCode": "92e6f87b-aa6f-416b-b7eb-ecc91112be10",
+    "productName": "5GB_Monthly Recurring Unlimited_ZONE-2_PPU_CE"
+  },
+  {
+    "productCode": "582f8b67-4b05-4c54-bbbd-cebd9d36b642",
+    "productName": "1GB_Monthly Recurring Unlimited_ZONE-1_PPU_CE"
+  },
+  {
+    "productCode": "09d10d62-b2e0-46b1-b140-85317e1f4e08",
+    "productName": "5GB_Monthly Recurring Unlimited_ZONE-3_PPU_CE"
+  },
+  {
+    "productCode": "08b2f1cb-f82f-4f52-9347-a96c301c3d4f",
+    "productName": "5GB_Monthly Recurring Unlimited_ZONE-4_PPU_CE"
+  },
+  {
+    "productCode": "637f7e8b-3ab0-4afd-b77f-b55b4204442b",
+    "productName": "5GB_Monthly Recurring Unlimited_ZONE-1_PPU_CE"
+  },
+  {
+    "productCode": "5e9e58d7-1902-44fe-878d-1d1c4e21b172",
+    "productName": "800MB_Monthly Recurring Unlimited_ZONE-4_PPU_CE"
+  },
+  {
+    "productCode": "7fbdb91d-4317-4b83-9144-efee75b41f1d",
+    "productName": "800MB_Monthly Recurring Unlimited_Russia&China_PPU_CE"
+  },
+  {
+    "productCode": "27673e2f-bb34-4d72-8a2d-56b68a6248b2",
+    "productName": "800MB_Monthly Recurring Unlimited_Russia_PPU_CE"
+  },
+  {
+    "productCode": "101b7322-7daf-4bdf-b66d-368af15c15e9",
+    "productName": "800MB_Monthly Recurring Unlimited_Macau,Taiwan&Japan_PPU_CE"
+  },
+  {
+    "productCode": "4ba058c6-8d5c-47ac-9123-f20798e3afa7",
+    "productName": "3GB_Monthly Recurring Unlimited_Macau,Taiwan&Japan_PPU_CE"
+  },
+  {
+    "productCode": "0cc5f7ef-d6f2-4101-956b-89503f7d27e2",
+    "productName": "5GB_Monthly Recurring Unlimited_Macau,Taiwan&Japan_PPU_CE"
+  },
+  {
+    "productCode": "efe9e635-c684-4193-9db1-70b64f75be15",
+    "productName": "1GB_Monthly Recurring Unlimited_Macau,Taiwan&Japan_PPU_CE"
+  },
+  {
+    "productCode": "af871065-e665-4530-b9d1-ebb183e32262",
+    "productName": "10GB_Monthly Recurring Unlimited_Macau,Taiwan&Japan_PPU_CE"
+  },
+  {
+    "productCode": "ba6efb02-8588-44b0-8081-478c48ad832d",
+    "productName": "50GB_Monthly Recurring Unlimited_Macau,Taiwan&Japan_PPU_CE"
+  },
+  {
+    "productCode": "2f903205-8b68-44ba-91e6-4f9cab0b0664",
+    "productName": "800MB_Monthly Recurring Unlimited_Hong Kong and Sri Lanka_PPU_CE"
+  },
+  {
+    "productCode": "d985ddd9-0ca9-4f0b-ab3f-99857906999b",
+    "productName": "10GB_Monthly Recurring Unlimited_Hong Kong and Sri Lanka_PPU_CE"
+  },
+  {
+    "productCode": "fe4f1972-ba6d-41e6-ad10-f52ffb4b8054",
+    "productName": "5GB_Monthly Recurring Unlimited_Hong Kong and Sri Lanka_PPU_CE"
+  },
+  {
+    "productCode": "ff5facd9-88a6-40f2-b776-c4534993c73c",
+    "productName": "800MB_Monthly Recurring Unlimited_Fiji,Papua New Guinea and South Korea_PPU_CE"
+  },
+  {
+    "productCode": "bd245fd5-8a2d-4c4b-85a9-ba71f4fa5745",
+    "productName": "10GB_Monthly Recurring Unlimited_Fiji,Papua New Guinea and South Korea_PPU_CE"
+  },
+  {
+    "productCode": "ba691ace-b039-4865-b9fe-e7579adebcfb",
+    "productName": "3GB_Monthly Recurring Unlimited_Fiji,Papua New Guinea and South Korea_PPU_CE"
+  },
+  {
+    "productCode": "d3b6b250-832a-44a8-ad37-e108afe7935d",
+    "productName": "50GB_Monthly Recurring Unlimited_Hong Kong and Sri Lanka_PPU_CE"
+  },
+  {
+    "productCode": "88a678ef-1cfa-4486-b3db-1d86a02bcc34",
+    "productName": "3GB_Monthly Recurring Unlimited_Hong Kong and Sri Lanka_PPU_CE"
+  },
+  {
+    "productCode": "56adcb10-e8bc-4cf0-b3a4-0f7a47d91a4c",
+    "productName": "1GB_Monthly Recurring Unlimited_Hong Kong and Sri Lanka_PPU_CE"
+  },
+  {
+    "productCode": "e2bd4395-5efb-462c-91da-83f5f43c16a0",
+    "productName": "5GB_Monthly Recurring Unlimited_Fiji,Papua New Guinea and South Korea_PPU_CE"
+  },
+  {
+    "productCode": "8f365a98-88c3-4fae-bebe-a88865c2bf42",
+    "productName": "50GB_Monthly Recurring Unlimited_Fiji,Papua New Guinea and South Korea_PPU_CE"
+  },
+  {
+    "productCode": "46889f15-7af5-470c-b972-284e0599fd86",
+    "productName": "1GB_Monthly Recurring Unlimited_Fiji,Papua New Guinea and South Korea_PPU_CE"
+  },
+  {
+    "productCode": "5bfeca43-8efd-4640-bba0-ae87afcf26de",
+    "productName": "30MB_Monthly Rec for 12 Months_ZONE-4_Bundle_CE"
+  },
+  {
+    "productCode": "9e5948f5-334b-4a49-9a56-f7b6de9f89bc",
+    "productName": "30MB_Monthly Rec for 12 Months_ZONE-3_Bundle_CE"
+  },
+  {
+    "productCode": "ac880c1a-2fe6-4e01-a14b-e886d777720a",
+    "productName": "50MB_Monthly Rec for 12 Months_ZONE-6_Bundle_CE"
+  },
+  {
+    "productCode": "ec70faa7-70e5-4931-ba4d-303c9b51d738",
+    "productName": "10MB_Monthly Recurring for 6 Month_ZONE-7_PPU_CE"
+  },
+  {
+    "productCode": "3fd88a1c-4acb-4cab-81fb-ad729f81fdd4",
+    "productName": "10MB_Monthly Recurring for 6 Month_ZONE-3_PPU_CE"
+  },
+  {
+    "productCode": "f36e78d1-1457-4bda-92ba-8ec9b380ad71",
+    "productName": "10MB_Monthly Recurring for 6 Month_ZONE-4_PPU_CE"
+  },
+  {
+    "productCode": "31517676-f65e-41ed-823c-d92c7b5d49be",
+    "productName": "150MB_Monthly Rec for 12 Months_ZONE-4_Bundle_CE"
+  },
+  {
+    "productCode": "d25dd275-099f-498a-b21b-5d22a63a6b53",
+    "productName": "30MB_Monthly Rec for 12 Months_ZONE-2_Bundle_CE"
+  },
+  {
+    "productCode": "afa7a01a-3c64-430d-946f-ace122c791e7",
+    "productName": "50MB_Monthly Rec for 12 Months_ZONE-7_Bundle_CE"
+  },
+  {
+    "productCode": "187d62af-4056-4ad1-b870-f497e6b0170b",
+    "productName": "10MB_Monthly Recurring for 6 Month_ZONE-1_PPU_CE"
+  },
+  {
+    "productCode": "4d61f02e-b19c-4161-9ef1-5b10baaee5fd",
+    "productName": "100MB_Monthly Rec for 12 Months_ZONE-2_Bundle_CE"
+  },
+  {
+    "productCode": "c8a751b8-c424-4875-85aa-bd4e92f3d299",
+    "productName": "30MB_Monthly Rec for 12 Months_ZONE-1_Bundle_CE"
+  },
+  {
+    "productCode": "8e91319b-7150-4827-a93a-cefdfccbe882",
+    "productName": "100MB_Monthly Rec for 12 Months_ZONE-4_Bundle_CE"
+  },
+  {
+    "productCode": "a7c44b3c-7ac6-4a27-94bf-c741fa0f33b1",
+    "productName": "50MB_Monthly Rec for 12 Months_ZONE-3_Bundle_CE"
+  },
+  {
+    "productCode": "afeca2ca-768b-4faa-b957-7c3545d9791c",
+    "productName": "150MB_Monthly Rec for 12 Months_ZONE-1_Bundle_CE"
+  },
+  {
+    "productCode": "44b326dc-7407-4032-ae78-399945ab36f6",
+    "productName": "100MB_Monthly Rec for 12 Months_ZONE-3_Bundle_CE"
+  },
+  {
+    "productCode": "5a094de2-ce88-4960-9e2a-03fe3047025d",
+    "productName": "150MB_Monthly Rec for 12 Months_ZONE-3_Bundle_CE"
+  },
+  {
+    "productCode": "3a6e252f-1c74-4a52-b35f-13a77a7fed1b",
+    "productName": "30MB_Monthly Rec for 12 Months_ZONE-7_Bundle_CE"
+  },
+  {
+    "productCode": "6204b5da-6c29-41c9-8a38-ec516320c6ce",
+    "productName": "10MB_Monthly Recurring for 6 Month_ZONE-6_PPU_CE"
+  },
+  {
+    "productCode": "e9fc3491-1f15-4b36-8861-80c3976740ee",
+    "productName": "150MB_Monthly Rec for 12 Months_ZONE-6_Bundle_CE"
+  },
+  {
+    "productCode": "47bb5016-b400-454b-8c53-183c20263b1b",
+    "productName": "50MB_Monthly Rec for 12 Months_ZONE-1_Bundle_CE"
+  },
+  {
+    "productCode": "04fa8fb7-097e-44f0-8cc7-afc2c9f8cdb3",
+    "productName": "150MB_Monthly Rec for 12 Months_ZONE-2_Bundle_CE"
+  },
+  {
+    "productCode": "5154ef9e-5d52-4cfe-af75-fdce469780e0",
+    "productName": "10MB_Monthly Recurring for 6 Month_ZONE-5_PPU_CE"
+  },
+  {
+    "productCode": "fe954be6-fdb8-4e54-b884-e1af4f63b41c",
+    "productName": "30MB_Monthly Rec for 12 Months_ZONE-5_Bundle_CE"
+  },
+  {
+    "productCode": "ae1cd6bb-07fa-46db-9abf-713d733d8bf4",
+    "productName": "100MB_Monthly Rec for 12 Months_ZONE-1_Bundle_CE"
+  },
+  {
+    "productCode": "66c291ff-cb20-4c87-9faa-18d51bfcc2a2",
+    "productName": "150MB_Monthly Rec for 12 Months_ZONE-7_Bundle_CE"
+  },
+  {
+    "productCode": "61df964b-0f9a-4932-b7e4-a71b4abd6893",
+    "productName": "50MB_Monthly Rec for 12 Months_ZONE-4_Bundle_CE"
+  },
+  {
+    "productCode": "66fc0812-fb1d-4d35-b204-e441ee7e9ab3",
+    "productName": "50MB_Monthly Rec for 12 Months_ZONE-2_Bundle_CE"
+  },
+  {
+    "productCode": "007dec05-c26c-4c59-885a-d8cd10edb755",
+    "productName": "100MB_Monthly Rec for 12 Months_ZONE-5_Bundle_CE"
+  },
+  {
+    "productCode": "312267e3-9509-4c75-a7f6-3a7d9347165c",
+    "productName": "10MB_Monthly Recurring for 6 Month_ZONE-2_PPU_CE"
+  },
+  {
+    "productCode": "ae624747-1d26-4410-8d18-cb8f4f04364b",
+    "productName": "50MB_Monthly Rec for 12 Months_ZONE-5_Bundle_CE"
+  },
+  {
+    "productCode": "41768944-43e7-4c34-aee5-efb750e53d96",
+    "productName": "100MB_Monthly Rec for 12 Months_ZONE-6_Bundle_CE"
+  },
+  {
+    "productCode": "4d85cbbe-d0a2-40d7-8a05-a2ee9f3ef67a",
+    "productName": "100MB_Monthly Rec for 12 Months_ZONE-7_Bundle_CE"
+  },
+  {
+    "productCode": "674b362e-70a0-4928-833a-28a9425aa5b2",
+    "productName": "150MB_Monthly Rec for 12 Months_ZONE-5_Bundle_CE"
+  },
+  {
+    "productCode": "e0ef1e59-6396-4173-8942-9608c37d5ea3",
+    "productName": "30MB_Monthly Rec for 12 Months_ZONE-6_Bundle_CE"
+  },
+  {
+    "productCode": "ce49350a-5003-41cd-b008-d50c06e00d3f",
+    "productName": "5GB_Monthly Recurring Unlimited_Benin,Swaziland,Afghanistan&Ivory Coast_PPU_CE"
+  },
+  {
+    "productCode": "d3a25cb9-9fc5-4516-b56d-4af7df68660b",
+    "productName": "150MB_Monthly Recurring Unlimited_Benin,Swaziland,Afghanistan&Ivory Coast_PPU_CE"
+  },
+  {
+    "productCode": "0610e073-32ce-4487-b0a1-3c0925e970e2",
+    "productName": "800MB_Monthly Recurring Unlimited_Benin,Swaziland,Afghanistan&Ivory Coast_PPU_CE"
+  },
+  {
+    "productCode": "db81977e-2ee4-4859-a018-8cfd72223c69",
+    "productName": "10GB_Monthly Recurring Unlimited_Benin,Swaziland,Afghanistan&Ivory Coast_PPU_CE"
+  },
+  {
+    "productCode": "bcea9a1b-7f0c-4309-8e97-56233a899360",
+    "productName": "1GB_Monthly Recurring Unlimited_Benin,Swaziland,Afghanistan&Ivory Coast_PPU_CE"
+  },
+  {
+    "productCode": "5f9c1bce-5191-4da8-942f-64e6df0f6f46",
+    "productName": "50GB_Monthly Recurring Unlimited_Benin,Swaziland,Afghanistan&Ivory Coast_PPU_CE"
+  },
+  {
+    "productCode": "c4644338-e29a-4ad1-8c1a-6817ae9aab68",
+    "productName": "3GB_Monthly Recurring Unlimited_Benin,Swaziland,Afghanistan&Ivory Coast_PPU_CE"
+  },
+  {
+    "productCode": "0a80324d-f7e9-41f4-974c-20677ccea192",
+    "productName": "150MB_Monthly Recurring Unlimited_China & Zone-2_PPU_CE"
+  },
+  {
+    "productCode": "47812588-97f2-4fb4-beb7-4f9521a43c05",
+    "productName": "30MB_Monthly Recurring Unlimited_China_PPU_CE"
+  },
+  {
+    "productCode": "f4dec1ae-e16a-4655-a305-b7e215a3e699",
+    "productName": "150MB_Monthly Recurring Unlimited_ZONE-1-7,10,50_PPU_CE"
+  },
+  {
+    "productCode": "a34ac95f-1530-4ca9-a90f-2d5456ea0ffa",
+    "productName": "150MB_Monthly Recurring Unlimited_ZONE-7_PPU_CE"
+  },
+  {
+    "productCode": "c8b1ab05-edd3-4bb2-8b85-d5f589c35be0",
+    "productName": "150MB_Monthly Recurring Unlimited_ZONE-5_PPU_CE"
+  },
+  {
+    "productCode": "1ccbf61c-fb48-4843-922a-f18d33ece993",
+    "productName": "3GB_Monthly Recurring Unlimited_ZONE-7_PPU_CE"
+  },
+  {
+    "productCode": "d60dfaf4-f390-4f27-9c1b-824a08e6429e",
+    "productName": "3GB_Monthly Recurring Unlimited_ZONE-6_PPU_CE"
+  },
+  {
+    "productCode": "273626c1-1001-423a-bba6-ae5cb5ff5e7d",
+    "productName": "150MB_Monthly Recurring Unlimited_ZONE-6_PPU_CE"
+  },
+  {
+    "productCode": "61075f9c-9100-433f-8b33-7bf28d2eaea3",
+    "productName": "1GB_Monthly Recurring Unlimited_ZONE-7_PPU_CE"
+  },
+  {
+    "productCode": "8e8a439c-03b0-4bbe-9801-1a5e82d1b4c2",
+    "productName": "5GB_Monthly Recurring Unlimited_ZONE-7_PPU_CE"
+  },
+  {
+    "productCode": "aabb8e43-4326-45e6-af46-192bcad13b9b",
+    "productName": "1GB_Monthly Recurring Unlimited_ZONE-6_PPU_CE"
+  },
+  {
+    "productCode": "011c41ea-6e87-431b-8731-84d75c1f3a52",
+    "productName": "800MB_Monthly Recurring Unlimited_ZONE-7_PPU_CE"
+  },
+  {
+    "productCode": "48d3d470-2c95-419f-8af4-d373141caec0",
+    "productName": "800MB_Monthly Recurring Unlimited_ZONE-6_PPU_CE"
+  },
+  {
+    "productCode": "1c79e88f-00f6-438c-b731-1c2885c54898",
+    "productName": "5GB_Monthly Recurring Unlimited_ZONE-6_PPU_CE"
+  },
+  {
+    "productCode": "70543387-8652-4b4f-a7b4-67ba037a97d4",
+    "productName": "5GB_Monthly Recurring Unlimited_ZONE-50_PPU_CE"
+  },
+  {
+    "productCode": "f5e1434c-3b50-450f-bba8-cf31cb1555e5",
+    "productName": "1GB_Monthly Recurring Unlimited_ZONE-50_PPU_CE"
+  },
+  {
+    "productCode": "0e5dd223-aed3-4473-a404-edee3769cc93",
+    "productName": "3GB_Monthly Recurring Unlimited_ZONE-50_PPU_CE"
+  },
+  {
+    "productCode": "de99e90c-8f97-42c1-bc74-d7f97ca347aa",
+    "productName": "150MB_Monthly Recurring Unlimited_ZONE-50_PPU_CE"
+  },
+  {
+    "productCode": "3d6740ce-e2b0-4f70-860b-5828bef09e48",
+    "productName": "50GB_Monthly Recurring Unlimited_ZONE-50_PPU_CE"
+  },
+  {
+    "productCode": "2942996c-0462-41ae-8ced-79acffd2189a",
+    "productName": "800MB_Monthly Recurring Unlimited_ZONE-50_PPU_CE"
+  },
+  {
+    "productCode": "7dbabb22-de8d-41fc-b71c-66ef7d60aae5",
+    "productName": "500MB_Monthly Recurring Unlimited_ZONE-3_PPU_CE"
+  },
+  {
+    "productCode": "8f3b14c4-7c48-49ea-81f6-482fcc83fcf2",
+    "productName": "2GB_Monthly Recurring Unlimited_ZONE-4_PPU_CE"
+  },
+  {
+    "productCode": "fe868ebd-8b2f-4937-ade8-ab0ced9602e1",
+    "productName": "300MB_Monthly Recurring Unlimited_ZONE-7_PPU_CE"
+  },
+  {
+    "productCode": "56d68016-d9df-4fc5-b89e-dda21d47691d",
+    "productName": "150MB_Monthly Recurring Unlimited_ZONE-4_PPU_CE"
+  },
+  {
+    "productCode": "3d6448dc-a29d-4d72-8ece-1376db903ed7",
+    "productName": "2GB_Monthly Recurring Unlimited_ZONE-50_PPU_CE"
+  },
+  {
+    "productCode": "146c994d-f09e-43e8-8992-745291e5213e",
+    "productName": "300MB_Monthly Recurring Unlimited_ZONE-3_PPU_CE"
+  },
+  {
+    "productCode": "b3081352-b166-4808-80d4-a79111be3060",
+    "productName": "300MB_Monthly Recurring Unlimited_ZONE-50_PPU_CE"
+  },
+  {
+    "productCode": "857c19c1-8c46-4fde-9ba3-546094057c22",
+    "productName": "3GB_Monthly Recurring Unlimited_ZONE-5_PPU_CE"
+  },
+  {
+    "productCode": "b96b5818-a858-4d22-a715-745c1266508f",
+    "productName": "2GB_Monthly Recurring Unlimited_ZONE-5_PPU_CE"
+  },
+  {
+    "productCode": "e8806060-39ac-4f80-b48f-33a59148f547",
+    "productName": "300MB_Monthly Recurring Unlimited_ZONE-2_PPU_CE"
+  },
+  {
+    "productCode": "df16b953-52bd-420e-87a7-8ca0c7f14db4",
+    "productName": "2GB_Monthly Recurring Unlimited_ZONE-7_PPU_CE"
+  },
+  {
+    "productCode": "8e8bdbbc-4077-4de2-b1a2-b7e6619a960b",
+    "productName": "1GB_Monthly Recurring Unlimited_ZONE-5_PPU_CE"
+  },
+  {
+    "productCode": "15330e41-2623-40c7-bf96-0e7191fb5e91",
+    "productName": "2GB_Monthly Recurring Unlimited_ZONE-3_PPU_CE"
+  },
+  {
+    "productCode": "4a5cf147-28fe-41ff-8517-319e72f8c01c",
+    "productName": "2GB_Monthly Recurring Unlimited_ZONE-2_PPU_CE"
+  },
+  {
+    "productCode": "bc176b71-1e8c-4a96-b507-c6e2dd2b8721",
+    "productName": "500MB_Monthly Recurring Unlimited_ZONE-2_PPU_CE"
+  },
+  {
+    "productCode": "2280f047-743a-4506-8beb-1b585a588631",
+    "productName": "300MB_Monthly Recurring Unlimited_ZONE-1_PPU_CE"
+  },
+  {
+    "productCode": "6a7dfe6b-3a7f-4ab5-ae35-5027b88b41ca",
+    "productName": "150MB_Monthly Recurring Unlimited_ZONE-1_PPU_CE"
+  },
+  {
+    "productCode": "8a17ae05-d615-4083-aa7f-d0ffbb547ba4",
+    "productName": "300MB_Monthly Recurring Unlimited_ZONE-4_PPU_CE"
+  },
+  {
+    "productCode": "0f05fd94-f7ae-4a1f-a049-bfb05803669e",
+    "productName": "500MB_Monthly Recurring Unlimited_ZONE-50_PPU_CE"
+  },
+  {
+    "productCode": "a435884d-1b7e-4a59-8fa4-862a90906e35",
+    "productName": "300MB_Monthly Recurring Unlimited_ZONE-6_PPU_CE"
+  },
+  {
+    "productCode": "877b09a3-0861-41b8-a141-4719f21609bf",
+    "productName": "500MB_Monthly Recurring Unlimited_ZONE-6_PPU_CE"
+  },
+  {
+    "productCode": "f32151c9-0c40-4504-ae8a-e5c2c32c2e8a",
+    "productName": "500MB_Monthly Recurring Unlimited_ZONE-1_PPU_CE"
+  },
+  {
+    "productCode": "063c8908-1177-47b5-a857-ede1cf332161",
+    "productName": "5GB_Monthly Recurring Unlimited_ZONE-5_PPU_CE"
+  },
+  {
+    "productCode": "8ccc4ff2-cacd-4412-a908-ad1f329e3ca0",
+    "productName": "300MB_Monthly Recurring Unlimited_ZONE-5_PPU_CE"
+  },
+  {
+    "productCode": "0184fce5-5ed7-4b38-af6c-1f3a6e774a39",
+    "productName": "500MB_Monthly Recurring Unlimited_ZONE-7_PPU_CE"
+  },
+  {
+    "productCode": "2d0f35e9-2147-432a-b9d1-8466e2b8c899",
+    "productName": "150MB_Monthly Recurring Unlimited_ZONE-2_PPU_CE"
+  },
+  {
+    "productCode": "70ecb52a-8aa8-4485-b912-592322ce51d1",
+    "productName": "500MB_Monthly Recurring Unlimited_ZONE-5_PPU_CE"
+  },
+  {
+    "productCode": "c4568e07-6c09-4111-a5a1-7d45b69dde75",
+    "productName": "150MB_Monthly Recurring Unlimited_ZONE-3_PPU_CE"
+  },
+  {
+    "productCode": "22eddc77-8f8d-477d-8558-75f2459bc743",
+    "productName": "10GB_Monthly Recurring Unlimited_ZONE-50_PPU_CE"
+  },
+  {
+    "productCode": "93a50729-5bef-4112-9aed-c7345f900718",
+    "productName": "2GB_Monthly Recurring Unlimited_ZONE-1_PPU_CE"
+  },
+  {
+    "productCode": "f42d508c-cbd4-453a-989a-13bd4f41ff3a",
+    "productName": "500MB_Monthly Recurring Unlimited_ZONE-4_PPU_CE"
+  },
+  {
+    "productCode": "03cbad93-7d42-48e0-a2a7-f2e65dbd4112",
+    "productName": "2GB_Monthly Recurring Unlimited_ZONE-6_PPU_CE"
+  },
+  {
+    "productCode": "d644571a-15bf-44be-96e1-6b5163df671e",
+    "productName": "100MB_For Two Months_China_PPU_CE"
+  },
+  {
+    "productCode": "7754b62b-fc0a-4066-88b8-9fca33fbaecc",
+    "productName": "50MB_For One Month_China_PPU_CE"
+  },
+  {
+    "productCode": "9254dc55-36ac-45ca-befc-2a64d88843e1",
+    "productName": "150MB_For Three Months_China_PPU_CE"
+  },
+  {
+    "productCode": "00a5305d-d85e-4901-94e3-4385fb5f8a99",
+    "productName": "Starter Kit"
+  }
+]

@@ -1,0 +1,52 @@
+{
+  "name": "iot-cmp-api-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node src/server.js",
+    "start": "node src/server.js",
+    "worker": "node src/worker.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start:ts": "node dist/server.js",
+    "test": "vitest run",
+    "test:integration:phase12": "vitest run -t phase12:integration",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "check": "node -e \"import('./src/app.js').then(({createApp})=>{createApp(); console.log('OK')})\"",
+    "smoke": "node tools/api_smoke_test.js",
+    "e2e": "node tools/e2e_demo.js",
+    "e2e:wx": "node tools/e2e_demo_wx.js",
+    "e2e:check": "node tools/e2e_precheck.js",
+    "create-client": "node tools/create_api_client.js",
+    "gen:ts-fetch:docker": "docker run --rm -v ${PWD}:/local openapitools/openapi-generator-cli generate -i http://127.0.0.1:3000/v1/openapi.yaml -g typescript-fetch -o /local/gen/ts-fetch --additional-properties supportsES6=true,useSingleRequestParameter=true,withoutPrefixEnums=true",
+    "gen:ts-axios:docker": "docker run --rm -v ${PWD}:/local openapitools/openapi-generator-cli generate -i http://127.0.0.1:3000/v1/openapi.yaml -g typescript-axios -o /local/gen/ts-axios --additional-properties supportsES6=true,useSingleRequestParameter=true,withoutPrefixEnums=true",
+    "gen:ts-fetch:docker:win": "docker run --rm -v %cd%:/local openapitools/openapi-generator-cli generate -i http://127.0.0.1:3000/v1/openapi.yaml -g typescript-fetch -o /local/gen/ts-fetch --additional-properties supportsES6=true,useSingleRequestParameter=true,withoutPrefixEnums=true",
+    "gen:ts-axios:docker:win": "docker run --rm -v %cd%:/local openapitools/openapi-generator-cli generate -i http://127.0.0.1:3000/v1/openapi.yaml -g typescript-axios -o /local/gen/ts-axios --additional-properties supportsES6=true,useSingleRequestParameter=true,withoutPrefixEnums=true",
+    "gen:ts-fetch:npx": "npx openapi-generator-cli generate -i http://127.0.0.1:3000/v1/openapi.yaml -g typescript-fetch -o gen/ts-fetch --additional-properties supportsES6=true,useSingleRequestParameter=true,withoutPrefixEnums=true",
+    "gen:ts-axios:npx": "npx openapi-generator-cli generate -i http://127.0.0.1:3000/v1/openapi.yaml -g typescript-axios -o gen/ts-axios --additional-properties supportsES6=true,useSingleRequestParameter=true,withoutPrefixEnums=true",
+    "gen:ts-fetch:node-file": "node node_modules/@openapitools/openapi-generator-cli/main.js generate -i iot-cmp-api.yaml -g typescript-fetch -o gen/ts-fetch --additional-properties supportsES6=true,useSingleRequestParameter=true,withoutPrefixEnums=true",
+    "gen:ts-fetch:node-http": "node src/server.js & node node_modules/@openapitools/openapi-generator-cli/main.js generate -i http://127.0.0.1:3000/v1/openapi.yaml -g typescript-fetch -o gen/ts-fetch --additional-properties supportsES6=true,useSingleRequestParameter=true,withoutPrefixEnums=true",
+    "build:openapi-artifact": "node tools/build_openapi_artifact.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "fastify": "^5.7.4",
+    "node-cron": "^4.2.1",
+    "swagger-ui-dist": "^5.11.0"
+  },
+  "devDependencies": {
+    "@openapitools/openapi-generator-cli": "^2.28.0",
+    "@types/node": "^22.13.0",
+    "eslint": "^10.0.2",
+    "openapi-diff": "^0.24.1",
+    "openapi-typescript": "^6.7.6",
+    "openapi-typescript-codegen": "^0.30.0",
+    "pg": "^8.11.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3",
+    "yaml": "^2.8.0",
+    "vitest": "^4.0.18"
+  }
+}

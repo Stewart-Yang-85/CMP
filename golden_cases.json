@@ -1,0 +1,308 @@
+{
+  "meta": {
+    "name": "CMP Billing Golden Cases",
+    "source": "CMP_Requirements_Workshop.md#10",
+    "currency": "USD",
+    "unit": {
+      "data": "KB",
+      "mbToKb": 1024,
+      "rounding": "CEIL"
+    }
+  },
+  "catalog": {
+    "packages": {
+      "global_1gb": {
+        "name": "Global 1GB",
+        "kind": "MAIN",
+        "quotaKb": 1048576,
+        "coverage": {
+          "type": "GLOBAL"
+        },
+        "overageRatePerKb": 0.01,
+        "payg": {
+          "zones": {
+            "ZONE4": {
+              "ratePerKb": 0.02,
+              "mccmnc": ["424-02"]
+            }
+          }
+        }
+      },
+      "europe_1gb": {
+        "name": "Europe 1GB",
+        "kind": "MAIN",
+        "quotaKb": 1048576,
+        "coverage": {
+          "type": "MCCMNC_ALLOWLIST",
+          "mccmnc": ["208-01", "262-02"]
+        },
+        "overageRatePerKb": 0.01,
+        "payg": {
+          "zones": {
+            "ZONE4": {
+              "ratePerKb": 0.02,
+              "mccmnc": ["424-02"]
+            }
+          }
+        }
+      },
+      "france_500mb": {
+        "name": "France 500MB",
+        "kind": "ADD_ON",
+        "quotaKb": 512000,
+        "coverage": {
+          "type": "MCCMNC_ALLOWLIST",
+          "mccmnc": ["208-01"]
+        }
+      },
+      "eu_uk_800mb": {
+        "name": "EU+UK 800MB",
+        "kind": "ADD_ON",
+        "quotaKb": 819200,
+        "coverage": {
+          "type": "MCCMNC_ALLOWLIST",
+          "mccmnc": ["208-01", "262-02", "234-15"]
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "U-01",
+      "type": "usage_match",
+      "description": "Main plan should match when coverage includes visited network",
+      "context": {
+        "sim": {"iccid": "89860000000000000000"},
+        "subscriptions": [
+          {"package": "global_1gb", "kind": "MAIN"}
+        ],
+        "usage": {"visitedMccMnc": "234-15", "totalMb": 100}
+      },
+      "expect": {
+        "match": {"package": "global_1gb"},
+        "inProfile": true,
+        "deductFromPackage": "global_1gb",
+        "charge": {"type": "IN_PACKAGE", "amount": 0.0},
+        "alerts": []
+      }
+    },
+    {
+      "id": "U-02",
+      "type": "usage_match",
+      "description": "Add-on France should be chosen when in France",
+      "context": {
+        "sim": {"iccid": "89860000000000000001"},
+        "subscriptions": [
+          {"package": "europe_1gb", "kind": "MAIN"},
+          {"package": "france_500mb", "kind": "ADD_ON"}
+        ],
+        "usage": {"visitedMccMnc": "208-01", "totalMb": 100}
+      },
+      "expect": {
+        "match": {"package": "france_500mb"},
+        "inProfile": true,
+        "deductFromPackage": "france_500mb",
+        "charge": {"type": "IN_PACKAGE", "amount": 0.0},
+        "alerts": []
+      }
+    },
+    {
+      "id": "U-03",
+      "type": "usage_match",
+      "description": "Fallback to main plan when add-on does not cover",
+      "context": {
+        "sim": {"iccid": "89860000000000000002"},
+        "subscriptions": [
+          {"package": "europe_1gb", "kind": "MAIN"},
+          {"package": "france_500mb", "kind": "ADD_ON"}
+        ],
+        "usage": {"visitedMccMnc": "262-02", "totalMb": 100}
+      },
+      "expect": {
+        "match": {"package": "europe_1gb"},
+        "inProfile": true,
+        "deductFromPackage": "europe_1gb",
+        "charge": {"type": "IN_PACKAGE", "amount": 0.0},
+        "alerts": []
+      }
+    },
+    {
+      "id": "U-04",
+      "type": "usage_match",
+      "description": "If multiple add-ons match, choose narrower coverage",
+      "context": {
+        "sim": {"iccid": "89860000000000000003"},
+        "subscriptions": [
+          {"package": "europe_1gb", "kind": "MAIN"},
+          {"package": "france_500mb", "kind": "ADD_ON"},
+          {"package": "eu_uk_800mb", "kind": "ADD_ON"}
+        ],
+        "usage": {"visitedMccMnc": "208-01", "totalMb": 100}
+      },
+      "expect": {
+        "match": {"package": "france_500mb"},
+        "inProfile": true,
+        "deductFromPackage": "france_500mb",
+        "charge": {"type": "IN_PACKAGE", "amount": 0.0},
+        "alerts": []
+      }
+    },
+    {
+      "id": "U-07",
+      "type": "overage_when_exhausted",
+      "description": "When quota is exhausted, charge overage for the excess",
+      "context": {
+        "sim": {"iccid": "89860000000000000006"},
+        "subscriptions": [
+          {"package": "global_1gb", "kind": "MAIN"}
+        ],
+        "quota": {"remainingKb": 0},
+        "usage": {"visitedMccMnc": "234-15", "totalMb": 10}
+      },
+      "expect": {
+        "match": {"package": "global_1gb"},
+        "inProfile": true,
+        "deductFromPackage": "global_1gb",
+        "charge": {"type": "OVERAGE", "currency": "USD", "ratePerKb": 0.01, "chargedKb": 10240, "amount": 102.4},
+        "alerts": []
+      }
+    },
+    {
+      "id": "U-08",
+      "type": "inactive_usage",
+      "description": "Usage during DEACTIVATED should be treated as out-of-profile and alerted",
+      "context": {
+        "sim": {"iccid": "89860000000000000007", "status": "DEACTIVATED"},
+        "subscriptions": [
+          {"package": "europe_1gb", "kind": "MAIN"}
+        ],
+        "usage": {"visitedMccMnc": "424-02", "totalMb": 10}
+      },
+      "expect": {
+        "match": {"package": null},
+        "inProfile": false,
+        "deductFromPackage": null,
+        "charge": {"type": "PAYG", "currency": "USD", "ratePerKb": 0.02, "chargedKb": 10240, "amount": 204.8},
+        "alerts": ["INACTIVE_USAGE", "UNEXPECTED_ROAMING"]
+      }
+    },
+    {
+      "id": "U-05",
+      "type": "payg_out_of_profile",
+      "description": "Out-of-Profile should not deduct bundle, charge via PAYG",
+      "context": {
+        "sim": {"iccid": "89860000000000000004"},
+        "subscriptions": [
+          {"package": "europe_1gb", "kind": "MAIN"}
+        ],
+        "usage": {"visitedMccMnc": "424-02", "totalMb": 10}
+      },
+      "expect": {
+        "match": {"package": null},
+        "inProfile": false,
+        "deductFromPackage": null,
+        "charge": {"type": "PAYG", "currency": "USD", "ratePerKb": 0.02, "chargedKb": 10240, "amount": 204.8},
+        "alerts": ["UNEXPECTED_ROAMING"]
+      }
+    },
+    {
+      "id": "U-06",
+      "type": "payg_out_of_profile",
+      "description": "Out-of-Profile with missing PAYG rule should block or raise high-severity alert",
+      "context": {
+        "sim": {"iccid": "89860000000000000005"},
+        "subscriptions": [
+          {"package": "europe_1gb", "kind": "MAIN"}
+        ],
+        "usage": {"visitedMccMnc": "999-99", "totalMb": 10}
+      },
+      "expect": {
+        "match": {"package": null},
+        "inProfile": false,
+        "deductFromPackage": null,
+        "charge": {"type": "PAYG_RULE_MISSING", "amount": null},
+        "alerts": ["UNEXPECTED_ROAMING", "PAYG_RULE_MISSING"]
+      }
+    },
+    {
+      "id": "M-01",
+      "type": "monthly_fee_high_water",
+      "description": "If any ACTIVATED occurs during the cycle, charge full monthly fee",
+      "context": {
+        "monthlyFee": 10.0,
+        "deactivatedMonthlyFee": 1.0,
+        "stateTrajectory": [
+          {"status": "ACTIVATED", "from": "2026-02-10T00:00:00Z", "to": "2026-02-20T00:00:00Z"},
+          {"status": "DEACTIVATED", "from": "2026-02-20T00:00:00Z", "to": "2026-03-01T00:00:00Z"}
+        ]
+      },
+      "expect": {"chargeType": "MONTHLY_FEE", "amount": 10.0}
+    },
+    {
+      "id": "M-02",
+      "type": "monthly_fee_high_water",
+      "description": "If never ACTIVATED but DEACTIVATED occurs, charge deactivated monthly fee",
+      "context": {
+        "monthlyFee": 10.0,
+        "deactivatedMonthlyFee": 1.0,
+        "stateTrajectory": [
+          {"status": "DEACTIVATED", "from": "2026-02-01T00:00:00Z", "to": "2026-03-01T00:00:00Z"}
+        ]
+      },
+      "expect": {"chargeType": "DEACTIVATED_MONTHLY_FEE", "amount": 1.0}
+    },
+    {
+      "id": "M-03",
+      "type": "monthly_fee_high_water",
+      "description": "If no ACTIVATED/DEACTIVATED occurs, charge nothing",
+      "context": {
+        "monthlyFee": 10.0,
+        "deactivatedMonthlyFee": 1.0,
+        "stateTrajectory": [
+          {"status": "INVENTORY", "from": "2026-02-01T00:00:00Z", "to": "2026-03-01T00:00:00Z"}
+        ]
+      },
+      "expect": {"chargeType": "NO_CHARGE", "amount": 0.0}
+    },
+    {
+      "id": "M-04",
+      "type": "monthly_fee_high_water",
+      "description": "Even 1 second ACTIVATED triggers full monthly fee",
+      "context": {
+        "monthlyFee": 10.0,
+        "deactivatedMonthlyFee": 1.0,
+        "stateTrajectory": [
+          {"status": "ACTIVATED", "from": "2026-02-01T00:00:01Z", "to": "2026-02-01T00:00:02Z"},
+          {"status": "DEACTIVATED", "from": "2026-02-01T00:00:02Z", "to": "2026-03-01T00:00:00Z"}
+        ]
+      },
+      "expect": {"chargeType": "MONTHLY_FEE", "amount": 10.0}
+    },
+    {
+      "id": "A-01",
+      "type": "late_cdr_adjustment",
+      "description": "Late CDR in a published period creates adjustment draft",
+      "context": {
+        "bill": {"period": "2026-02", "status": "PUBLISHED"},
+        "lateUsage": {"iccid": "89860000000000000004", "visitedMccMnc": "424-02", "totalMb": 10, "inputRef": "file_2026-02.csv:123"}
+      },
+      "expect": {
+        "adjustment": {"status": "DRAFT", "type": "DEBIT", "currency": "USD"},
+        "alerts": []
+      }
+    },
+    {
+      "id": "A-02",
+      "type": "late_cdr_adjustment",
+      "description": "If bill is still GENERATED, late usage should be included in-period (no adjustment)",
+      "context": {
+        "bill": {"period": "2026-02", "status": "GENERATED"},
+        "lateUsage": {"iccid": "89860000000000000004", "visitedMccMnc": "424-02", "totalMb": 10, "inputRef": "file_2026-02.csv:124"}
+      },
+      "expect": {
+        "adjustment": null,
+        "alerts": []
+      }
+    }
+  ]
+}

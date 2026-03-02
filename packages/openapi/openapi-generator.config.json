@@ -1,0 +1,10 @@
+{
+  "generatorName": "typescript-fetch",
+  "inputSpec": "openapi.yaml",
+  "outputDir": "gen/ts-fetch",
+  "additionalProperties": {
+    "supportsES6": true,
+    "useSingleRequestParameter": true,
+    "withoutPrefixEnums": true
+  }
+}

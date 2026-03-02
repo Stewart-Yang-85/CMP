@@ -1,0 +1,38 @@
+name: publish-openapi-artifact
+
+on:
+  push:
+    tags:
+      - "openapi-v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      NPM_REGISTRY_URL: ${{ secrets.NPM_REGISTRY_URL }}
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run build:openapi-artifact
+      - run: |
+          mkdir -p .tmp
+          PREV_TAG=$(git tag --list "openapi-v*" --sort=-v:refname | sed -n '2p')
+          if [ -n "$PREV_TAG" ]; then
+            git show "$PREV_TAG:iot-cmp-api.yaml" > .tmp/openapi-prev.yaml
+            npx openapi-diff .tmp/openapi-prev.yaml iot-cmp-api.yaml
+          else
+            echo "No previous openapi tag"
+          fi
+      - run: |
+          REGISTRY_URL=${NPM_REGISTRY_URL:-https://registry.npmjs.org/}
+          npm config set registry "$REGISTRY_URL"
+          REGISTRY_HOST=$(node -e "const u=new URL(process.env.REGISTRY_URL); console.log(u.host)")
+          npm config set "//$REGISTRY_HOST/:_authToken" "$NPM_TOKEN"
+          npm publish ./packages/openapi --access restricted

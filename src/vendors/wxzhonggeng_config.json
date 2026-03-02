@@ -1,0 +1,104 @@
+{
+  "apiBaseUrl": "https://connect.expeditioniot.com",
+  "auth": {
+    "tokenEndpoint": "/sim-user-center/api/login",
+    "tokenField": "data.token",
+    "tokenExpirySeconds": 3600
+  },
+  "endpoints": {
+    "getUsage": {
+      "path": "/sim-card/card/card-info/api/queryCdrFlowByDate",
+      "method": "POST",
+      "description": "Get daily usage for a list of ICCIDs",
+      "requestBodyTemplate": {
+        "iccids": ["{{iccid}}"],
+        "date": "{{date}}"
+      },
+      "responseMapping": {
+        "uplinkKb": "data.usedFlow",
+        "downlinkKb": "data.usedFlow"
+      }
+    },
+    "getSimStatus": {
+      "path": "/sim-card-sale/card/card-info/api/queryInfo",
+      "method": "POST",
+      "description": "Get SIM status and basic info",
+      "requestBodyTemplate": {
+        "iccid": "{{iccid}}"
+      },
+      "responseMapping": {
+        "status": "data.ispType",
+        "imsi": "data.imsi",
+        "msisdn": "data.msisdn"
+      }
+    },
+    "getSimInfoBatch": {
+      "path": "/sim-card-sale/card/card-info/api/simCard",
+      "method": "POST",
+      "description": "Get SIM info batch",
+      "requestBodyTemplate": {
+        "iccids": ["{{iccids}}"]
+      }
+    },
+    "getSimInfoSync": {
+      "path": "/sim-card-sale/card/card-info/api/simCardSync",
+      "method": "POST",
+      "description": "Sync SIM info batch",
+      "requestBodyTemplate": {
+        "pageSize": "{{pageSize}}",
+        "pageIndex": "{{pageIndex}}",
+        "status": "{{status}}"
+      }
+    },
+    "getSimCardStatus": {
+      "path": "/sim-card-sale/card/card-info/api/queryCardStatus",
+      "method": "POST",
+      "description": "Get SIM card status",
+      "requestBodyTemplate": {
+        "iccid": "{{iccid}}"
+      }
+    },
+    "getSimStatusBatch": {
+      "path": "/sim-card-sale/card/card-info/api/queryStatusBatch",
+      "method": "POST",
+      "description": "Get SIM status batch",
+      "requestBodyTemplate": {
+        "iccids": ["{{iccids}}"]
+      }
+    },
+    "getSimFlow": {
+      "path": "/sim-card-sale/card/card-info/api/queryFlow",
+      "method": "POST",
+      "description": "Get SIM flow",
+      "requestBodyTemplate": {
+        "iccid": "{{iccid}}"
+      }
+    },
+    "getSimFlowsBatch": {
+      "path": "/sim-card-sale/card/card-info/api/queryFlowsBatch",
+      "method": "POST",
+      "description": "Get SIM flow batch",
+      "requestBodyTemplate": {
+        "iccids": ["{{iccids}}"]
+      }
+    },
+    "getUsageByMonth": {
+      "path": "/sim-card/card/card-info/api/queryCdrFlowByMonth",
+      "method": "POST",
+      "description": "Get monthly usage for a list of ICCIDs",
+      "requestBodyTemplate": {
+        "iccids": ["{{iccids}}"],
+        "month": "{{month}}"
+      }
+    },
+    "updateCardStatus": {
+      "path": "/sim-card-sale/card/card-info/api/updateCardStatus",
+      "method": "POST",
+      "description": "Update SIM card status",
+      "requestBodyTemplate": {
+        "iccid": "{{iccid}}",
+        "operation": "{{operation}}"
+      }
+    }
+  }
+}

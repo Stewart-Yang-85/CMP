@@ -1,0 +1,196 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900">
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#333"/>
+    </marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="2" dy="2" stdDeviation="3" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="100%" height="100%" fill="#f8f9fa"/>
+  
+  <!-- Header -->
+  <rect x="0" y="0" width="1200" height="60" fill="#2c3e50"/>
+  <text x="600" y="40" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" fill="white" font-weight="bold">CMP 资费、计费与出账口径 (Chapter 3 Overview)</text>
+
+  <!-- Section 1: Data Ingestion (Top) -->
+  <g transform="translate(50, 80)">
+    <rect x="0" y="0" width="1100" height="120" rx="10" fill="#e8f4f8" stroke="#3498db" stroke-width="2"/>
+    <text x="20" y="30" font-family="Arial" font-size="16" font-weight="bold" fill="#2980b9">1. 数据采集与权威源 (Data Ingestion)</text>
+    
+    <!-- Supplier CMP -->
+    <rect x="50" y="50" width="200" height="50" rx="5" fill="#fff" stroke="#7f8c8d" stroke-width="2" filter="url(#shadow)"/>
+    <text x="150" y="70" text-anchor="middle" font-family="Arial" font-size="14" font-weight="bold">上游供应商 CMP</text>
+    <text x="150" y="90" text-anchor="middle" font-family="Arial" font-size="12" fill="#7f8c8d">(权威源: 状态/用量/话单)</text>
+
+    <!-- Arrow -->
+    <line x1="250" y1="75" x2="350" y2="75" stroke="#333" stroke-width="2" marker-end="url(#arrowhead)"/>
+    <text x="300" y="65" text-anchor="middle" font-family="Arial" font-size="12">API / CDR / Notification</text>
+
+    <!-- Reseller System -->
+    <rect x="350" y="50" width="200" height="50" rx="5" fill="#fff" stroke="#27ae60" stroke-width="2" filter="url(#shadow)"/>
+    <text x="450" y="70" text-anchor="middle" font-family="Arial" font-size="14" font-weight="bold">Reseller System</text>
+    <text x="450" y="90" text-anchor="middle" font-family="Arial" font-size="12" fill="#7f8c8d">(镜像/审计/计费)</text>
+    
+    <!-- Principles -->
+    <g transform="translate(600, 50)">
+        <text x="0" y="15" font-family="Arial" font-size="12" fill="#333">• 权威源原则：以上游数据为准，允许短期差异，最终一致</text>
+        <text x="0" y="35" font-family="Arial" font-size="12" fill="#333">• 追溯性：用量明细 -> 资费版本 -> 计算结果</text>
+        <text x="0" y="55" font-family="Arial" font-size="12" fill="#333">• 批发vs零售：仅计算企业侧零售资费，不处理上游批发成本</text>
+    </g>
+  </g>
+
+  <!-- Section 2: Usage Rating Waterfall (Middle Left) -->
+  <g transform="translate(50, 220)">
+    <rect x="0" y="0" width="540" height="400" rx="10" fill="#fff8e1" stroke="#f39c12" stroke-width="2"/>
+    <text x="20" y="30" font-family="Arial" font-size="16" font-weight="bold" fill="#d35400">2. 用量归集与计费瀑布 (Rating Waterfall)</text>
+    
+    <g transform="translate(30, 60)">
+        <!-- Input -->
+        <circle cx="240" cy="0" r="20" fill="#3498db"/>
+        <text x="240" y="5" text-anchor="middle" fill="white" font-size="10">Usage</text>
+        <line x1="240" y1="20" x2="240" y2="50" stroke="#333" stroke-width="2" marker-end="url(#arrowhead)"/>
+
+        <!-- Step 1 -->
+        <rect x="120" y="50" width="240" height="40" rx="5" fill="#fff" stroke="#333"/>
+        <text x="240" y="75" text-anchor="middle" font-family="Arial" font-size="12">1. 时间窗匹配 (Active Subscriptions)</text>
+        <line x1="240" y1="90" x2="240" y2="120" stroke="#333" stroke-width="2" marker-end="url(#arrowhead)"/>
+
+        <!-- Step 2 -->
+        <rect x="120" y="120" width="240" height="40" rx="5" fill="#fff" stroke="#333"/>
+        <text x="240" y="145" text-anchor="middle" font-family="Arial" font-size="12">2. 区域匹配 (Roaming Profile Match)</text>
+        <line x1="240" y1="160" x2="240" y2="190" stroke="#333" stroke-width="2" marker-end="url(#arrowhead)"/>
+
+        <!-- Decision Diamond -->
+        <path d="M 240 190 L 300 230 L 240 270 L 180 230 Z" fill="#ecf0f1" stroke="#333"/>
+        <text x="240" y="235" text-anchor="middle" font-family="Arial" font-size="10">匹配结果?</text>
+
+        <!-- Path 1: Add-on -->
+        <line x1="180" y1="230" x2="80" y2="230" stroke="#333" stroke-width="2"/>
+        <line x1="80" y1="230" x2="80" y2="280" stroke="#333" stroke-width="2" marker-end="url(#arrowhead)"/>
+        <rect x="20" y="280" width="120" height="50" rx="5" fill="#d5f5e3" stroke="#27ae60"/>
+        <text x="80" y="300" text-anchor="middle" font-family="Arial" font-size="12" font-weight="bold">Priority 1: Add-on</text>
+        <text x="80" y="320" text-anchor="middle" font-family="Arial" font-size="10">(范围最小优先)</text>
+
+        <!-- Path 2: Main Plan -->
+        <line x1="240" y1="270" x2="240" y2="280" stroke="#333" stroke-width="2" marker-end="url(#arrowhead)"/>
+        <rect x="180" y="280" width="120" height="50" rx="5" fill="#d5f5e3" stroke="#27ae60"/>
+        <text x="240" y="300" text-anchor="middle" font-family="Arial" font-size="12" font-weight="bold">Priority 2: Main Plan</text>
+        <text x="240" y="320" text-anchor="middle" font-family="Arial" font-size="10">(主套餐兜底)</text>
+
+        <!-- Path 3: Out of Profile -->
+        <line x1="300" y1="230" x2="400" y2="230" stroke="#333" stroke-width="2"/>
+        <line x1="400" y1="230" x2="400" y2="280" stroke="#333" stroke-width="2" marker-end="url(#arrowhead)"/>
+        <rect x="340" y="280" width="120" height="50" rx="5" fill="#fadbd8" stroke="#c0392b"/>
+        <text x="400" y="300" text-anchor="middle" font-family="Arial" font-size="12" font-weight="bold">Out-of-Profile</text>
+        <text x="400" y="320" text-anchor="middle" font-family="Arial" font-size="10">(Zone-based PAYG)</text>
+        
+        <!-- Logic Note -->
+        <text x="400" y="345" text-anchor="middle" font-family="Arial" font-size="10" fill="#c0392b">不扣减配额 + 告警</text>
+    </g>
+  </g>
+
+  <!-- Section 3: Monthly Fee Logic (Middle Right) -->
+  <g transform="translate(610, 220)">
+    <rect x="0" y="0" width="540" height="400" rx="10" fill="#e8eaf6" stroke="#3f51b5" stroke-width="2"/>
+    <text x="20" y="30" font-family="Arial" font-size="16" font-weight="bold" fill="#303f9f">3. 月租费高水位规则 (High-Water Mark)</text>
+
+    <!-- Timeline 1: Full Fee -->
+    <g transform="translate(30, 70)">
+        <text x="0" y="0" font-family="Arial" font-size="12" font-weight="bold">Case 1: 只要出现过 ACTIVATED (即使只有1秒)</text>
+        <line x1="0" y1="20" x2="400" y2="20" stroke="#999" stroke-width="2"/>
+        <!-- Active Segment -->
+        <line x1="100" y1="20" x2="200" y2="20" stroke="#27ae60" stroke-width="8"/>
+        <text x="150" y="40" text-anchor="middle" font-family="Arial" font-size="10" fill="#27ae60">Active</text>
+        <!-- Result -->
+        <rect x="420" y="5" width="100" height="30" rx="5" fill="#27ae60" stroke="none"/>
+        <text x="470" y="25" text-anchor="middle" font-family="Arial" font-size="12" fill="white" font-weight="bold">全额月租</text>
+    </g>
+
+    <!-- Timeline 2: Suspended Fee -->
+    <g transform="translate(30, 140)">
+        <text x="0" y="0" font-family="Arial" font-size="12" font-weight="bold">Case 2: 从未 ACTIVATED，但有过 DEACTIVATED</text>
+        <line x1="0" y1="20" x2="400" y2="20" stroke="#999" stroke-width="2"/>
+        <!-- Deactive Segment -->
+        <line x1="0" y1="20" x2="400" y2="20" stroke="#e67e22" stroke-width="8" stroke-dasharray="10,5"/>
+        <text x="200" y="40" text-anchor="middle" font-family="Arial" font-size="10" fill="#e67e22">Deactivated (e.g. Suspended/Stock)</text>
+        <!-- Result -->
+        <rect x="420" y="5" width="100" height="30" rx="5" fill="#e67e22" stroke="none"/>
+        <text x="470" y="25" text-anchor="middle" font-family="Arial" font-size="12" fill="white" font-weight="bold">停机保号费</text>
+    </g>
+
+    <!-- Timeline 3: No Charge -->
+    <g transform="translate(30, 210)">
+        <text x="0" y="0" font-family="Arial" font-size="12" font-weight="bold">Case 3: 仅 Inventory / Test Ready</text>
+        <line x1="0" y1="20" x2="400" y2="20" stroke="#999" stroke-width="2"/>
+        <!-- Inventory Segment -->
+        <line x1="0" y1="20" x2="400" y2="20" stroke="#95a5a6" stroke-width="8"/>
+        <text x="200" y="40" text-anchor="middle" font-family="Arial" font-size="10" fill="#7f8c8d">Inventory / Test Ready</text>
+        <!-- Result -->
+        <rect x="420" y="5" width="100" height="30" rx="5" fill="#95a5a6" stroke="none"/>
+        <text x="470" y="25" text-anchor="middle" font-family="Arial" font-size="12" fill="white" font-weight="bold">无费用</text>
+    </g>
+
+    <!-- Key Principle -->
+    <rect x="30" y="280" width="480" height="90" rx="5" fill="#fff" stroke="#3f51b5" stroke-dasharray="5,5"/>
+    <text x="270" y="300" text-anchor="middle" font-family="Arial" font-size="12" font-weight="bold" fill="#3f51b5">核心原则：Pay for Value</text>
+    <text x="50" y="325" font-family="Arial" font-size="11" fill="#333">1. 只要占用过“活跃资源”（Active），即付全费。</text>
+    <text x="50" y="345" font-family="Arial" font-size="11" fill="#333">2. 仅占用“号码资源”（Deactivated），付保号费。</text>
+    <text x="50" y="365" font-family="Arial" font-size="11" fill="#333">3. 费用互斥：优先收月租费，不会重复收取。</text>
+  </g>
+
+  <!-- Section 4: Product Types (Bottom) -->
+  <g transform="translate(50, 640)">
+    <rect x="0" y="0" width="1100" height="200" rx="10" fill="#f4ecf7" stroke="#8e44ad" stroke-width="2"/>
+    <text x="20" y="30" font-family="Arial" font-size="16" font-weight="bold" fill="#8e44ad">4. 资费计划类型 (Price Plan Types)</text>
+    
+    <!-- Type 1: SIM Dependent -->
+    <g transform="translate(40, 50)">
+        <rect x="0" y="0" width="220" height="130" rx="5" fill="#fff" stroke="#8e44ad"/>
+        <text x="110" y="25" text-anchor="middle" font-family="Arial" font-size="12" font-weight="bold">SIM Dependent Bundle</text>
+        <text x="110" y="40" text-anchor="middle" font-family="Arial" font-size="10" fill="#666">(前向流量池)</text>
+        <line x1="20" y1="50" x2="200" y2="50" stroke="#eee" stroke-width="1"/>
+        <text x="20" y="70" font-family="Arial" font-size="10">• Pool = Σ (Active SIMs * Quota)</text>
+        <text x="20" y="90" font-family="Arial" font-size="10">• 动态池：随卡量自动涨落</text>
+        <text x="20" y="110" font-family="Arial" font-size="10">• 适合：弹性增长业务</text>
+    </g>
+
+    <!-- Type 2: Fixed Bundle -->
+    <g transform="translate(300, 50)">
+        <rect x="0" y="0" width="220" height="130" rx="5" fill="#fff" stroke="#8e44ad"/>
+        <text x="110" y="25" text-anchor="middle" font-family="Arial" font-size="12" font-weight="bold">Fixed Bundle</text>
+        <text x="110" y="40" text-anchor="middle" font-family="Arial" font-size="10" fill="#666">(后向流量池)</text>
+        <line x1="20" y1="50" x2="200" y2="50" stroke="#eee" stroke-width="1"/>
+        <text x="20" y="70" font-family="Arial" font-size="10">• Pool = Fixed Total Quota</text>
+        <text x="20" y="90" font-family="Arial" font-size="10">• 静态池：不随卡量变化</text>
+        <text x="20" y="110" font-family="Arial" font-size="10">• 适合：固定预算/大客户</text>
+    </g>
+
+    <!-- Type 3: Tiered Pricing -->
+    <g transform="translate(560, 50)">
+        <rect x="0" y="0" width="220" height="130" rx="5" fill="#fff" stroke="#8e44ad"/>
+        <text x="110" y="25" text-anchor="middle" font-family="Arial" font-size="12" font-weight="bold">Tiered Volume</text>
+        <text x="110" y="40" text-anchor="middle" font-family="Arial" font-size="10" fill="#666">(阶梯计费)</text>
+        <line x1="20" y1="50" x2="200" y2="50" stroke="#eee" stroke-width="1"/>
+        <text x="20" y="70" font-family="Arial" font-size="10">• 费率随用量分段累进</text>
+        <text x="20" y="90" font-family="Arial" font-size="10">• 0-10GB: $A; 10-20GB: $B</text>
+        <text x="20" y="110" font-family="Arial" font-size="10">• 适合：用量波动大</text>
+    </g>
+    
+    <!-- Type 4: One-time -->
+    <g transform="translate(820, 50)">
+        <rect x="0" y="0" width="220" height="130" rx="5" fill="#fff" stroke="#8e44ad"/>
+        <text x="110" y="25" text-anchor="middle" font-family="Arial" font-size="12" font-weight="bold">One-time / Add-on</text>
+        <text x="110" y="40" text-anchor="middle" font-family="Arial" font-size="10" fill="#666">(一次性包)</text>
+        <line x1="20" y1="50" x2="200" y2="50" stroke="#eee" stroke-width="1"/>
+        <text x="20" y="70" font-family="Arial" font-size="10">• 购买即收，过期作废</text>
+        <text x="20" y="90" font-family="Arial" font-size="10">• 不自动续约</text>
+        <text x="20" y="110" font-family="Arial" font-size="10">• 适合：叠加包/测试包</text>
+    </g>
+  </g>
+
+  <!-- Footer -->
+  <text x="1150" y="880" text-anchor="end" font-family="Arial" font-size="10" fill="#999">Generated for CMP Requirements Workshop</text>
+</svg>

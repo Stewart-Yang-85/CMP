@@ -1,0 +1,220 @@
+﻿{
+    "meta":  {
+                 "name":  "CMP Billing Golden Cases",
+                 "source":  "CMP_Requirements_Workshop.md#10",
+                 "currency":  "USD",
+                 "unit":  {
+                              "data":  "KB",
+                              "mbToKb":  1024,
+                              "rounding":  "CEIL"
+                          }
+             },
+    "generatedAt":  "2026-02-28T16:18:45.6147104+08:00",
+    "results":  [
+                    {
+                        "id":  "U-01",
+                        "type":  "usage_match",
+                        "actual":  {
+                                       "match":  {
+                                                     "package":  "global_1gb"
+                                                 },
+                                       "inProfile":  true,
+                                       "deductFromPackage":  "global_1gb",
+                                       "charge":  {
+                                                      "type":  "IN_PACKAGE",
+                                                      "amount":  0
+                                                  },
+                                       "alerts":  [
+
+                                                  ]
+                                   }
+                    },
+                    {
+                        "id":  "U-02",
+                        "type":  "usage_match",
+                        "actual":  {
+                                       "match":  {
+                                                     "package":  "france_500mb"
+                                                 },
+                                       "inProfile":  true,
+                                       "deductFromPackage":  "france_500mb",
+                                       "charge":  {
+                                                      "type":  "IN_PACKAGE",
+                                                      "amount":  0
+                                                  },
+                                       "alerts":  [
+
+                                                  ]
+                                   }
+                    },
+                    {
+                        "id":  "U-03",
+                        "type":  "usage_match",
+                        "actual":  {
+                                       "match":  {
+                                                     "package":  "europe_1gb"
+                                                 },
+                                       "inProfile":  true,
+                                       "deductFromPackage":  "europe_1gb",
+                                       "charge":  {
+                                                      "type":  "IN_PACKAGE",
+                                                      "amount":  0
+                                                  },
+                                       "alerts":  [
+
+                                                  ]
+                                   }
+                    },
+                    {
+                        "id":  "U-04",
+                        "type":  "usage_match",
+                        "actual":  {
+                                       "match":  {
+                                                     "package":  "france_500mb"
+                                                 },
+                                       "inProfile":  true,
+                                       "deductFromPackage":  "france_500mb",
+                                       "charge":  {
+                                                      "type":  "IN_PACKAGE",
+                                                      "amount":  0
+                                                  },
+                                       "alerts":  [
+
+                                                  ]
+                                   }
+                    },
+                    {
+                        "id":  "U-07",
+                        "type":  "overage_when_exhausted",
+                        "actual":  {
+                                       "match":  {
+                                                     "package":  "global_1gb"
+                                                 },
+                                       "inProfile":  true,
+                                       "deductFromPackage":  "global_1gb",
+                                       "charge":  {
+                                                      "type":  "OVERAGE",
+                                                      "currency":  "USD",
+                                                      "ratePerKb":  0.01,
+                                                      "chargedKb":  10240,
+                                                      "amount":  102.4
+                                                  },
+                                       "alerts":  [
+
+                                                  ]
+                                   }
+                    },
+                    {
+                        "id":  "U-08",
+                        "type":  "inactive_usage",
+                        "actual":  {
+                                       "match":  {
+                                                     "package":  null
+                                                 },
+                                       "inProfile":  false,
+                                       "deductFromPackage":  null,
+                                       "charge":  {
+                                                      "type":  "PAYG",
+                                                      "currency":  "USD",
+                                                      "ratePerKb":  0.02,
+                                                      "chargedKb":  10240,
+                                                      "amount":  204.8
+                                                  },
+                                       "alerts":  [
+                                                      "INACTIVE_USAGE",
+                                                      "UNEXPECTED_ROAMING"
+                                                  ]
+                                   }
+                    },
+                    {
+                        "id":  "U-05",
+                        "type":  "payg_out_of_profile",
+                        "actual":  {
+                                       "match":  {
+                                                     "package":  null
+                                                 },
+                                       "inProfile":  false,
+                                       "deductFromPackage":  null,
+                                       "charge":  {
+                                                      "type":  "PAYG",
+                                                      "currency":  "USD",
+                                                      "ratePerKb":  0.02,
+                                                      "chargedKb":  10240,
+                                                      "amount":  204.8
+                                                  },
+                                       "alerts":  [
+                                                      "UNEXPECTED_ROAMING"
+                                                  ]
+                                   }
+                    },
+                    {
+                        "id":  "U-06",
+                        "type":  "payg_out_of_profile",
+                        "actual":  {
+                                       "match":  {
+                                                     "package":  null
+                                                 },
+                                       "inProfile":  false,
+                                       "deductFromPackage":  null,
+                                       "charge":  {
+                                                      "type":  "PAYG_RULE_MISSING",
+                                                      "amount":  null
+                                                  },
+                                       "alerts":  [
+                                                      "UNEXPECTED_ROAMING",
+                                                      "PAYG_RULE_MISSING"
+                                                  ]
+                                   }
+                    },
+                    {
+                        "id":  "M-01",
+                        "type":  "monthly_fee_high_water",
+                        "actual":  {
+                                       "chargeType":  "MONTHLY_FEE",
+                                       "amount":  10
+                                   }
+                    },
+                    {
+                        "id":  "M-02",
+                        "type":  "monthly_fee_high_water",
+                        "actual":  {
+                                       "chargeType":  "DEACTIVATED_MONTHLY_FEE",
+                                       "amount":  1
+                                   }
+                    },
+                    {
+                        "id":  "M-03",
+                        "type":  "monthly_fee_high_water",
+                        "actual":  {
+                                       "chargeType":  "NO_CHARGE",
+                                       "amount":  0
+                                   }
+                    },
+                    {
+                        "id":  "M-04",
+                        "type":  "monthly_fee_high_water",
+                        "actual":  {
+                                       "chargeType":  "MONTHLY_FEE",
+                                       "amount":  10
+                                   }
+                    },
+                    {
+                        "id":  "A-01",
+                        "type":  "late_cdr_adjustment",
+                        "actual":  {
+                                       "adjustment":  {
+                                                          "status":  "DRAFT",
+                                                          "type":  "DEBIT",
+                                                          "currency":  "USD"
+                                                      }
+                                   }
+                    },
+                    {
+                        "id":  "A-02",
+                        "type":  "late_cdr_adjustment",
+                        "actual":  {
+                                       "adjustment":  null
+                                   }
+                    }
+                ]
+}

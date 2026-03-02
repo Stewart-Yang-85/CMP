@@ -1,0 +1,3 @@
+ALTER TABLE sims
+ADD COLUMN IF NOT EXISTS upstream_status TEXT,
+ADD COLUMN IF NOT EXISTS upstream_info JSONB;
