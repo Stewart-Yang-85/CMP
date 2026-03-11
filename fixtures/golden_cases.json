@@ -1,0 +1,139 @@
+{
+  "_meta": {
+    "description": "Golden test cases for billing engine validation (T-NEW-5)",
+    "version": "1.0.0",
+    "roundingMode": "ROUND_HALF_UP",
+    "billingPrecision": 2,
+    "generatedFrom": "fixtures/rating_results_golden.sql"
+  },
+  "cases": [
+    {
+      "id": "U-01",
+      "description": "Fixed Bundle IN_PACKAGE — UK roaming, within quota",
+      "input": {
+        "sim": { "iccid": "89860000000000000000", "status": "ACTIVATED" },
+        "subscription": { "kind": "MAIN", "planType": "FIXED_BUNDLE" },
+        "usage": { "visited_mccmnc": "234-15", "total_kb": 102400 }
+      },
+      "expected": {
+        "classification": "IN_PACKAGE",
+        "charged_kb": 102400,
+        "rate_per_kb": null,
+        "amount": 0.00,
+        "currency": "USD"
+      }
+    },
+    {
+      "id": "U-02",
+      "description": "Fixed Bundle IN_PACKAGE — France roaming, within quota",
+      "input": {
+        "sim": { "iccid": "89860000000000000001", "status": "ACTIVATED" },
+        "subscription": { "kind": "MAIN", "planType": "FIXED_BUNDLE" },
+        "usage": { "visited_mccmnc": "208-01", "total_kb": 102400 }
+      },
+      "expected": {
+        "classification": "IN_PACKAGE",
+        "charged_kb": 102400,
+        "rate_per_kb": null,
+        "amount": 0.00,
+        "currency": "USD"
+      }
+    },
+    {
+      "id": "U-03",
+      "description": "Fixed Bundle IN_PACKAGE — Germany roaming, within quota",
+      "input": {
+        "sim": { "iccid": "89860000000000000002", "status": "ACTIVATED" },
+        "subscription": { "kind": "MAIN", "planType": "FIXED_BUNDLE" },
+        "usage": { "visited_mccmnc": "262-02", "total_kb": 102400 }
+      },
+      "expected": {
+        "classification": "IN_PACKAGE",
+        "charged_kb": 102400,
+        "rate_per_kb": null,
+        "amount": 0.00,
+        "currency": "USD"
+      }
+    },
+    {
+      "id": "U-04",
+      "description": "Fixed Bundle IN_PACKAGE — France roaming, second SIM",
+      "input": {
+        "sim": { "iccid": "89860000000000000003", "status": "ACTIVATED" },
+        "subscription": { "kind": "MAIN", "planType": "FIXED_BUNDLE" },
+        "usage": { "visited_mccmnc": "208-01", "total_kb": 102400 }
+      },
+      "expected": {
+        "classification": "IN_PACKAGE",
+        "charged_kb": 102400,
+        "rate_per_kb": null,
+        "amount": 0.00,
+        "currency": "USD"
+      }
+    },
+    {
+      "id": "U-05",
+      "description": "PAYG fallback — Saudi Arabia roaming, no package coverage",
+      "input": {
+        "sim": { "iccid": "89860000000000000004", "status": "ACTIVATED" },
+        "subscription": { "kind": "MAIN", "planType": "FIXED_BUNDLE" },
+        "usage": { "visited_mccmnc": "424-02", "total_kb": 10240 }
+      },
+      "expected": {
+        "classification": "PAYG",
+        "charged_kb": 10240,
+        "rate_per_kb": 0.02,
+        "amount": 204.80,
+        "currency": "USD"
+      }
+    },
+    {
+      "id": "U-06",
+      "description": "PAYG_RULE_MISSING — unknown MCC/MNC, no PAYG rate defined",
+      "input": {
+        "sim": { "iccid": "89860000000000000005", "status": "ACTIVATED" },
+        "subscription": { "kind": "MAIN", "planType": "FIXED_BUNDLE" },
+        "usage": { "visited_mccmnc": "999-99", "total_kb": 10240 }
+      },
+      "expected": {
+        "classification": "PAYG_RULE_MISSING",
+        "charged_kb": 10240,
+        "rate_per_kb": null,
+        "amount": 0.00,
+        "currency": "USD"
+      }
+    },
+    {
+      "id": "U-07",
+      "description": "OVERAGE — UK roaming, quota exceeded",
+      "input": {
+        "sim": { "iccid": "89860000000000000006", "status": "ACTIVATED" },
+        "subscription": { "kind": "MAIN", "planType": "FIXED_BUNDLE" },
+        "usage": { "visited_mccmnc": "234-15", "total_kb": 10240 }
+      },
+      "expected": {
+        "classification": "OVERAGE",
+        "charged_kb": 10240,
+        "rate_per_kb": 0.01,
+        "amount": 102.40,
+        "currency": "USD"
+      }
+    },
+    {
+      "id": "U-08",
+      "description": "PAYG fallback — Saudi Arabia roaming (second SIM)",
+      "input": {
+        "sim": { "iccid": "89860000000000000007", "status": "ACTIVATED" },
+        "subscription": { "kind": "MAIN", "planType": "FIXED_BUNDLE" },
+        "usage": { "visited_mccmnc": "424-02", "total_kb": 10240 }
+      },
+      "expected": {
+        "classification": "PAYG",
+        "charged_kb": 10240,
+        "rate_per_kb": 0.02,
+        "amount": 204.80,
+        "currency": "USD"
+      }
+    }
+  ]
+}

@@ -123,7 +123,7 @@ create table if not exists supplier_carriers (
 
 create table if not exists tenants (
   tenant_id uuid primary key default gen_random_uuid(),
-  parent_id uuid references tenants(tenant_id),
+  parent_id uuid references tenants(tenant_id) on delete cascade,
   tenant_type tenant_type not null,
   code text unique,
   name text not null,
@@ -325,7 +325,8 @@ create table if not exists subscriptions (
   cancelled_at timestamptz,
   first_subscribed_at timestamptz,
   commitment_end_at timestamptz,
-  created_at timestamptz not null default current_timestamp
+  created_at timestamptz not null default current_timestamp,
+  constraint subscriptions_effective_before_expiry check (expires_at is null or effective_at <= expires_at)
 );
 
 create index if not exists idx_subscriptions_sim_effective on subscriptions(sim_id, effective_at);
@@ -385,7 +386,8 @@ create table if not exists bills (
   payment_ref text,
   overdue_at timestamptz,
   created_at timestamptz not null default current_timestamp,
-  unique (enterprise_id, period_start, period_end)
+  unique (enterprise_id, period_start, period_end),
+  constraint bills_period_order check (period_start <= period_end)
 );
 
 create index if not exists idx_bills_status_due on bills(status, due_date);

@@ -7,8 +7,46 @@
 
 **Organization**: 任务按 User Story 分组，P1 优先级（US1-US6）在前，P2（US7-US11）在后。
 
+## MVP 范围（D-28 决策）
+
+> **8 周 MVP 仅交付「一张 SIM 从入库到出账」的完整链路。**
+>
+> | 维度 | MVP | V1.1 |
+> |------|-----|------|
+> | 角色 | platform_admin / reseller_admin / customer_admin | 销售总监/销售/财务/运维细分 |
+> | 资费类型 | Fixed Bundle + One-time | SIM Dependent Bundle / Tiered Pricing |
+> | 账单结构 | L1 汇总 + L3 明细 | L2 分组汇总层 |
+> | 前端 | Swagger UI + Postman（D-29） | Web Portal |
+> | 推迟模块 | — | 白标 / Dunning / 多供应商 SPI / 告警去重抑制 / APN&Roaming Profile / GDPR 脱敏 / eSIM 生命周期 |
+>
+> 标记 `[V1.1]` 的任务已有实现但 **MVP 阶段不纳入验收范围**，测试与 Bug 修复推迟到 V1.1。
+
+## 架构评审修正项 (2026-03-11)
+
+> 以下为高级架构评审后新增/修正的任务，已合入 MVP 执行流程:
+>
+> ### 新增任务
+>
+> - [x] **T-NEW-1** 租户模型统一 — `resellers` 和 `customers` 表增加 `tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) UNIQUE`，桥接 Layer 1 (tenants) ↔ Layer 2。创建 reseller/customer 时必须同步创建 tenants 记录。**修改文件**: `supabase/migrations/20260311100003_tenant_reseller.sql`
+> - [x] **T-NEW-2** Waterfall 算法文档化 — 产出决策树 + 伪代码 + golden case 映射。**产出**: `specs/20260208-iot-cmp-reseller/waterfall-algorithm.md`
+> - [x] **T-NEW-3** 测试期自动到期 cron — worker.js 新增 `TEST_EXPIRY_CHECK_CRON` (每日 03:00 UTC)，查询 TEST_READY 且测试期已过的 SIM，根据 `auto_suspend_enabled` 决定激活或停用。**修改文件**: `src/worker.js`
+> - [x] **T-NEW-4** 计费精度与舍入策略 — 全局 `ROUND_HALF_UP` + `BILLING_PRECISION=2`，统一 `roundAmount()` 函数替代所有 `.toFixed(2)` 调用。**修改文件**: `src/billing.js`
+> - [x] **T-NEW-5** Golden Case 机器可读化 — 8 个 golden case 从 SQL fixture 转为 JSON 格式。**产出**: `fixtures/golden_cases.json`
+> - [x] **T-NEW-6** 安全债务文档 — 记录 RLS 未隔离、无限流、scrypt 参数、eSIM 推迟等已知安全债务。**产出**: `specs/20260208-iot-cmp-reseller/security-debt.md`
+> - [x] **T-NEW-7** 数据库 CHECK 约束补全 — `bills` 增加 `period_start <= period_end` CHECK；`subscriptions` 增加 `effective_at <= expires_at` CHECK；`tenants.parent_id` 增加 `ON DELETE CASCADE`。**修改文件**: `supabase/migrations/20260311100001_core_schema.sql`
+> - [x] **T-NEW-9** eSIM 生命周期 guard — `simLifecycle.ts` 中 eSIM 类型操作返回 `501 NOT_IMPLEMENTED`。**修改文件**: `src/services/simLifecycle.ts`
+>
+> ### 范围修正
+>
+> - **T049** (High Water Mark): 原为 MVP，**现修正为 V1.1**。理由: HWM 是 SIM Dependent Bundle 概念，MVP 仅含 Fixed Bundle + One-time，不需要 HWM 逻辑。现有 `resolveHighWaterStatus()` 保留但 MVP 不验收。
+> - **T048** 拆分: T048 原覆盖"Waterfall + 高水位"，现拆分为:
+>   - **T048a** Waterfall 匹配逻辑 (仅 Fixed Bundle) — MVP 验收
+>   - **T048b** One-time 直算逻辑 — MVP 验收
+>   - 高水位月租计算保留在代码中但 **MVP 不单独验收**
+
 ## Format: `[ID] [P?] [Story] Description`
 - **[P]**: 可并行执行（操作不同文件，无依赖）
+- **[V1.1]**: MVP 不验收，推迟到 V1.1
 - **[Story]**: 所属 User Story（如 US1, US2）
 - 包含精确文件路径
 - 源码默认使用 TypeScript（.ts）
@@ -34,9 +72,9 @@
 
 ### 2.1 数据库迁移
 
-- [x] T005 [P] [DB] 创建迁移 `supabase/migrations/0019_add_reseller_branding.sql` — reseller_branding 表（代理商白标配置）
-- [x] T006 [P] [DB] 创建迁移 `supabase/migrations/0020_add_dunning_tables.sql` — dunning_records + dunning_actions 表 + dunning_status ENUM
-- [x] T007 [P] [DB] 创建迁移 `supabase/migrations/0021_add_alerts_table.sql` — alerts 表 + alert_type ENUM
+- [x] ~~T005~~ [V1.1] [P] [DB] 创建迁移 `supabase/migrations/0019_add_reseller_branding.sql` — reseller_branding 表（代理商白标配置）
+- [x] ~~T006~~ [V1.1] [P] [DB] 创建迁移 `supabase/migrations/0020_add_dunning_tables.sql` — dunning_records + dunning_actions 表 + dunning_status ENUM
+- [x] ~~T007~~ [V1.1] [P] [DB] 创建迁移 `supabase/migrations/0021_add_alerts_table.sql` — alerts 表 + alert_type ENUM
 - [x] T008 [P] [DB] 创建迁移 `supabase/migrations/0022_add_webhook_tables.sql` — webhook_subscriptions + webhook_deliveries 表
 - [x] T009 [P] [DB] 创建迁移 `supabase/migrations/0023_add_vendor_mappings.sql` — vendor_product_mappings 表
 - [x] T010 [P] [DB] 创建迁移 `supabase/migrations/0024_add_provisioning_orders.sql` — provisioning_orders 表 + provisioning_status ENUM
@@ -44,9 +82,9 @@
 - [x] T012 [P] [DB] 创建迁移 `supabase/migrations/0026_extend_sims_fields.sql` — sims 新增字段（secondary_imsi1~3, form_factor, activation_code, upstream_status, upstream_status_updated_at）+ sim_form_factor ENUM
 - [x] T013 [P] [DB] 创建迁移 `supabase/migrations/0027_extend_bills_fields.sql` — bills 新增（reseller_id, payment_ref, overdue_at）+ bill_line_items 新增（group_key, group_type, group_subtotal）
 - [x] T014 [P] [DB] 创建迁移 `supabase/migrations/0028_extend_jobs_fields.sql` — jobs 新增（reseller_id, customer_id, idempotency_key, file_hash）
-- [x] T097 [P] [DB] 创建迁移 `supabase/migrations/0031_add_customer_api_keys.sql` — customers 新增 api_key (UNIQUE), api_secret_hash, webhook_url
-- [x] T101 [P] [DB] 创建迁移 `supabase/migrations/0032_add_network_profiles.sql` — apn_profiles, roaming_profiles, profile_versions, profile_change_requests 表与必要 ENUM
-- [x] T102 [P] [DB] 创建迁移 `supabase/migrations/0033_add_billing_control_configs.sql` — billing_config, dunning_policies, control_policies, late_fee_rules 表
+- [x] ~~T097~~ [V1.1] [P] [DB] 创建迁移 `supabase/migrations/0031_add_customer_api_keys.sql` — customers 新增 api_key (UNIQUE), api_secret_hash, webhook_url
+- [x] ~~T101~~ [V1.1] [P] [DB] 创建迁移 `supabase/migrations/0032_add_network_profiles.sql` — apn_profiles, roaming_profiles, profile_versions, profile_change_requests 表与必要 ENUM
+- [x] ~~T102~~ [V1.1] [P] [DB] 创建迁移 `supabase/migrations/0033_add_billing_control_configs.sql` — billing_config, dunning_policies, control_policies, late_fee_rules 表
 - [x] T015 创建迁移 `supabase/migrations/0029_add_new_indexes.sql` — 新增索引（依赖 T005-T014 + T101-T102 表结构）
 - [x] T016 创建迁移 `supabase/migrations/0030_add_new_rls_policies.sql` — 新增表的 RLS 策略（依赖 T005-T014 + T101-T102）
 
@@ -64,9 +102,9 @@
 
 ### 2.4 认证与限流
 
-- [x] T098 [P] 实现 API Key 认证中间件 `src/middleware/apiKeyAuth.ts` — 校验 customers.api_key + api_secret_hash，支持企业 M2M 访问与 JWT 并行
-- [x] T099 [P] 实现 OAuth2/OIDC 验证中间件 `src/middleware/oidcAuth.ts` — JWT 校验（issuer, audience, jwks 缓存与轮换），支持第三方 Web/应用接入
-- [x] T100 [P] 实现限流中间件 `src/middleware/rateLimit.ts` — Token Bucket，按租户+接口限流，超限返回 429
+- [x] ~~T098~~ [V1.1] [P] 实现 API Key 认证中间件 `src/middleware/apiKeyAuth.ts` — 校验 customers.api_key + api_secret_hash，支持企业 M2M 访问与 JWT 并行
+- [x] ~~T099~~ [V1.1] [P] 实现 OAuth2/OIDC 验证中间件 `src/middleware/oidcAuth.ts` — JWT 校验（issuer, audience, jwks 缓存与轮换），支持第三方 Web/应用接入
+- [x] ~~T100~~ [V1.1] [P] 实现限流中间件 `src/middleware/rateLimit.ts` — Token Bucket，按租户+接口限流，超限返回 429
 
 **Checkpoint**: 基础设施就绪 — User Story 实施可以开始
 
@@ -81,8 +119,8 @@
 ### 实施任务
 
 - [x] T023 [P] [US1] 实现代理商管理路由 `src/routes/resellers.ts` — POST /v1/resellers（创建代理商，含 currency, defaultGracePeriodDays 等字段）, GET /v1/resellers（列表查询）, GET /v1/resellers/{resellerId}（详情）; 参照 contracts/tenant-api.md §1
-- [x] T024 [P] [US1] 实现代理商用户管理路由 `src/routes/resellerUsers.ts` — POST /v1/resellers/{resellerId}/users（创建用户，含 role: admin/sales_director/sales/finance）, GET 用户列表; 参照 contracts/tenant-api.md §4
-- [x] T025 [P] [US1] 实现代理商白标服务 `src/services/branding.ts` — PUT /v1/resellers/{resellerId}/branding（更新品牌配置：primaryColor, logoUrl, faviconUrl, supportEmail 等）, GET 白标配置; 操作 reseller_branding 表; 参照 contracts/tenant-api.md §1.4
+- [x] T024 [P] [US1] 实现代理商用户管理路由 `src/routes/resellerUsers.ts` — POST /v1/resellers/{resellerId}/users（**MVP 仅验收 role: admin**，sales_director/sales/finance 推迟 V1.1）, GET 用户列表; 参照 contracts/tenant-api.md §4
+- [x] ~~T025~~ [V1.1] [P] [US1] 实现代理商白标服务 `src/services/branding.ts` — PUT /v1/resellers/{resellerId}/branding（更新品牌配置：primaryColor, logoUrl, faviconUrl, supportEmail 等）, GET 白标配置; 操作 reseller_branding 表; 参照 contracts/tenant-api.md §1.4
 - [x] T026 [US1] 实现企业状态变更 `src/routes/enterprises.ts` — 增强现有企业路由，新增 POST /v1/enterprises/{enterpriseId}:change-status（状态机 ACTIVE↔INACTIVE↔SUSPENDED），触发 ENTERPRISE_STATUS_CHANGED 事件; 参照 contracts/tenant-api.md §2.4
 - [x] T027 [US1] 实现部门管理路由 `src/routes/departments.ts` — POST /v1/enterprises/{enterpriseId}/departments（创建部门）, GET 部门列表, GET 部门详情; 参照 contracts/tenant-api.md §3
 - [x] T028 [US1] 实现供应商与运营商管理路由 `src/routes/suppliers.ts` — POST /v1/suppliers（创建供应商）, POST /v1/operators（创建运营商，E.212 MCC+MNC 校验）, 供应商-运营商多对多关联; 参照 contracts/tenant-api.md §5
@@ -117,20 +155,23 @@
 
 ## Phase 5: US3 — 产品包与资费计划配置 (Priority: P1) 🎯 MVP
 
-**Goal**: 实现 4 种资费计划类型（ONE_TIME, SIM_DEPENDENT_BUNDLE, FIXED_BUNDLE, TIERED_VOLUME_PRICING）、产品包 CRUD、版本化管理、发布校验
+**Goal**: 实现 4 种资费计划类型（ONE_TIME, SIM_DEPENDENT_BUNDLE, FIXED_BUNDLE, TIERED_PRICING）、产品包 CRUD、版本化管理、发布校验
 
 **Independent Test**: 创建资费计划→创建产品包→绑定→发布→验证 PAYG 冲突校验
 
 ### 实施任务
 
-- [x] T040 [P] [US3] 实现资费计划服务 `src/services/pricePlan.ts` — 创建资费计划（4 种类型字段校验: ONE_TIME 需 oneTimeFee/quotaKb/validityDays, SIM_DEPENDENT_BUNDLE 需 monthlyFee/perSimQuotaKb 等）、版本化（DRAFT→PUBLISHED）、新版本创建; 参照 contracts/pricing-api.md §1
+- [x] T040 [P] [US3] 实现资费计划服务 `src/services/pricePlan.ts` — 创建资费计划（**MVP 仅验收 FIXED_BUNDLE + ONE_TIME**，SIM_DEPENDENT_BUNDLE/TIERED_PRICING 推迟 V1.1）、版本化（DRAFT→PUBLISHED）、新版本创建; 参照 contracts/pricing-api.md §1
 - [x] T041 [P] [US3] 实现产品包服务 `src/services/package.ts` — 创建产品包（绑定 pricePlanVersionId + carrierServiceConfig）、修改（仅 DRAFT）、发布（PAYG Rates 冲突校验：同一 visitedMccMnc 被多个同级规则覆盖则阻断）; 参照 contracts/pricing-api.md §2
-- [x] T103 [P] [US3] 实现 APN/Roaming Profile 服务 `src/services/networkProfile.ts` — Profile 版本化（DRAFT→PUBLISHED）、次月生效、校验来源与回滚; 参照 spec.md APN/Roaming Profile
-- [x] T104 [US3] 实现 APN/Roaming Profile 路由 `src/routes/networkProfiles.ts` — CRUD、发布、版本列表、回滚、变更计划; 参照 spec.md APN/Roaming Profile
-- [x] T105 [US3] 在产品包发布校验中绑定网络配置 — package 与 profileVersion 绑定、发布时校验兼容性; 参照 spec.md APN/Roaming Profile
+- [x] ~~T103~~ [V1.1] [P] [US3] 实现 APN/Roaming Profile 服务 `src/services/networkProfile.ts` — Profile 版本化（DRAFT→PUBLISHED）、次月生效、校验来源与回滚; 参照 spec.md APN/Roaming Profile
+- [x] ~~T104~~ [V1.1] [US3] 实现 APN/Roaming Profile 路由 `src/routes/networkProfiles.ts` — CRUD、发布、版本列表、回滚、变更计划; 参照 spec.md APN/Roaming Profile
+- [x] ~~T105~~ [V1.1] [US3] 在产品包发布校验中绑定网络配置 — package 与 profileVersion 绑定、发布时校验兼容性; 参照 spec.md APN/Roaming Profile
 - [x] T042 [US3] 实现资费计划路由 `src/routes/pricePlans.ts` — POST /v1/enterprises/{enterpriseId}/price-plans, GET 列表（支持 type/status 过滤）, GET /v1/price-plans/{pricePlanId}（含版本历史）, POST /v1/price-plans/{pricePlanId}/versions; 参照 contracts/pricing-api.md §1
 - [x] T043 [US3] 实现产品包路由 `src/routes/packages.ts` — POST /v1/enterprises/{enterpriseId}/packages, PUT /v1/packages/{packageId}（仅 DRAFT）, POST /v1/packages/{packageId}:publish, GET 列表, GET 详情; 参照 contracts/pricing-api.md §2
 - [x] T044 [US3] 在 `src/app.ts` 中注册 US3 新路由（pricePlans, packages）
+- [ ] ~~T109~~ [V1.1] [US3] 按最新快照规格更新数据模型与接口设计文档 `specs/20260208-iot-cmp-reseller/data-model.md` + `specs/20260208-iot-cmp-reseller/contracts/pricing-api.md` — 覆盖 APN Profile、Roaming Profile、Carrier Service、Commercial Terms、Control Policy、Price Plan、Package 的快照字段、发布约束、反向引用查询接口（按 profile/policy/plan/terms ID 反查）
+- [ ] ~~T110~~ [V1.1] [US3] 实现七个模块的快照化与反查能力 `src/services/networkProfile.ts` + `src/services/pricePlan.ts` + `src/services/package.ts` + `src/routes/networkProfiles.ts` + `src/routes/pricePlans.ts` + `src/routes/packages.ts` + `src/app.ts` — 统一 DRAFT/PUBLISHED 不可变语义、克隆生成新 ID、Carrier Service 反查（apnProfileId/roamingProfileId）、Package 反查（pricePlanId/commercialTermsId/controlPolicyId）
+- [ ] ~~T111~~ [V1.1] [US3] 增加模块联动测试 `tests/phase4.test.ts` + `tests/phase4.snapshot.test.ts` — 覆盖 APN/Roaming 克隆发布后反查 Carrier Service、Price Plan/Commercial Terms/Control Policy 反查 Package、产品包切换到新快照并保持历史快照可追溯
 
 **Checkpoint**: US3 完成 — 可独立验证资费计划创建、产品包发布、冲突校验
 
@@ -161,13 +202,13 @@
 
 ### 实施任务
 
-- [x] T048 [US5] 增强计费引擎 `src/billing.ts` — 高水位月租计算：基于 sim_state_history 判定账期内 SIM 状态轨迹（曾 ACTIVATED→全额 monthlyFee; 未 ACTIVATED 但曾 DEACTIVATED→deactivatedMonthlyFee; 仅 INVENTORY/TEST_READY→无月租）; 月租费与停机保号费互斥; 参照 contracts/billing-api.md §4.1
-- [x] T049 [US5] 增强计费引擎 `src/billing.ts` — Waterfall 用量匹配逻辑：①时间窗匹配（SIM 在事件时刻的有效订阅）②区域匹配+优先级排序（ADD_ON 优先 → 覆盖范围最小优先 → MAIN 兜底 → Out-of-Profile）③计费处理（In-Profile 扣减配额 / 配额耗尽按 overageRatePerKb / OOP 按 paygRates 独立计费+告警）; 参照 contracts/billing-api.md §4.2
+- [x] T048 [US5] 增强计费引擎 `src/billing.ts` — **T048a**: Waterfall 用量匹配逻辑（MVP 仅 Fixed Bundle + One-time）：①时间窗匹配②区域匹配+优先级排序③计费处理（参照 waterfall-algorithm.md）；**T048b**: One-time 直算逻辑; 参照 contracts/billing-api.md §4.2
+- [x] ~~T049~~ [V1.1] [US5] 增强计费引擎 `src/billing.ts` — 高水位月租计算：基于 sim_state_history 判定账期内 SIM 状态轨迹（**推迟到 V1.1，HWM 为 SIM Dependent Bundle 概念，MVP 不需要**）; 参照 contracts/billing-api.md §4.1
 - [x] T107 [US5] 实现用量清洗规则 `src/services/usageCleaning.ts` — total_kb=0 保留、负数丢弃并记录，按话单来源与批次生成清洗报告; 参照 spec.md 用量清洗规则
-- [x] T050 [US5] 增强计费引擎 `src/billing.ts` — 分段累进计费（Progressive Tiered）: `totalCharge = Σ min(U - T[i-1], T[i] - T[i-1]) × R[i]`; 参照 contracts/pricing-api.md §5
-- [x] T051 [US5] 增强计费引擎 `src/billing.ts` — SIM Dependent Bundle 动态池: `totalQuotaKb = activatedSimCount(高水位) × perSimQuotaKb`; 费用 = Σ(activated × monthlyFee) + Σ(deactivated × deactivatedMonthlyFee) + overageCharge; 参照 contracts/billing-api.md §4.3
+- [x] ~~T050~~ [V1.1] [US5] 增强计费引擎 `src/billing.ts` — 分段累进计费（Progressive Tiered）: `totalCharge = Σ min(U - T[i-1], T[i] - T[i-1]) × R[i]`; 参照 contracts/pricing-api.md §5
+- [x] ~~T051~~ [V1.1] [US5] 增强计费引擎 `src/billing.ts` — SIM Dependent Bundle 动态池: `totalQuotaKb = activatedSimCount(高水位) × perSimQuotaKb`; 费用 = Σ(activated × monthlyFee) + Σ(deactivated × deactivatedMonthlyFee) + overageCharge; 参照 contracts/billing-api.md §4.3
 - [x] T052 [US5] 增强计费引擎 `src/billing.ts` — 首月分摊（Daily Proration）: `perDayFee = monthlyFee / daysInBillingMonth`, `chargedMonthlyFee = round(perDayFee × activeDays, 2)`; 参照 contracts/pricing-api.md §6
-- [x] T053 [US5] 实现迟到话单处理逻辑 `src/services/lateCdr.ts` — 判定话单 eventTime 落在已 PUBLISHED 账期窗口内时：话单正常入库 → 计费引擎计算差额 → 自动生成 Adjustment Note (DRAFT); 参照 contracts/billing-api.md §5
+- [x] ~~T053~~ [V1.1] [US5] 实现迟到话单处理逻辑 `src/services/lateCdr.ts` — 判定话单 eventTime 落在已 PUBLISHED 账期窗口内时：话单正常入库 → 计费引擎计算差额 → 自动生成 Adjustment Note (DRAFT); 参照 contracts/billing-api.md §5
 - [x] T054 [US5] 增强 rating_results 表写入 — 每条结果包含 inputRef（话单来源 fileId+lineNo）、ruleVersion（资费计划版本 ID）、calculationId（计算唯一 ID）; 参照 contracts/billing-api.md §4.4
 
 **Checkpoint**: US5 完成 — 运行 Golden Test Cases 验证计费准确性
@@ -182,13 +223,13 @@
 
 ### 实施任务
 
-- [x] T055 [P] [US6] 实现出账引擎服务 `src/services/billingGenerate.ts` — 出账流程：①数据归集（锁定 usage_daily_summary + sim_state_history）②调用计费引擎批价计费 ③账单生成（GENERATED 状态，含 L1 汇总 + L2 分组 + L3 明细行）④发布通知（GENERATED→PUBLISHED，触发 BILL_PUBLISHED 事件）; 参照 contracts/billing-api.md §3.2
+- [x] T055 [P] [US6] 实现出账引擎服务 `src/services/billingGenerate.ts` — 出账流程：①数据归集②调用计费引擎批价计费 ③账单生成（**MVP 仅 L1 汇总 + L3 明细行，L2 分组推迟 V1.1**）④发布通知; 参照 contracts/billing-api.md §3.2
 - [x] T108 [US6] 实现出账 T+N 配置 `src/services/billingSchedule.ts` — reseller/customer 级优先级与覆盖规则，支持手工触发; 参照 spec.md 出账 T+N 规则
-- [x] T056 [P] [US6] 实现调账服务 `src/services/adjustmentNote.ts` — 创建调账单（CREDIT/DEBIT, 仅 PUBLISHED/OVERDUE 状态账单可调）、审批（DRAFT→APPROVED，非创建者审批）、调账金额计入下期结算; 参照 contracts/billing-api.md §2
+- [x] ~~T056~~ [V1.1] [P] [US6] 实现调账服务 `src/services/adjustmentNote.ts` — 创建调账单（CREDIT/DEBIT, 仅 PUBLISHED/OVERDUE 状态账单可调）、审批（DRAFT→APPROVED，非创建者审批）、调账金额计入下期结算; 参照 contracts/billing-api.md §2
 - [x] T057 [US6] 实现出账路由 `src/routes/billingGenerate.ts` — POST /v1/billing:generate（手动触发，enterpriseId 可选，period 必填，返回 jobId）; 参照 contracts/billing-api.md §3.1
 - [x] T058 [US6] 增强账单路由 — 增强 GET /v1/bills（新增 resellerId, period, status 过滤）; 增强 GET /v1/bills/{billId}（三级结构 l1Summary + l2Groups + l3LineItemsUrl）; 新增 GET /v1/bills/{billId}/line-items（L3 明细分页）; 参照 contracts/billing-api.md §1
 - [x] T059 [US6] 实现人工核销路由 — POST /v1/bills/{billId}:mark-paid（前置：PUBLISHED/OVERDUE → PAID，触发 PAYMENT_CONFIRMED 事件）; 参照 contracts/billing-api.md §1.5
-- [x] T060 [US6] 实现调账路由 `src/routes/adjustmentNotes.ts` — POST /v1/bills/{billId}:adjust, POST /v1/adjustment-notes/{noteId}:approve, GET /v1/adjustment-notes 列表; 参照 contracts/billing-api.md §2
+- [x] ~~T060~~ [V1.1] [US6] 实现调账路由 `src/routes/adjustmentNotes.ts` — POST /v1/bills/{billId}:adjust, POST /v1/adjustment-notes/{noteId}:approve, GET /v1/adjustment-notes 列表; 参照 contracts/billing-api.md §2
 - [x] T061 [US6] 实现用量查询路由 `src/routes/usage.ts` — GET /v1/sims/{simId}/usage（SIM 维度，byZone 分区域汇总）, GET /v1/enterprises/{enterpriseId}/usage（企业维度，byPackage 分套餐汇总）; 参照 contracts/billing-api.md §7
 - [x] T062 [US6] 扩展 `src/queues/handlers.ts` — 新增 BILLING_GENERATE 队列处理，调用 billingGenerate.ts 执行出账流程; 支持 Vercel Cron 触发
 - [x] T063 [US6] 实现账单状态机 — GENERATED→PUBLISHED→PAID / OVERDUE→PAID / OVERDUE→WRITTEN_OFF; GENERATED 可修改, PUBLISHED 不可篡改（仅 Adjustment Note）, PAID/WRITTEN_OFF 为终态; 参照 contracts/billing-api.md §8
@@ -198,7 +239,9 @@
 
 ---
 
-## Phase 9: US7 — 欠费管控与信用流程 (Priority: P2)
+## Phase 9: US7 — 欠费管控与信用流程 (Priority: P2) ⏸️ V1.1
+
+> **整个 Phase 推迟到 V1.1**，MVP 不验收 Dunning 流程。
 
 **Goal**: 实现 Dunning 时间轴（OVERDUE→宽限期→SUSPENDED→SERVICE_INTERRUPTED）、自动催收与人工处置建议，不自动变更企业状态
 
@@ -217,7 +260,7 @@
 
 ---
 
-## Phase 10: US8 — 上游对账与产品映射 (Priority: P2)
+## Phase 10: US8 — 上游对账与产品映射 (Priority: P2) 🎯 MVP（手动触发）
 
 **Goal**: 实现上游对账（状态/用量差异检测）、产品映射管理
 
@@ -235,7 +278,9 @@
 
 ---
 
-## Phase 11: US9 — 监控、诊断与可观测性 (Priority: P2)
+## Phase 11: US9 — 监控、诊断与可观测性 (Priority: P2) ⏸️ V1.1
+
+> **整个 Phase 推迟到 V1.1**，MVP 不验收告警去重/抑制/报表。连接状态查询（connectivity-status）保留为 MVP 基础能力（已由 US2 SIM 路由覆盖）。
 
 **Goal**: 实现 SIM 连接状态查询、定位查询、告警管理（6 种告警类型）、报表接口
 
@@ -255,7 +300,9 @@
 
 ---
 
-## Phase 12: US10 — 多供应商虚拟化层与集成 (Priority: P2)
+## Phase 12: US10 — 多供应商虚拟化层与集成 (Priority: P2) ⏸️ V1.1
+
+> **整个 Phase 推迟到 V1.1**，MVP 仅使用微众耕适配器直连，不抽象 SPI。
 
 **Goal**: 抽象供应商适配器 SPI（ProvisioningSPI, UsageSPI, CatalogSPI），实现能力协商，支持多供应商并行
 
@@ -272,7 +319,9 @@
 
 ---
 
-## Phase 13: US11 — 事件驱动架构与可观测性基础设施 (Priority: P2)
+## Phase 13: US11 — 事件驱动架构与可观测性基础设施 (Priority: P2) ⏸️ V1.1
+
+> **整个 Phase 推迟到 V1.1**，MVP 仅使用 events 表写入（T020 已实现），不验收 Webhook HMAC 签名投递与重试。
 
 **Goal**: 实现事件表持久化、Webhook 订阅管理、HMAC-SHA256 签名投递、指数退避重试、事件查询
 
@@ -300,7 +349,7 @@
 - [x] T093 代码审查与安全加固 — 检查 SQL 注入、XSS、权限绕过等安全问题; 确认 RLS 策略覆盖所有新表
 - [x] T094 [P] 性能优化 — 确认新增索引生效, 大表查询使用分页, 批量操作使用 worker 异步
 - [x] T111 [P] 统一定时任务时区口径 `src/utils/timezone.ts` 与 Cron 入口校验 — 固定使用系统时区执行
-- [x] T112 数据保留与 GDPR 脱敏处理 `src/services/gdprRetention.ts` — 删除/匿名化 PII，保留审计链路最小元数据
+- [x] ~~T112~~ [V1.1] 数据保留与 GDPR 脱敏处理 `src/services/gdprRetention.ts` — 删除/匿名化 PII，保留审计链路最小元数据
 - [x] T095 运行 quickstart.md 验证 — 按照 quickstart.md 步骤完整走一遍开发流程
 - [x] T096 运行现有测试套件 — 执行 `node tools/api_smoke_test.js` 和 `node tools/test_billing_e2e.js` 确保无回归
 
@@ -348,40 +397,43 @@
 ### MVP First（P1 优先级）
 
 1. 完成 Phase 1: Setup
-2. 完成 Phase 2: Foundational（**关键路径**）
-3. 并行启动 Phase 3 (US1) + Phase 4 (US2) + Phase 5 (US3)
-4. 顺序完成 Phase 6 (US4) → Phase 7 (US5) → Phase 8 (US6)
-5. **STOP and VALIDATE**: Golden Test Cases 全部通过
-6. 部署 MVP
+2. 完成 Phase 2: Foundational（**关键路径**，跳过 V1.1 标记的任务验收）
+3. 并行启动 Phase 3 (US1) + Phase 4 (US2) + Phase 5 (US3，仅 Fixed Bundle + One-time)
+4. 顺序完成 Phase 6 (US4) → Phase 7 (US5，仅 Fixed Bundle + One-time 场景) → Phase 8 (US6，仅 L1+L3)
+5. Phase 10 (US8) 手动对账——与 Phase 7/8 并行
+6. **STOP and VALIDATE**: Golden Test Cases (U-01~U-04, M-01~M-02) 通过
+7. Phase 14 Polish（不含 V1.1）
+8. 部署 MVP
 
-### 增量交付
+### V1.1 增量交付（MVP 后）
 
-1. Setup + Foundational → 基础就绪
-2. US1 (多租户) → 独立验证 → 部署
-3. US2 (SIM 生命周期) → 独立验证 → 部署
-4. US3 + US4 (产品包+订阅) → 独立验证 → 部署
-5. US5 + US6 (计费+出账) → Golden Test Cases 通过 → 部署 MVP
-6. US7-US11 (P2 功能) → 逐步交付
+1. US7 Dunning 全流程
+2. US3 补齐 SIM Dependent Bundle + Tiered Pricing + APN/Roaming Profile
+3. US5 补齐分段累进 + 迟到话单 + SIM Dependent Bundle 计费
+4. US6 补齐 L2 分组 + 调账流程
+5. US9 监控告警 + US10 多供应商 SPI + US11 Webhook
+6. 白标 / API Key M2M / OIDC / 限流 / GDPR
 
 ### 估算总览
 
-| Phase | 任务数 | 可并行 | 说明 |
-|-------|--------|--------|------|
-| Phase 1 Setup | 4 | 3 | 项目结构 |
-| Phase 2 Foundational | 20 | 14 | DB 迁移 + 中间件 |
-| Phase 3 US1 | 8 | 3 | 多租户权限 |
-| Phase 4 US2 | 9 | 2 | SIM 生命周期 |
-| Phase 5 US3 | 8 | 2 | 产品包资费 |
-| Phase 6 US4 | 4 | 1 | 订阅管理 |
-| Phase 7 US5 | 8 | 0 | 计费引擎 |
-| Phase 8 US6 | 11 | 2 | 账单出账 |
-| Phase 9 US7 | 6 | 1 | 信控催收 |
-| Phase 10 US8 | 5 | 2 | 上游对账 |
-| Phase 11 US9 | 7 | 2 | 监控诊断 |
-| Phase 12 US10 | 4 | 1 | 虚拟化层 |
-| Phase 13 US11 | 6 | 2 | 事件架构 |
-| Phase 14 Polish | 8 | 3 | 优化完善 |
-| **Total** | **108** | **38** | |
+| Phase | 任务数 | MVP | V1.1 | 说明 |
+|-------|--------|-----|------|------|
+| Phase 1 Setup | 4 | 4 | 0 | 项目结构（已完成） |
+| Phase 2 Foundational | 20 | 12 | 8 | DB 迁移 + 中间件 |
+| Phase 3 US1 | 8 | 7 | 1 | 多租户权限（白标推迟） |
+| Phase 4 US2 | 9 | 9 | 0 | SIM 生命周期 |
+| Phase 5 US3 | 11 | 5 | 6 | 产品包资费（APN/Roaming/快照推迟） |
+| Phase 6 US4 | 4 | 4 | 0 | 订阅管理 |
+| Phase 7 US5 | 8 | 4 | 4 | 计费引擎（Tiered/SDB/迟到话单/HWM推迟） |
+| Phase 8 US6 | 11 | 8 | 3 | 账单出账（调账/L2 推迟） |
+| Phase 9 US7 | 6 | 0 | 6 | ⏸️ 信控催收 |
+| Phase 10 US8 | 5 | 5 | 0 | 上游对账（手动触发） |
+| Phase 11 US9 | 7 | 0 | 7 | ⏸️ 监控诊断 |
+| Phase 12 US10 | 4 | 0 | 4 | ⏸️ 虚拟化层 |
+| Phase 13 US11 | 6 | 0 | 6 | ⏸️ 事件架构 |
+| Phase 14 Polish | 8 | 7 | 1 | 优化完善（GDPR 推迟） |
+| **架构修正** | **8** | **8** | **0** | T-NEW-1~9 |
+| **Total** | **119** | **73** | **46** | MVP 73 任务（含架构修正 8 项） |
 
 ---
 

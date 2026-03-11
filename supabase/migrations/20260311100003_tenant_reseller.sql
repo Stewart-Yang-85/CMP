@@ -8,6 +8,11 @@
 --   DROP TABLE IF EXISTS reseller_suppliers, reseller_enterprise_assignments,
 --     reseller_branding, customers, resellers CASCADE;
 --   DROP TYPE IF EXISTS reseller_status, customer_status CASCADE;
+--
+-- T-NEW-1 (Tenant Model Unification):
+--   resellers.tenant_id FK → tenants(tenant_id) UNIQUE — bridges resellers ↔ tenants
+--   customers.tenant_id FK → tenants(tenant_id) UNIQUE — bridges customers ↔ tenants
+--   Creating a reseller/customer MUST synchronously create a tenants record first.
 
 -- ============================================================
 -- ENUMs (D-30: uppercase values)
@@ -28,8 +33,10 @@ end $$;
 -- ============================================================
 
 -- resellers (from 0035, status default uppercased)
+-- T-NEW-1: tenant_id bridges Layer 2 (resellers) ↔ Layer 1 (tenants)
 create table if not exists resellers (
   id uuid primary key default gen_random_uuid(),
+  tenant_id uuid not null references tenants(tenant_id) unique,
   name text not null,
   status reseller_status not null default 'ACTIVE',
   contact_email text,
@@ -40,8 +47,10 @@ create table if not exists resellers (
 );
 
 -- customers (from 0035, already contains api_key/api_secret_hash/webhook_url)
+-- T-NEW-1: tenant_id bridges Layer 2 (customers) ↔ Layer 1 (tenants)
 create table if not exists customers (
   id uuid primary key default gen_random_uuid(),
+  tenant_id uuid not null references tenants(tenant_id) unique,
   reseller_id uuid not null references resellers(id),
   name text not null,
   status customer_status not null default 'ACTIVE',
