@@ -3,3 +3,16 @@
 node_modules/
 gen/
 
+# IDE / editor plugins
+.specify/
+.trae/
+
+# Supabase CLI local state
+supabase/.branches/
+supabase/.temp/
+
+# Temporary / generated artifacts
+tmp_openapi.yaml
+smoke_log.txt
+billing_engine_results.json
+docs/api-system-test/
