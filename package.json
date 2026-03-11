@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start:ts": "node dist/server.js",
     "test": "vitest run",
+    "test:system": "vitest run tests/apiSystem.run.test.ts",
     "test:integration:phase12": "vitest run -t phase12:integration",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

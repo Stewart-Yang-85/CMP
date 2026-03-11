@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../src/app.js'
 
 const enterpriseId = '8f49253c-fce4-44de-9a2a-e62550b856a2'
@@ -32,9 +32,13 @@ async function withServer(run: (baseUrl: string) => Promise<void>) {
 afterEach(() => {
   process.env = { ...originalEnv }
   globalThis.fetch = originalFetch
+  vi.restoreAllMocks()
 })
 
 describe('assign departments route', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
   it('returns SCHEMA_NOT_READY when enterprise_user_departments table is missing', async () => {
     process.env.ADMIN_API_KEY = 'test-admin-key'
     process.env.SUPABASE_URL = 'https://example.supabase.co'
