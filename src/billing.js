@@ -12,8 +12,8 @@ import { createSupabaseRestClient } from './supabaseRest.js'
 // - rating_results.amount: intermediate precision (stored as-is from calculation)
 // - bill_line_items.amount: final precision (rounded to BILLING_PRECISION)
 // - bill.total_amount = SUM(line_items.amount), NOT re-rounded from rating_results
-const BILLING_PRECISION = 2
-function roundAmount(value) {
+export const BILLING_PRECISION = 2
+export function roundAmount(value) {
   if (!Number.isFinite(value)) return 0
   // ROUND_HALF_UP: standard rounding (0.005 → 0.01)
   const factor = Math.pow(10, BILLING_PRECISION)
@@ -289,27 +289,36 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
   const nextMonth = new Date(startDate)
   nextMonth.setMonth(nextMonth.getMonth() + 1)
   const endDate = nextMonth
+  const periodStart = startDate.toISOString().slice(0, 10)
+  const periodEnd = endDate.toISOString().slice(0, 10)
 
-  // 2. Fetch SIMs (simplified: all SIMs or by enterprise)
-  let simQuery = 'select=sim_id,iccid,enterprise_id,status&limit=1000'
-  if (enterpriseId) simQuery += `&enterprise_id=eq.${enterpriseId}`
-  
-  // supabaseRest selectWithCount returns { data, total }
-  const { data: sims } = await supabase.selectWithCount('sims', simQuery)
+  // 2. Fetch SIMs — paginated to handle >1000 SIMs
+  const allSims = []
+  const SIM_PAGE_SIZE = 500
+  let simOffset = 0
+  while (true) {
+    let simQuery = `select=sim_id,iccid,enterprise_id,status&order=sim_id.asc&limit=${SIM_PAGE_SIZE}&offset=${simOffset}`
+    if (enterpriseId) simQuery += `&enterprise_id=eq.${enterpriseId}`
+    const { data: page } = await supabase.selectWithCount('sims', simQuery)
+    if (!page || page.length === 0) break
+    allSims.push(...page)
+    if (page.length < SIM_PAGE_SIZE) break
+    simOffset += SIM_PAGE_SIZE
+  }
+  const sims = allSims
 
   if (!sims || sims.length === 0) {
       console.log('[Billing] No SIMs found.')
-      return
+      return { calculationId: calcId, totalBillAmount: 0, lineItems: [], ratingResults: [], currency: 'USD' }
   }
   console.log(`[Billing] Found ${sims.length} SIMs to process`)
 
-  // 3. Pre-fetch Packages and Price Plans
-  // supabaseRest select returns array directly
+  // 3. Pre-fetch Packages and Price Plans (unchanged — these are global/small sets)
   const packagesData = await supabase.select(
     'package_versions',
     'select=*,packages(*),price_plan_id,price_plan_version_id'
   )
-  
+
   const packageMap = {}
   if (packagesData) {
     packagesData.forEach(p => {
@@ -389,22 +398,67 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
     return resolvePlanCurrency(firstPlan)
   })()
 
+  // ============================================================
+  // FIX: Batch-fetch subscriptions, usage, and state history
+  // instead of N+1 per-SIM queries (30万→3 queries)
+  // ============================================================
+
+  // Process SIMs in batches to avoid too-long IN clauses
+  const BATCH_SIZE = 500
   const simContexts = []
-  for (const sim of sims) {
-    const subs = await supabase.select('subscriptions', `select=*&sim_id=eq.${sim.sim_id}`)
-    const usageLogs = await supabase.select(
-      'usage_daily_summary',
-      `select=*&sim_id=eq.${sim.sim_id}&usage_day=gte.${startDate.toISOString().slice(0, 10)}&usage_day=lt.${endDate.toISOString().slice(0, 10)}`
-    )
-    const historyRows = await supabase.select(
-      'sim_state_history',
-      `select=after_status,start_time,end_time&sim_id=eq.${sim.sim_id}&start_time=lt.${endDate.toISOString()}`
-    )
-    const history = Array.isArray(historyRows) ? historyRows : []
-    if ((!subs || subs.length === 0) && (!usageLogs || usageLogs.length === 0)) continue
-    const highWater = resolveHighWaterStatus(history, startDate, endDate, sim.status)
-    simContexts.push({ sim, subs, usageLogs, history, highWater })
+
+  for (let batchStart = 0; batchStart < sims.length; batchStart += BATCH_SIZE) {
+    const batch = sims.slice(batchStart, batchStart + BATCH_SIZE)
+    const simIds = batch.map(s => s.sim_id)
+    const simIdFilter = simIds.map(id => encodeURIComponent(id)).join(',')
+
+    // Batch-fetch all 3 data sets in parallel
+    const [allSubs, allUsage, allHistory] = await Promise.all([
+      supabase.select('subscriptions', `select=*&sim_id=in.(${simIdFilter})`),
+      supabase.select(
+        'usage_daily_summary',
+        `select=*&sim_id=in.(${simIdFilter})&usage_day=gte.${periodStart}&usage_day=lt.${periodEnd}`
+      ),
+      supabase.select(
+        'sim_state_history',
+        `select=sim_id,after_status,start_time,end_time&sim_id=in.(${simIdFilter})&start_time=lt.${endDate.toISOString()}`
+      ),
+    ])
+
+    // Index by sim_id
+    const subsBySimId = new Map()
+    for (const sub of (Array.isArray(allSubs) ? allSubs : [])) {
+      const key = sub.sim_id
+      if (!subsBySimId.has(key)) subsBySimId.set(key, [])
+      subsBySimId.get(key).push(sub)
+    }
+    const usageBySimId = new Map()
+    for (const usage of (Array.isArray(allUsage) ? allUsage : [])) {
+      const key = usage.sim_id
+      if (!usageBySimId.has(key)) usageBySimId.set(key, [])
+      usageBySimId.get(key).push(usage)
+    }
+    const historyBySimId = new Map()
+    for (const h of (Array.isArray(allHistory) ? allHistory : [])) {
+      const key = h.sim_id
+      if (!historyBySimId.has(key)) historyBySimId.set(key, [])
+      historyBySimId.get(key).push(h)
+    }
+
+    for (const sim of batch) {
+      const subs = subsBySimId.get(sim.sim_id) || []
+      const usageLogs = usageBySimId.get(sim.sim_id) || []
+      const history = historyBySimId.get(sim.sim_id) || []
+      if (subs.length === 0 && usageLogs.length === 0) continue
+      const highWater = resolveHighWaterStatus(history, startDate, endDate, sim.status)
+      simContexts.push({ sim, subs, usageLogs, history, highWater })
+    }
   }
+
+  // FIX: Sort simContexts by sim_id for deterministic pool usage order
+  // This ensures FIXED_BUNDLE/SIM_DEPENDENT_BUNDLE shared pool deduction
+  // follows a stable, reproducible order (alphabetical by sim_id).
+  simContexts.sort((a, b) => String(a.sim.sim_id).localeCompare(String(b.sim.sim_id)))
 
   const packageCounts = new Map()
   for (const ctx of simContexts) {
@@ -694,17 +748,31 @@ export async function generateMonthlyBill(job, supabaseClient) {
   const calculationId = payload.calculationId || job.job_id || `calc-${Date.now()}`
   console.log(`[Billing] Generating bill for period ${billPeriod}, enterprise: ${enterpriseId || 'ALL'}`)
 
-  const result = await computeMonthlyCharges({ enterpriseId, billPeriod, calculationId }, supabase)
-
   const startDate = new Date(`${billPeriod}-01T00:00:00Z`)
   const nextMonth = new Date(startDate)
   nextMonth.setMonth(nextMonth.getMonth() + 1)
   const endDate = nextMonth
+  const periodStartStr = startDate.toISOString().slice(0, 10)
+  const periodEndStr = endDate.toISOString().slice(0, 10)
+
+  // FIX: Idempotency check — skip if bill already exists for this enterprise+period
+  if (enterpriseId) {
+    const existing = await supabase.select(
+      'bills',
+      `select=bill_id,status,total_amount&enterprise_id=eq.${enterpriseId}&period_start=eq.${periodStartStr}&period_end=eq.${periodEndStr}&limit=1`
+    )
+    if (Array.isArray(existing) && existing.length > 0) {
+      console.log(`[Billing] Bill already exists for enterprise ${enterpriseId} period ${billPeriod} (bill_id=${existing[0].bill_id}), skipping.`)
+      return { billId: existing[0].bill_id, skipped: true, totalBillAmount: Number(existing[0].total_amount) }
+    }
+  }
+
+  const result = await computeMonthlyCharges({ enterpriseId, billPeriod, calculationId }, supabase)
 
   const billRows = await supabase.insert('bills', {
     enterprise_id: enterpriseId,
-    period_start: startDate.toISOString().slice(0, 10),
-    period_end: endDate.toISOString().slice(0, 10),
+    period_start: periodStartStr,
+    period_end: periodEndStr,
     status: 'GENERATED',
     total_amount: result.totalBillAmount,
     currency: result.currency ?? 'USD',

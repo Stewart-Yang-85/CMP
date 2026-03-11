@@ -1,4 +1,5 @@
 import { transitionBillStatus } from './billStatusMachine.js'
+import { roundAmount } from '../billing.js'
 
 function toError(status, code, message) {
   return { ok: false, status, code, message }
@@ -57,7 +58,7 @@ function calculateLateFee({
   const chargeableDays = Math.max(0, daysOverdue - Math.max(0, rule.gracePeriodDays))
   if (chargeableDays <= 0) return 0
   const dayRate = rule.feeType === 'PERCENTAGE' ? Math.max(0, rule.feeValue) / 100 : Math.max(0, rule.feeValue)
-  return Number((overdueAmount * dayRate * chargeableDays).toFixed(2))
+  return roundAmount(overdueAmount * dayRate * chargeableDays)
 }
 
 async function loadEnterpriseRow(supabase, enterpriseId) {
@@ -193,7 +194,7 @@ export async function getEnterpriseDunningSummary({
   }
   const lateFeeAmount = policy.enabled
     ? calculateLateFee({
-        overdueAmount: Number(totalAmount.toFixed(2)),
+        overdueAmount: roundAmount(totalAmount),
         daysOverdue,
         rule: lateFeeRule,
       })
@@ -203,7 +204,7 @@ export async function getEnterpriseDunningSummary({
     value: {
       enterpriseId,
       dunningStatus: status,
-      overdueAmount: Number(totalAmount.toFixed(2)),
+      overdueAmount: roundAmount(totalAmount),
       oldestOverdueBillId: oldest?.bill?.bill_id ?? null,
       oldestOverduePeriod: oldest?.bill?.period_start ? String(oldest.bill.period_start).slice(0, 7) : null,
       daysOverdue,
@@ -372,7 +373,7 @@ export async function runDunningCheck({
               metadata: {
                 billId,
                 daysOverdue,
-                overdueAmount: Number(totalAmount.toFixed(2)),
+                overdueAmount: roundAmount(totalAmount),
               },
             },
             { returning: 'minimal' }
@@ -407,7 +408,7 @@ export async function runDunningCheck({
             metadata: {
               billId,
               daysOverdue,
-              overdueAmount: Number(totalAmount.toFixed(2)),
+              overdueAmount: roundAmount(totalAmount),
             },
           },
           { returning: 'minimal' }

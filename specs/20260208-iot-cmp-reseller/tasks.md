@@ -7,42 +7,82 @@
 
 **Organization**: 任务按 User Story 分组，P1 优先级（US1-US6）在前，P2（US7-US11）在后。
 
-## MVP 范围（D-28 决策）
+## MVP 范围（D-28 决策，D-31 修正）
 
 > **8 周 MVP 仅交付「一张 SIM 从入库到出账」的完整链路。**
 >
-> | 维度 | MVP | V1.1 |
-> |------|-----|------|
-> | 角色 | platform_admin / reseller_admin / customer_admin | 销售总监/销售/财务/运维细分 |
-> | 资费类型 | Fixed Bundle + One-time | SIM Dependent Bundle / Tiered Pricing |
-> | 账单结构 | L1 汇总 + L3 明细 | L2 分组汇总层 |
-> | 前端 | Swagger UI + Postman（D-29） | Web Portal |
-> | 推迟模块 | — | 白标 / Dunning / 多供应商 SPI / 告警去重抑制 / APN&Roaming Profile / GDPR 脱敏 / eSIM 生命周期 |
+> | 维度 | MVP (Week 1-4, 核心) | MVP (Week 5-8, 扩展) | V1.1 |
+> |------|-----|------|------|
+> | 角色 | hardcode reseller_id（不做 RBAC 中间件） | platform_admin / reseller_admin / customer_admin | 销售总监/销售/财务/运维细分 |
+> | 资费类型 | Fixed Bundle（单一） | + One-time | SIM Dependent Bundle / Tiered Pricing |
+> | 账单结构 | L1 汇总 + L3 明细（手动触发） | 自动 T+N 出账 | L2 分组汇总层 / PDF/CSV 导出 |
+> | SIM | CRUD + 5 状态变更 | + 批量导入 + WX 上游同步 | eSIM 生命周期 |
+> | 前端 | Swagger UI + Postman（D-29） | — | Web Portal |
+> | 推迟模块 | — | — | 白标 / 多供应商 SPI / 告警去重抑制 / APN&Roaming Profile / GDPR 脱敏 |
 >
 > 标记 `[V1.1]` 的任务已有实现但 **MVP 阶段不纳入验收范围**，测试与 Bug 修复推迟到 V1.1。
 
-## 架构评审修正项 (2026-03-11)
+## 工程评审修正项 (2026-03-11, 第二轮)
 
-> 以下为高级架构评审后新增/修正的任务，已合入 MVP 执行流程:
+> 以下为专家工程评审后发现的致命/严重问题修复：
 >
-> ### 新增任务
+> ### 致命问题修复
 >
-> - [x] **T-NEW-1** 租户模型统一 — `resellers` 和 `customers` 表增加 `tenant_id UUID NOT NULL REFERENCES tenants(tenant_id) UNIQUE`，桥接 Layer 1 (tenants) ↔ Layer 2。创建 reseller/customer 时必须同步创建 tenants 记录。**修改文件**: `supabase/migrations/20260311100003_tenant_reseller.sql`
-> - [x] **T-NEW-2** Waterfall 算法文档化 — 产出决策树 + 伪代码 + golden case 映射。**产出**: `specs/20260208-iot-cmp-reseller/waterfall-algorithm.md`
-> - [x] **T-NEW-3** 测试期自动到期 cron — worker.js 新增 `TEST_EXPIRY_CHECK_CRON` (每日 03:00 UTC)，查询 TEST_READY 且测试期已过的 SIM，根据 `auto_suspend_enabled` 决定激活或停用。**修改文件**: `src/worker.js`
-> - [x] **T-NEW-4** 计费精度与舍入策略 — 全局 `ROUND_HALF_UP` + `BILLING_PRECISION=2`，统一 `roundAmount()` 函数替代所有 `.toFixed(2)` 调用。**修改文件**: `src/billing.js`
-> - [x] **T-NEW-5** Golden Case 机器可读化 — 8 个 golden case 从 SQL fixture 转为 JSON 格式。**产出**: `fixtures/golden_cases.json`
-> - [x] **T-NEW-6** 安全债务文档 — 记录 RLS 未隔离、无限流、scrypt 参数、eSIM 推迟等已知安全债务。**产出**: `specs/20260208-iot-cmp-reseller/security-debt.md`
-> - [x] **T-NEW-7** 数据库 CHECK 约束补全 — `bills` 增加 `period_start <= period_end` CHECK；`subscriptions` 增加 `effective_at <= expires_at` CHECK；`tenants.parent_id` 增加 `ON DELETE CASCADE`。**修改文件**: `supabase/migrations/20260311100001_core_schema.sql`
-> - [x] **T-NEW-9** eSIM 生命周期 guard — `simLifecycle.ts` 中 eSIM 类型操作返回 `501 NOT_IMPLEMENTED`。**修改文件**: `src/services/simLifecycle.ts`
+> - [x] **T-FIX-1** 租户模型统一 — 创建 V008 迁移文件，添加 `sync_customer_status_to_tenant()` 触发器解决 customers.status / tenants.enterprise_status 分裂脑；创建 `create_reseller()` / `create_customer()` 事务性函数保证原子创建；添加 customer_view / reseller_view 统一查询。**新增文件**: `supabase/migrations/20260311100008_tenant_model_unification.sql`
+> - [x] **T-FIX-2** RLS 多租户隔离 — 创建 V009 迁移文件，将 RLS 策略从 `using(true)` 改为基于 `auth_tenant_id()` + `is_tenant_accessible()` 的实际租户隔离（defense-in-depth）；同时在应用层 `rbac.ts` 增加 `buildTenantFilter()` / `buildTenantFilterAsync()` / `getAccessibleEnterpriseIds()` 函数作为主要隔离机制。**新增文件**: `supabase/migrations/20260311100009_rls_tenant_isolation.sql`，**修改文件**: `src/middleware/rbac.ts`
+> - [x] **T-FIX-3** 计费引擎 N+1 消除 — 将 per-SIM 的 3 次 Supabase REST 查询改为批量 `sim_id=in.(...)` 查询（每批 500 SIM，3 个 Promise.all 并行查询），10 万 SIM 从 30 万次 HTTP 请求降至 ~600 次。同时添加分页获取 SIM 列表（原 limit=1000 硬编码）。**修改文件**: `src/billing.js`
 >
-> ### 范围修正
+> ### 严重问题修复
 >
-> - **T049** (High Water Mark): 原为 MVP，**现修正为 V1.1**。理由: HWM 是 SIM Dependent Bundle 概念，MVP 仅含 Fixed Bundle + One-time，不需要 HWM 逻辑。现有 `resolveHighWaterStatus()` 保留但 MVP 不验收。
-> - **T048** 拆分: T048 原覆盖"Waterfall + 高水位"，现拆分为:
->   - **T048a** Waterfall 匹配逻辑 (仅 Fixed Bundle) — MVP 验收
->   - **T048b** One-time 直算逻辑 — MVP 验收
->   - 高水位月租计算保留在代码中但 **MVP 不单独验收**
+> - [x] **T-FIX-4** Pool 用量排序确定性 — 对 simContexts 按 sim_id 排序，确保 FIXED_BUNDLE/SIM_DEPENDENT_BUNDLE 共享池扣量顺序稳定可重现。**修改文件**: `src/billing.js`
+> - [x] **T-FIX-5** 计费幂等保障 — `generateMonthlyBill` 新增 UNIQUE 检查，已存在的 enterprise+period 组合直接跳过而不是抛 unique violation。**修改文件**: `src/billing.js`
+> - [x] **T-FIX-6** Dunning 精度统一 — dunning.ts/dunning.js 中 4 处 `.toFixed(2)` 替换为 billing.js 导出的 `roundAmount()`，与 T-NEW-4 的 ROUND_HALF_UP 策略一致。**修改文件**: `src/services/dunning.ts`, `src/services/dunning.js`
+> - [x] **T-FIX-7** `roundAmount` 导出 — `billing.js` 的 `BILLING_PRECISION` 和 `roundAmount` 从 `const/function` 改为 `export`，供 dunning 等模块复用。**修改文件**: `src/billing.js`
+>
+> ### 前端 Portal 范围澄清
+>
+> - `specs/20260208-iot-cmp-reseller/frontend-portal-blueprint.md` **明确标记为 V1.1 范围**，MVP 阶段不纳入交付范围。
+> - MVP 阶段如需操作界面，使用 Retool/Appsmith 等低代码工具搭建临时后台。
+
+## 可执行落地流程（D-31 更新）
+
+> ```
+> Week 1: 地基（不写业务代码，只修基础）
+> ├── Day 1-2: 确认 app.ts 可运行，理清 TS/JS 双栈关系
+> ├── Day 3: 运行 V001-V009 迁移，验证数据库 schema 完整性
+> ├── Day 4-5: 租户模型验证（create_reseller/create_customer 函数 + 触发器同步测试）
+>
+> Week 2: SIM + 单一资费
+> ├── Day 1-2: SIM CRUD + 5 状态机验证 + 5 个状态转换单元测试
+> ├── Day 3-4: Fixed Bundle 资费创建（price_plan + package + package_version API）
+> ├── Day 5: 订阅创建（SIM 绑定 package 的完整流程）
+>
+> Week 3: 计费引擎
+> ├── Day 1-2: 验证批量查询重构后的计费引擎（billing.test.ts with mock supabase）
+> ├── Day 3-4: 8 个 golden test case 全部通过
+> ├── Day 5: 手动触发出账（POST /admin/billing/run → 生成 bills + line_items）
+>
+> Week 4: 联调 + 修 Bug
+> ├── Day 1-2: 端到端冒烟：创建 SIM → 订阅 → 注入用量 → 出账 → 查账单
+> ├── Day 3-4: 修复发现的问题
+> ├── Day 5: 部署到 Vercel staging
+>
+> Week 5: RBAC + 多租户隔离
+> ├── buildTenantFilterAsync 集成到所有路由
+> ├── 3 角色验证（platform_admin / reseller_admin / customer_admin）
+>
+> Week 6: One-time 资费 + 自动出账
+> ├── One-time 计费逻辑 + golden case
+> ├── Vercel Cron 自动出账（T+N 配置）
+>
+> Week 7: 批量导入 + WX 上游同步
+> ├── SIM 批量导入 Job（10 万条上限，幂等 batchId/fileHash）
+> ├── WX 适配器双向同步
+>
+> Week 8: Dunning + 回归测试
+> ├── Dunning 时间轴基础版
+> ├── 全量回归测试 + 性能验证
+> ```
 
 ## Format: `[ID] [P?] [Story] Description`
 - **[P]**: 可并行执行（操作不同文件，无依赖）

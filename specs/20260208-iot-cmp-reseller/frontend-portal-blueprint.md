@@ -1,5 +1,7 @@
 # 前端 WEB Portal 开发蓝图
 
+> **V1.1 范围** — 本文档定义的 Web Portal 不纳入 MVP 交付范围。MVP 阶段使用 Swagger UI + Postman 验证 API 正确性。如需临时操作界面，使用 Retool/Appsmith 低代码平台搭建。
+
 ## 目标与范围
 
 - 面向代理商与企业运维的统一门户
@@ -263,6 +265,35 @@
 - 列表分页：page、pageSize、sort
 - 详情页缓存：基于 simId、billId、jobId 的缓存键
 - 异步任务：创建后轮询 status，失败态展示 error
+- 批量操作：逐条展示结果与错误码，汇总展示成功/失败/幂等计数
+
+### 批量错误码展示规则
+
+| 错误码 | 展示文案 | 处理建议 |
+| --- | --- | --- |
+| INVALID_SIM_ID | SIM 标识无效 | 检查 simId/ICCID 格式 |
+| RESOURCE_NOT_FOUND | SIM 不存在或无权限 | 检查所属企业或输入清单 |
+| INVALID_STATE | 当前状态不允许变更 | 先完成必要的前置状态 |
+| ENTERPRISE_INACTIVE | 企业未激活 | 启用企业后再操作 |
+| COMMITMENT_NOT_MET | 承诺期未满足 | 等待承诺期结束或走豁免流程 |
+| INTERNAL_ERROR | 系统处理失败 | 稍后重试或联系管理员 |
+
+### i18n 文案配置建议
+
+```json
+{
+  "errors": {
+    "batch": {
+      "INVALID_SIM_ID": "SIM 标识无效",
+      "RESOURCE_NOT_FOUND": "SIM 不存在或无权限",
+      "INVALID_STATE": "当前状态不允许变更",
+      "ENTERPRISE_INACTIVE": "企业未激活",
+      "COMMITMENT_NOT_MET": "承诺期未满足",
+      "INTERNAL_ERROR": "系统处理失败"
+    }
+  }
+}
+```
 
 ## 安全与合规要求
 
