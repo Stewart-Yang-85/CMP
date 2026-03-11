@@ -3,6 +3,10 @@
 /* tslint:disable */
 /* eslint-disable */
 import type { ConnectionStatus } from '../models/ConnectionStatus';
+import type { ReadyResponse } from '../models/ReadyResponse';
+import type { ResetConnectionResponse } from '../models/ResetConnectionResponse';
+import type { SimLocation } from '../models/SimLocation';
+import type { SimLocationHistoryResponse } from '../models/SimLocationHistoryResponse';
 import type { CancelablePromise } from '../core/CancelablePromise';
 import { OpenAPI } from '../core/OpenAPI';
 import { request as __request } from '../core/request';
@@ -29,17 +33,14 @@ export class DiagnosticsService {
     /**
      * Reset Network Connection
      * Requests upstream CMP to reset connectivity (if supported).
-     * @returns any Reset command accepted
+     * @returns ResetConnectionResponse Reset command accepted
      * @throws ApiError
      */
     public static postSims-:resetConnection({
         iccid,
     }: {
         iccid: string,
-    }): CancelablePromise<{
-        success?: boolean;
-        message?: string;
-    }> {
+    }): CancelablePromise<ResetConnectionResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/sims/{iccid}:reset-connection',
@@ -50,18 +51,14 @@ export class DiagnosticsService {
     }
     /**
      * Get Current Location
-     * @returns any Current location (if supported by supplier)
+     * @returns SimLocation Current location (if supported by supplier)
      * @throws ApiError
      */
     public static getSimsLocation({
         iccid,
     }: {
         iccid: string,
-    }): CancelablePromise<{
-        visitedMccMnc?: string;
-        country?: string;
-        updatedAt?: string;
-    }> {
+    }): CancelablePromise<SimLocation> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/sims/{iccid}/location',
@@ -72,7 +69,7 @@ export class DiagnosticsService {
     }
     /**
      * Get Location History
-     * @returns any Location history
+     * @returns SimLocationHistoryResponse Location history
      * @throws ApiError
      */
     public static getSimsLocationHistory({
@@ -83,10 +80,7 @@ export class DiagnosticsService {
         iccid: string,
         startDate: string,
         endDate: string,
-    }): CancelablePromise<Array<{
-        visitedMccMnc?: string;
-        occurredAt?: string;
-    }>> {
+    }): CancelablePromise<SimLocationHistoryResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/sims/{iccid}/location-history',
@@ -102,13 +96,10 @@ export class DiagnosticsService {
     /**
      * Readiness Probe
      * Returns readiness of the service, including upstream Supabase connectivity if configured.
-     * @returns any Service is ready
+     * @returns ReadyResponse Service is ready
      * @throws ApiError
      */
-    public static getReady(): CancelablePromise<{
-        ok?: boolean;
-        details?: Record<string, any>;
-    }> {
+    public static getReady(): CancelablePromise<ReadyResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/ready',

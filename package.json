@@ -30,6 +30,7 @@
     "build:openapi-artifact": "node tools/build_openapi_artifact.js"
   },
   "dependencies": {
+    "@rollup/rollup-darwin-arm64": "^4.59.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "fastify": "^5.7.4",
@@ -46,7 +47,7 @@
     "pg": "^8.11.3",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.3",
-    "yaml": "^2.8.0",
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "yaml": "^2.8.0"
   }
 }

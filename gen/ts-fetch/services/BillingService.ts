@@ -3,6 +3,7 @@
 /* tslint:disable */
 /* eslint-disable */
 import type { Bill } from '../models/Bill';
+import type { BillFileLinksResponse } from '../models/BillFileLinksResponse';
 import type { BillList } from '../models/BillList';
 import type { CancelablePromise } from '../core/CancelablePromise';
 import { OpenAPI } from '../core/OpenAPI';
@@ -101,17 +102,14 @@ export class BillingService {
     }
     /**
      * Download Bill Files
-     * @returns any File URLs
+     * @returns BillFileLinksResponse File URLs
      * @throws ApiError
      */
     public static getBillsFiles({
         billId,
     }: {
         billId: string,
-    }): CancelablePromise<{
-        pdfUrl?: string | null;
-        csvUrl?: string;
-    }> {
+    }): CancelablePromise<BillFileLinksResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/bills/{billId}/files',

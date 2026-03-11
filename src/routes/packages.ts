@@ -1,4 +1,11 @@
-import { createPackage, updatePackage, publishPackage, listPackages, getPackageDetail } from '../services/package.js'
+import {
+  createPackage,
+  updatePackage,
+  publishPackage,
+  listPackages,
+  listPackagesByModuleRefs,
+  getPackageDetail,
+} from '../services/package.js'
 
 type Deps = {
   createSupabaseRestClient: (options: { useServiceRole: boolean; traceId?: string | null }) => {
@@ -106,6 +113,35 @@ export function registerPackageRoutes({ app, prefix, deps }: { app: any; prefix:
     const packageId = String(req.params.packageId || '').trim()
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const result = await getPackageDetail({ supabase, packageId })
+    if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
+    res.json((result as any).value)
+  })
+
+  app.get(`${prefix}/packages`, async (req: any, res: any) => {
+    const auth = ensureResellerSales(req, res)
+    if (!auth) return
+    const { pricePlanId, commercialTermsId, controlPolicyId, enterpriseId: enterpriseIdRaw, status, page, pageSize } = req.query ?? {}
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    let enterpriseId: string | null = enterpriseIdRaw ? String(enterpriseIdRaw).trim() : null
+    if (auth.scope === 'reseller') {
+      if (!enterpriseId || !isValidUuid(enterpriseId)) {
+        return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+      }
+      enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, enterpriseId)
+      if (!enterpriseId) return
+    } else if (enterpriseId && !isValidUuid(enterpriseId)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+    }
+    const result = await listPackagesByModuleRefs({
+      supabase,
+      enterpriseId,
+      pricePlanId,
+      commercialTermsId,
+      controlPolicyId,
+      status,
+      page,
+      pageSize,
+    })
     if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
     res.json((result as any).value)
   })

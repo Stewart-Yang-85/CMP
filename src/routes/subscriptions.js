@@ -21,7 +21,7 @@ export function registerSubscriptionRoutes({ app, prefix, deps }) {
       sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
       return null
     }
-    if (roleScope === 'platform' || role === 'platform_admin') return { scope: 'platform' }
+    if (roleScope === 'platform' || role === 'platform_admin' || role === 'admin') return { scope: 'platform' }
     if (roleScope === 'reseller' && role && resellerSalesRoles.has(role)) return { scope: 'reseller' }
     if (roleScope === 'customer') return { scope: 'customer' }
     if (roleScope === 'department') return { scope: 'department' }
@@ -43,7 +43,10 @@ export function registerSubscriptionRoutes({ app, prefix, deps }) {
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     let enterpriseId = body.enterpriseId ? String(body.enterpriseId).trim() : null
     if (roleScope === 'reseller') {
-      if (!enterpriseId || !isValidUuid(enterpriseId)) {
+      if (!enterpriseId) {
+        return sendError(res, 404, 'SIM_NOT_FOUND', `sim ${parsed.value} not found.`)
+      }
+      if (!isValidUuid(enterpriseId)) {
         return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
       }
       enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, enterpriseId)
@@ -51,7 +54,10 @@ export function registerSubscriptionRoutes({ app, prefix, deps }) {
     } else if (roleScope === 'platform') {
       const fromReq = getEnterpriseIdFromReq(req)
       enterpriseId = enterpriseId || (fromReq ? String(fromReq) : null)
-      if (!enterpriseId || !isValidUuid(enterpriseId)) {
+      if (!enterpriseId) {
+        return sendError(res, 404, 'SIM_NOT_FOUND', `sim ${parsed.value} not found.`)
+      }
+      if (!isValidUuid(enterpriseId)) {
         return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
       }
     } else {
@@ -174,6 +180,28 @@ export function registerSubscriptionRoutes({ app, prefix, deps }) {
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const query = req.query ?? {}
     let enterpriseId = query.enterpriseId ? String(query.enterpriseId).trim() : null
+    if (!enterpriseId && (roleScope === 'platform' || roleScope === 'reseller')) {
+      const selectQuery = `select=enterprise_id&${parsed.field}=eq.${encodeURIComponent(parsed.value)}&limit=1`
+      console.log(`[DEBUG] resolving enterprise for ${parsed.field}=${parsed.value}, query=${selectQuery}`)
+      const sim = await supabase.select('sims', selectQuery)
+      console.log(`[DEBUG] sim lookup result:`, JSON.stringify(sim))
+      const found = Array.isArray(sim) ? sim[0] : null
+      if (found && found.enterprise_id) {
+        enterpriseId = found.enterprise_id
+      }
+      if (!enterpriseId && parsed.field === 'iccid') {
+        const iccidValue = String(parsed.value || '').trim()
+        const fuzzyQuery = `select=enterprise_id,iccid&iccid=ilike.${encodeURIComponent(`%${iccidValue}%`)}&limit=20`
+        const fallback = await supabase.select('sims', fuzzyQuery)
+        const candidates = Array.isArray(fallback) ? fallback : []
+        const normalizeDigits = (value) => String(value || '').replace(/\D/g, '')
+        const target = normalizeDigits(iccidValue)
+        const match = candidates.find((row) => normalizeDigits(row.iccid) === target)
+        if (match && match.enterprise_id) {
+          enterpriseId = match.enterprise_id
+        }
+      }
+    }
     if (roleScope === 'reseller') {
       if (!enterpriseId || !isValidUuid(enterpriseId)) {
         return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')

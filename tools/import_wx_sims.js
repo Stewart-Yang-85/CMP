@@ -21,6 +21,17 @@ async function ensureCarrier(supabase, mcc, mnc, name = null) {
   return Array.isArray(created) ? created[0] : null
 }
 
+async function ensureBusinessOperator(supabase, mcc, mnc, name = null) {
+  const rows = await supabase.select(
+    'business_operators',
+    `select=operator_id,mcc,mnc,name&mcc=eq.${encodeURIComponent(mcc)}&mnc=eq.${encodeURIComponent(mnc)}&limit=1`
+  )
+  const existing = Array.isArray(rows) ? rows[0] : null
+  if (existing) return existing
+  const created = await supabase.insert('business_operators', { mcc, mnc, name })
+  return Array.isArray(created) ? created[0] : null
+}
+
 async function ensureSupplierCarrierLink(supabase, supplierId, carrierId) {
   const rows = await supabase.select(
     'supplier_carriers',
@@ -32,13 +43,25 @@ async function ensureSupplierCarrierLink(supabase, supplierId, carrierId) {
   return Array.isArray(created) ? created[0] : null
 }
 
-async function ensureSim(supabase, iccid, primaryImsi, msisdn, supplierId, carrierId) {
-  const rows = await supabase.select('sims', `select=sim_id,iccid,primary_imsi,msisdn&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
+async function ensureOperator(supabase, supplierId, carrierId, name = null) {
+  const rows = await supabase.select(
+    'operators',
+    `select=operator_id,supplier_id,carrier_id&supplier_id=eq.${encodeURIComponent(supplierId)}&carrier_id=eq.${encodeURIComponent(carrierId)}&limit=1`
+  )
+  const existing = Array.isArray(rows) ? rows[0] : null
+  if (existing) return existing
+  const created = await supabase.insert('operators', { supplier_id: supplierId, carrier_id: carrierId, name })
+  return Array.isArray(created) ? created[0] : null
+}
+
+async function ensureSim(supabase, iccid, primaryImsi, msisdn, supplierId, carrierId, operatorId) {
+  const rows = await supabase.select('sims', `select=sim_id,iccid,primary_imsi,msisdn,operator_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
   const existing = Array.isArray(rows) ? rows[0] : null
   if (existing) {
     const updates = {}
     if (!existing.primary_imsi && primaryImsi) updates.primary_imsi = primaryImsi
     if (!existing.msisdn && msisdn) updates.msisdn = msisdn
+    if (!existing.operator_id && operatorId) updates.operator_id = operatorId
     if (Object.keys(updates).length > 0) {
       await supabase.update('sims', `sim_id=eq.${encodeURIComponent(existing.sim_id)}`, updates, { returning: 'minimal' })
     }
@@ -50,6 +73,7 @@ async function ensureSim(supabase, iccid, primaryImsi, msisdn, supplierId, carri
     msisdn,
     supplier_id: supplierId,
     carrier_id: carrierId,
+    operator_id: operatorId,
     status: 'INVENTORY'
   })
   return Array.isArray(created) ? created[0] : null
@@ -61,7 +85,10 @@ async function main() {
   if (!supplier) throw new Error('Failed to ensure supplier WXZHONGGENG')
   const carrier = await ensureCarrier(supabase, '204', '08', 'MCC 204 MNC 08')
   if (!carrier) throw new Error('Failed to ensure carrier 204/08')
+  await ensureBusinessOperator(supabase, '204', '08', 'MCC 204 MNC 08')
   await ensureSupplierCarrierLink(supabase, supplier.supplier_id, carrier.carrier_id)
+  const operator = await ensureOperator(supabase, supplier.supplier_id, carrier.carrier_id, carrier.name)
+  if (!operator) throw new Error('Failed to ensure operator link')
 
   const sims = [
     { iccid: '893107032536638540', imsi: '204080936638540', msisdn: '3197093407905' },
@@ -156,14 +183,14 @@ async function main() {
     const imsi = toStr(entry.imsi)
     const msisdn = toStr(entry.msisdn)
     if (!iccid) continue
-    const sim = await ensureSim(supabase, iccid, imsi, msisdn, supplier.supplier_id, carrier.carrier_id)
+    const sim = await ensureSim(supabase, iccid, imsi, msisdn, supplier.supplier_id, carrier.carrier_id, operator.operator_id)
     if (!sim) throw new Error(`Failed to ensure sim ${iccid}`)
     results.push({ iccid, simId: sim.sim_id })
   }
 
   process.stdout.write(JSON.stringify({
     supplierId: supplier.supplier_id,
-    carrierId: carrier.carrier_id,
+    operatorId: operator.operator_id,
     sims: results
   }) + '\n')
 }

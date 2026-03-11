@@ -3,8 +3,11 @@ import {
   createRoamingProfile,
   createApnProfileVersion,
   createRoamingProfileVersion,
+  deriveRoamingProfileVersion,
   listApnProfiles,
+  listRoamingProfileEntries,
   listRoamingProfiles,
+  patchRoamingProfileEntries,
   getApnProfileDetail,
   getRoamingProfileDetail,
   publishApnProfile,
@@ -68,9 +71,15 @@ export function registerNetworkProfileRoutes({ app, prefix, deps }: { app: any; 
   app.get(`${prefix}/apn-profiles`, async (req: any, res: any) => {
     const auth = ensureResellerSales(req, res)
     if (!auth) return
-    const { supplierId, carrierId, status, page, pageSize } = req.query ?? {}
+    const { supplierId, operatorId, status, page, pageSize } = req.query ?? {}
+    if (!supplierId && !operatorId) {
+      return sendError(res, 400, 'BAD_REQUEST', 'supplierId or operatorId is required.')
+    }
+    if (operatorId && !isValidUuid(operatorId)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'operatorId must be a valid uuid.')
+    }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-    const result = await listApnProfiles({ supabase, supplierId, carrierId, status, page, pageSize })
+    const result = await listApnProfiles({ supabase, supplierId, operatorId, status, page, pageSize })
     if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
     res.json((result as any).value)
   })
@@ -78,9 +87,16 @@ export function registerNetworkProfileRoutes({ app, prefix, deps }: { app: any; 
   app.get(`${prefix}/roaming-profiles`, async (req: any, res: any) => {
     const auth = ensureResellerSales(req, res)
     if (!auth) return
-    const { supplierId, carrierId, status, page, pageSize } = req.query ?? {}
+    const { supplierId, operatorId: operatorIdRaw, carrierId, status, page, pageSize } = req.query ?? {}
+    const operatorId = operatorIdRaw ?? carrierId ?? null
+    if (!supplierId && !operatorId) {
+      return sendError(res, 400, 'BAD_REQUEST', 'supplierId or operatorId is required.')
+    }
+    if (operatorId && !isValidUuid(operatorId)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'operatorId must be a valid uuid.')
+    }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-    const result = await listRoamingProfiles({ supabase, supplierId, carrierId, status, page, pageSize })
+    const result = await listRoamingProfiles({ supabase, supplierId, operatorId, status, page, pageSize })
     if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
     res.json((result as any).value)
   })
@@ -141,6 +157,64 @@ export function registerNetworkProfileRoutes({ app, prefix, deps }: { app: any; 
     const result = await createRoamingProfileVersion({ supabase, roamingProfileId, payload: req.body ?? {}, audit })
     if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
     res.status(201).json((result as any).value)
+  })
+
+  app.post(`${prefix}/roaming-profiles/:roamingProfileId/versions\\:derive`, async (req: any, res: any) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const audit = {
+      actorUserId: req?.cmpAuth?.userId ?? null,
+      actorRole: req?.cmpAuth?.role ?? null,
+      requestId: getTraceId(res),
+      sourceIp: req.ip,
+    }
+    const roamingProfileId = String(req.params.roamingProfileId || '').trim()
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const result = await deriveRoamingProfileVersion({ supabase, roamingProfileId, payload: req.body ?? {}, audit })
+    if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
+    res.status(201).json((result as any).value)
+  })
+
+  app.get(`${prefix}/roaming-profiles/:roamingProfileId/versions/:profileVersionId/entries`, async (req: any, res: any) => {
+    const auth = ensureResellerSales(req, res)
+    if (!auth) return
+    const roamingProfileId = String(req.params.roamingProfileId || '').trim()
+    const profileVersionId = String(req.params.profileVersionId || '').trim()
+    const { includeDeleted, page, pageSize } = req.query ?? {}
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const result = await listRoamingProfileEntries({
+      supabase,
+      roamingProfileId,
+      profileVersionId,
+      includeDeleted,
+      page,
+      pageSize,
+    })
+    if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
+    res.json((result as any).value)
+  })
+
+  app.post(`${prefix}/roaming-profiles/:roamingProfileId/versions/:profileVersionId\\:patch-entries`, async (req: any, res: any) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const audit = {
+      actorUserId: req?.cmpAuth?.userId ?? null,
+      actorRole: req?.cmpAuth?.role ?? null,
+      requestId: getTraceId(res),
+      sourceIp: req.ip,
+    }
+    const roamingProfileId = String(req.params.roamingProfileId || '').trim()
+    const profileVersionId = String(req.params.profileVersionId || '').trim()
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const result = await patchRoamingProfileEntries({
+      supabase,
+      roamingProfileId,
+      profileVersionId,
+      payload: req.body ?? {},
+      audit,
+    })
+    if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
+    res.json((result as any).value)
   })
 
   app.post(`${prefix}/apn-profiles/:apnProfileId\\:publish`, async (req: any, res: any) => {

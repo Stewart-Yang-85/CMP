@@ -2,6 +2,25 @@
 /* istanbul ignore file */
 /* tslint:disable */
 /* eslint-disable */
+import type { AdminApiClientListResponse } from '../models/AdminApiClientListResponse';
+import type { AdminApiClientRotateRequest } from '../models/AdminApiClientRotateRequest';
+import type { AdminApiClientRotateResponse } from '../models/AdminApiClientRotateResponse';
+import type { AdminApiClientStatusResponse } from '../models/AdminApiClientStatusResponse';
+import type { AdminJobTestReadyExpiryRunRequest } from '../models/AdminJobTestReadyExpiryRunRequest';
+import type { AdminJobTestReadyExpiryRunResponse } from '../models/AdminJobTestReadyExpiryRunResponse';
+import type { AdminJobWxSyncDailyUsageRequest } from '../models/AdminJobWxSyncDailyUsageRequest';
+import type { AdminJobWxSyncDailyUsageResponse } from '../models/AdminJobWxSyncDailyUsageResponse';
+import type { AdminSimActionResponse } from '../models/AdminSimActionResponse';
+import type { AdminSimBackdateTestStartRequest } from '../models/AdminSimBackdateTestStartRequest';
+import type { AdminSimBackdateTestStartResponse } from '../models/AdminSimBackdateTestStartResponse';
+import type { AdminSimEvaluateTestExpiryResponse } from '../models/AdminSimEvaluateTestExpiryResponse';
+import type { AdminSimSeedUsageRequest } from '../models/AdminSimSeedUsageRequest';
+import type { AdminSimSeedUsageResponse } from '../models/AdminSimSeedUsageResponse';
+import type { AdminWxSimStatusResponse } from '../models/AdminWxSimStatusResponse';
+import type { AdminWxSyncSimInfoBatchRequest } from '../models/AdminWxSyncSimInfoBatchRequest';
+import type { AdminWxSyncSimInfoBatchResponse } from '../models/AdminWxSyncSimInfoBatchResponse';
+import type { AuditLogListResponse } from '../models/AuditLogListResponse';
+import type { EventListResponse } from '../models/EventListResponse';
 import type { CancelablePromise } from '../core/CancelablePromise';
 import { OpenAPI } from '../core/OpenAPI';
 import { request as __request } from '../core/request';
@@ -61,7 +80,7 @@ export class AdminService {
     /**
      * List Events (Admin)
      * Internal admin endpoint to list events with filters.
-     * @returns any List of events
+     * @returns EventListResponse List of events
      * @throws ApiError
      */
     public static adminEvents({
@@ -110,18 +129,7 @@ export class AdminService {
         end?: string,
         page?: number,
         limit?: number,
-    }): CancelablePromise<{
-        items?: Array<{
-            eventId?: string;
-            eventType?: string;
-            occurredAt?: string;
-            tenantId?: string | null;
-            requestId?: string | null;
-            jobId?: string | null;
-            payload?: Record<string, any>;
-        }>;
-        total?: number;
-    }> {
+    }): CancelablePromise<EventListResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/admin/events',
@@ -145,14 +153,14 @@ export class AdminService {
     /**
      * Get WXZHONGGENG SIM Status (Admin)
      * Fetch real-time status from WXZHONGGENG API.
-     * @returns any WXZHONGGENG SIM status
+     * @returns AdminWxSimStatusResponse WXZHONGGENG SIM status
      * @throws ApiError
      */
     public static getAdminWxSimsStatus({
         iccid,
     }: {
         iccid: string,
-    }): CancelablePromise<Record<string, any>> {
+    }): CancelablePromise<AdminWxSimStatusResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/admin/wx/sims/{iccid}/status',
@@ -164,22 +172,14 @@ export class AdminService {
     /**
      * Sync WXZHONGGENG SIM Info Batch (Admin)
      * Batch sync SIM info from WXZHONGGENG API via background job.
-     * @returns any Sync job accepted
+     * @returns AdminWxSyncSimInfoBatchResponse Sync job accepted
      * @throws ApiError
      */
     public static postAdminJobs:wxSyncSimInfoBatch({
         requestBody,
     }: {
-        requestBody: {
-            enterpriseId?: string;
-            pageSize?: number;
-            pageIndex?: number;
-        },
-    }): CancelablePromise<{
-        jobId?: string;
-        status?: string;
-        message?: string;
-    }> {
+        requestBody: AdminWxSyncSimInfoBatchRequest,
+    }): CancelablePromise<AdminWxSyncSimInfoBatchResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/admin/jobs:wx-sync-sim-info-batch',
@@ -190,7 +190,7 @@ export class AdminService {
     /**
      * List API Clients (Admin)
      * Internal admin endpoint to list downstream API clients.
-     * @returns any List of API clients
+     * @returns AdminApiClientListResponse List of API clients
      * @throws ApiError
      */
     public static getAdminApiClients({
@@ -210,16 +210,7 @@ export class AdminService {
         sortOrder?: 'asc' | 'desc',
         page?: number,
         limit?: number,
-    }): CancelablePromise<{
-        items?: Array<{
-            clientId?: string;
-            enterpriseId?: string;
-            status?: string;
-            createdAt?: string;
-            rotatedAt?: string | null;
-        }>;
-        total?: number;
-    }> {
+    }): CancelablePromise<AdminApiClientListResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/admin/api-clients',
@@ -273,7 +264,7 @@ export class AdminService {
     /**
      * Rotate API Client Secret (Admin)
      * Generates (or accepts) a new clientSecret and returns it once.
-     * @returns any New secret
+     * @returns AdminApiClientRotateResponse New secret
      * @throws ApiError
      */
     public static adminApiClientsRotate({
@@ -281,13 +272,8 @@ export class AdminService {
         requestBody,
     }: {
         clientId: string,
-        requestBody?: {
-            clientSecret?: string;
-        },
-    }): CancelablePromise<{
-        clientId?: string;
-        clientSecret?: string;
-    }> {
+        requestBody?: AdminApiClientRotateRequest,
+    }): CancelablePromise<AdminApiClientRotateResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/admin/api-clients/{clientId}:rotate',
@@ -301,17 +287,14 @@ export class AdminService {
     /**
      * Deactivate API Client (Admin)
      * Disables an API client so it can no longer obtain tokens.
-     * @returns any Updated status
+     * @returns AdminApiClientStatusResponse Updated status
      * @throws ApiError
      */
     public static adminApiClientsDeactivate({
         clientId,
     }: {
         clientId: string,
-    }): CancelablePromise<{
-        clientId?: string;
-        status?: string;
-    }> {
+    }): CancelablePromise<AdminApiClientStatusResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/admin/api-clients/{clientId}:deactivate',
@@ -323,16 +306,14 @@ export class AdminService {
     /**
      * Assign SIM to TEST_READY (Admin)
      * Marks a SIM as TEST_READY and records state history and event.
-     * @returns any Assignment success
+     * @returns AdminSimActionResponse Assignment success
      * @throws ApiError
      */
     public static adminSimsAssignTest({
         iccid,
     }: {
         iccid: string,
-    }): CancelablePromise<{
-        success?: boolean;
-    }> {
+    }): CancelablePromise<AdminSimActionResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/admin/sims/{iccid}:assign-test',
@@ -344,16 +325,14 @@ export class AdminService {
     /**
      * Reset SIM to INVENTORY (Admin)
      * Resets a SIM status to INVENTORY and records state history and event.
-     * @returns any Reset success
+     * @returns AdminSimActionResponse Reset success
      * @throws ApiError
      */
     public static adminSimsResetInventory({
         iccid,
     }: {
         iccid: string,
-    }): CancelablePromise<{
-        success?: boolean;
-    }> {
+    }): CancelablePromise<AdminSimActionResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/admin/sims/{iccid}:reset-inventory',
@@ -365,16 +344,14 @@ export class AdminService {
     /**
      * Reset SIM to ACTIVATED (Admin)
      * Resets a SIM status to ACTIVATED and records state history and event.
-     * @returns any Reset success
+     * @returns AdminSimActionResponse Reset success
      * @throws ApiError
      */
     public static adminSimsResetActivated({
         iccid,
     }: {
         iccid: string,
-    }): CancelablePromise<{
-        success?: boolean;
-    }> {
+    }): CancelablePromise<AdminSimActionResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/admin/sims/{iccid}:reset-activated',
@@ -386,16 +363,14 @@ export class AdminService {
     /**
      * Retire SIM (Admin)
      * Retires a SIM; requires DEACTIVATED state and commitment end threshold met.
-     * @returns any Retire success
+     * @returns AdminSimActionResponse Retire success
      * @throws ApiError
      */
     public static adminSimsRetire({
         iccid,
     }: {
         iccid: string,
-    }): CancelablePromise<{
-        success?: boolean;
-    }> {
+    }): CancelablePromise<AdminSimActionResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/admin/sims/{iccid}:retire',
@@ -407,7 +382,7 @@ export class AdminService {
     /**
      * Seed usage_daily_summary (Admin)
      * Inserts or updates usage_daily_summary rows for a SIM for smoke/e2e purposes.
-     * @returns any Seed result
+     * @returns AdminSimSeedUsageResponse Seed result
      * @throws ApiError
      */
     public static adminSimsSeedUsage({
@@ -415,28 +390,8 @@ export class AdminService {
         requestBody,
     }: {
         iccid: string,
-        requestBody?: {
-            /**
-             * ISO date YYYY-MM-DD
-             */
-            usageDay?: string;
-            /**
-             * MCC-MNC (e.g., 204-08)
-             */
-            visitedMccMnc?: string;
-            totalKb?: number;
-            uplinkKb?: number;
-            downlinkKb?: number;
-        },
-    }): CancelablePromise<{
-        iccid?: string;
-        usageDay?: string;
-        visitedMccMnc?: string;
-        uplinkKb?: number;
-        downlinkKb?: number;
-        totalKb?: number;
-        seeded?: boolean;
-    }> {
+        requestBody?: AdminSimSeedUsageRequest,
+    }): CancelablePromise<AdminSimSeedUsageResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/admin/sims/{iccid}:seed-usage',
@@ -450,18 +405,14 @@ export class AdminService {
     /**
      * Evaluate TEST_READY Expiry (Admin)
      * Scans TEST_READY SIMs and activates those meeting expiry conditions.
-     * @returns any Evaluation summary
+     * @returns AdminSimEvaluateTestExpiryResponse Evaluation summary
      * @throws ApiError
      */
     public static adminSimsEvaluateTestExpiry({
         enterpriseId,
     }: {
         enterpriseId?: string,
-    }): CancelablePromise<{
-        processed?: number;
-        activated?: number;
-        remaining?: number;
-    }> {
+    }): CancelablePromise<AdminSimEvaluateTestExpiryResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/admin/sims:evaluate-test-expiry',
@@ -473,7 +424,7 @@ export class AdminService {
     /**
      * Backdate TEST_READY start (Admin)
      * Backdates the last_status_change_at for TEST_READY to simulate earlier start.
-     * @returns any Backdate success
+     * @returns AdminSimBackdateTestStartResponse Backdate success
      * @throws ApiError
      */
     public static adminSimsBackdateTestStart({
@@ -481,13 +432,8 @@ export class AdminService {
         requestBody,
     }: {
         iccid: string,
-        requestBody?: {
-            daysBack?: number;
-        },
-    }): CancelablePromise<{
-        success?: boolean;
-        newStart?: string;
-    }> {
+        requestBody?: AdminSimBackdateTestStartRequest,
+    }): CancelablePromise<AdminSimBackdateTestStartResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/admin/sims/{iccid}:backdate-test-start',
@@ -501,22 +447,14 @@ export class AdminService {
     /**
      * Run TEST_READY Expiry Evaluation Job (Admin)
      * Executes a paginated evaluation over TEST_READY SIMs and activates those meeting expiry conditions.
-     * @returns any Job summary
+     * @returns AdminJobTestReadyExpiryRunResponse Job summary
      * @throws ApiError
      */
     public static adminJobsTestReadyExpiryRun({
         requestBody,
     }: {
-        requestBody?: {
-            enterpriseId?: string;
-            pageSize?: number;
-        },
-    }): CancelablePromise<{
-        jobId?: string;
-        processed?: number;
-        activated?: number;
-        total?: number;
-    }> {
+        requestBody?: AdminJobTestReadyExpiryRunRequest,
+    }): CancelablePromise<AdminJobTestReadyExpiryRunResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/admin/jobs:test-ready-expiry-run',
@@ -527,23 +465,14 @@ export class AdminService {
     /**
      * Run WXZHONGGENG Daily Usage Sync Job (Admin)
      * Syncs daily usage from WXZHONGGENG for SIMs, upserting into usage_daily_summary.
-     * @returns any Job summary
+     * @returns AdminJobWxSyncDailyUsageResponse Job summary
      * @throws ApiError
      */
     public static adminJobsWxSyncDailyUsage({
         requestBody,
     }: {
-        requestBody?: {
-            enterpriseId?: string;
-            startDate?: string;
-            endDate?: string;
-            pageSize?: number;
-        },
-    }): CancelablePromise<{
-        jobId?: string;
-        processed?: number;
-        total?: number;
-    }> {
+        requestBody?: AdminJobWxSyncDailyUsageRequest,
+    }): CancelablePromise<AdminJobWxSyncDailyUsageResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/admin/jobs:wx-sync-daily-usage',
@@ -554,7 +483,7 @@ export class AdminService {
     /**
      * List Audit Logs (Admin)
      * Internal admin endpoint to query audit logs with filters.
-     * @returns any List of audit logs
+     * @returns AuditLogListResponse List of audit logs
      * @throws ApiError
      */
     public static adminAudits({
@@ -575,21 +504,7 @@ export class AdminService {
         end?: string,
         page?: number,
         limit?: number,
-    }): CancelablePromise<{
-        items?: Array<{
-            auditId?: number;
-            actorUserId?: string | null;
-            actorRole?: string;
-            tenantId?: string | null;
-            action?: string;
-            targetType?: string;
-            targetId?: string;
-            requestId?: string;
-            sourceIp?: string;
-            createdAt?: string;
-        }>;
-        total?: number;
-    }> {
+    }): CancelablePromise<AuditLogListResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/admin/audits',

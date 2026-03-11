@@ -2,6 +2,15 @@
 /* istanbul ignore file */
 /* tslint:disable */
 /* eslint-disable */
+import type { PackageCreateRequest } from '../models/PackageCreateRequest';
+import type { PackageCreateResponse } from '../models/PackageCreateResponse';
+import type { PackageDetailResponse } from '../models/PackageDetailResponse';
+import type { PackageListResponse } from '../models/PackageListResponse';
+import type { PackagePublishResponse } from '../models/PackagePublishResponse';
+import type { PackageSummaryListResponse } from '../models/PackageSummaryListResponse';
+import type { PackageUpdateRequest } from '../models/PackageUpdateRequest';
+import type { PackageUpdateResponse } from '../models/PackageUpdateResponse';
+import type { PackageVersionListResponse } from '../models/PackageVersionListResponse';
 import type { CancelablePromise } from '../core/CancelablePromise';
 import { OpenAPI } from '../core/OpenAPI';
 import { request as __request } from '../core/request';
@@ -9,7 +18,7 @@ export class PackagesService {
     /**
      * List Package Versions
      * Lists package versions accessible to the calling enterprise.
-     * @returns any Package versions
+     * @returns PackageVersionListResponse Package versions
      * @throws ApiError
      */
     public static getPackageVersions({
@@ -98,22 +107,7 @@ export class PackagesService {
          * Filter by package name substring (case-insensitive)
          */
         q?: string,
-    }): CancelablePromise<{
-        items?: Array<{
-            packageVersionId?: string;
-            packageId?: string;
-            packageName?: string | null;
-            carrierId?: string | null;
-            carrierName?: string | null;
-            mcc?: string | null;
-            mnc?: string | null;
-            status?: string;
-            effectiveFrom?: string | null;
-            serviceType?: string;
-            apn?: string | null;
-        }>;
-        total?: number;
-    }> {
+    }): CancelablePromise<PackageVersionListResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/package-versions',
@@ -260,7 +254,7 @@ export class PackagesService {
     /**
      * List Packages
      * Lists packages accessible to the calling enterprise.
-     * @returns any Packages
+     * @returns PackageSummaryListResponse Packages
      * @throws ApiError
      */
     public static getPackages({
@@ -284,13 +278,7 @@ export class PackagesService {
         sortOrder?: 'asc' | 'desc',
         limit?: number,
         page?: number,
-    }): CancelablePromise<{
-        items?: Array<{
-            packageId?: string;
-            name?: string;
-        }>;
-        total?: number;
-    }> {
+    }): CancelablePromise<PackageSummaryListResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/packages',
@@ -340,6 +328,115 @@ export class PackagesService {
                 'sortOrder': sortOrder,
                 'limit': limit,
                 'page': page,
+            },
+        });
+    }
+    /**
+     * Create Package
+     * @returns PackageCreateResponse Package created
+     * @throws ApiError
+     */
+    public static postEnterprisesPackages({
+        enterpriseId,
+        requestBody,
+    }: {
+        enterpriseId: string,
+        requestBody: PackageCreateRequest,
+    }): CancelablePromise<PackageCreateResponse> {
+        return __request(OpenAPI, {
+            method: 'POST',
+            url: '/enterprises/{enterpriseId}/packages',
+            path: {
+                'enterpriseId': enterpriseId,
+            },
+            body: requestBody,
+            mediaType: 'application/json',
+        });
+    }
+    /**
+     * List Packages for Enterprise
+     * @returns PackageListResponse Packages
+     * @throws ApiError
+     */
+    public static getEnterprisesPackages({
+        enterpriseId,
+        status,
+        page = 1,
+        pageSize = 20,
+    }: {
+        enterpriseId: string,
+        status?: string,
+        page?: number,
+        pageSize?: number,
+    }): CancelablePromise<PackageListResponse> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/enterprises/{enterpriseId}/packages',
+            path: {
+                'enterpriseId': enterpriseId,
+            },
+            query: {
+                'status': status,
+                'page': page,
+                'pageSize': pageSize,
+            },
+        });
+    }
+    /**
+     * Get Package Detail
+     * @returns PackageDetailResponse Package detail
+     * @throws ApiError
+     */
+    public static getPackages1({
+        packageId,
+    }: {
+        packageId: string,
+    }): CancelablePromise<PackageDetailResponse> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/packages/{packageId}',
+            path: {
+                'packageId': packageId,
+            },
+        });
+    }
+    /**
+     * Update Package Draft
+     * @returns PackageUpdateResponse Package updated
+     * @throws ApiError
+     */
+    public static putPackages({
+        packageId,
+        requestBody,
+    }: {
+        packageId: string,
+        requestBody: PackageUpdateRequest,
+    }): CancelablePromise<PackageUpdateResponse> {
+        return __request(OpenAPI, {
+            method: 'PUT',
+            url: '/packages/{packageId}',
+            path: {
+                'packageId': packageId,
+            },
+            body: requestBody,
+            mediaType: 'application/json',
+        });
+    }
+    /**
+     * Publish Package
+     * @returns PackagePublishResponse Package published
+     * @throws ApiError
+     */
+    public static postPackages-:publish({
+        packageId,
+    }: {
+        packageId: string,
+    }): CancelablePromise<PackagePublishResponse> {
+        return __request(OpenAPI, {
+            method: 'POST',
+            url: '/packages/{packageId}:publish',
+            path: {
+                'packageId': packageId,
             },
         });
     }

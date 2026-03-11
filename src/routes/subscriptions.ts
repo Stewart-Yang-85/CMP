@@ -191,8 +191,32 @@ export function registerSubscriptionRoutes({ app, prefix, deps }: { app: any; pr
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const query = req.query ?? {}
     let enterpriseId = query.enterpriseId ? String(query.enterpriseId).trim() : null
+    if (!enterpriseId && (roleScope === 'platform' || roleScope === 'reseller')) {
+      const sim = await supabase.select('sims', `select=enterprise_id&${parsed.field}=eq.${encodeURIComponent(parsed.value)}&limit=1`)
+      const found = Array.isArray(sim) ? sim[0] : null
+      if (found && (found as { enterprise_id?: string | null }).enterprise_id) {
+        enterpriseId = String((found as { enterprise_id?: string | null }).enterprise_id)
+      }
+      if (!enterpriseId && parsed.field === 'iccid') {
+        const iccidValue = String(parsed.value || '').trim()
+        const fallback = await supabase.select(
+          'sims',
+          `select=enterprise_id,iccid&iccid=ilike.${encodeURIComponent(`%${iccidValue}%`)}&limit=20`
+        )
+        const candidates = Array.isArray(fallback) ? fallback : []
+        const normalizeDigits = (value: unknown) => String(value ?? '').replace(/\D/g, '')
+        const target = normalizeDigits(iccidValue)
+        const match = candidates.find((row: any) => normalizeDigits(row.iccid) === target)
+        if (match && match.enterprise_id) {
+          enterpriseId = String(match.enterprise_id)
+        }
+      }
+    }
     if (roleScope === 'reseller') {
-      if (!enterpriseId || !isValidUuid(enterpriseId)) {
+      if (!enterpriseId) {
+        return sendError(res, 404, 'SIM_NOT_FOUND', `sim ${parsed.value} not found.`)
+      }
+      if (!isValidUuid(enterpriseId)) {
         return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
       }
       enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, enterpriseId)
@@ -200,7 +224,10 @@ export function registerSubscriptionRoutes({ app, prefix, deps }: { app: any; pr
     } else if (roleScope === 'platform') {
       const fromReq = getEnterpriseIdFromReq(req)
       enterpriseId = enterpriseId || (fromReq ? String(fromReq) : null)
-      if (!enterpriseId || !isValidUuid(enterpriseId)) {
+      if (!enterpriseId) {
+        return sendError(res, 404, 'SIM_NOT_FOUND', `sim ${parsed.value} not found.`)
+      }
+      if (!isValidUuid(enterpriseId)) {
         return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
       }
     } else {

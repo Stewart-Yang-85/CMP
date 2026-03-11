@@ -14,6 +14,7 @@ import { parsePagination } from './utils/pagination.js'
 import { registerSimPhase4Routes } from './routes/simPhase4.js'
 import { registerPricePlanRoutes } from './routes/pricePlans.js'
 import { registerPackageRoutes } from './routes/packages.js'
+import { registerPackageModuleRoutes } from './routes/packageModules.js'
 import { registerNetworkProfileRoutes } from './routes/networkProfiles.js'
 import { registerSubscriptionRoutes } from './routes/subscriptions.js'
 import { registerReconciliationRoutes } from './routes/reconciliation.js'
@@ -94,6 +95,13 @@ function isValidUuid(value: unknown) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s)
 }
 
+function isMissingTableError(err: any, tableName: string) {
+  const code = String(err?.code ?? err?.body?.code ?? '')
+  const message = String(err?.body?.message ?? err?.message ?? err?.body ?? '')
+  const marker = `public.${tableName}`
+  return (code === 'PGRST205' || message.includes('Could not find the table')) && message.includes(marker)
+}
+
 function getEnvTrim(name: string) {
   const v = process.env[name]
   if (v === undefined || v === null) return ''
@@ -113,13 +121,13 @@ function buildBaseUrl(req: FastifyRequest) {
   const headerProto = rawProto ? String(Array.isArray(rawProto) ? rawProto[0] : rawProto).split(',')[0].trim() : req.protocol
   const publicIp = getEnvTrim('PUBLIC_IP')
   const port = getEnvTrim('PORT') || '3000'
-  const proto = getEnvTrim('PUBLIC_PROTO') || headerProto
+  const proto = getEnvTrim('PUBLIC_PROTO') || headerProto || 'http'
   const isLocalHost = host && (host.startsWith('localhost') || host.startsWith('127.0.0.1'))
   if (publicIp && host && host.endsWith(`:${port}`) && !isLocalHost) {
     return `${proto}://${publicIp}:${port}`
   }
   const fallbackHost = host || `localhost:${port}`
-  return `${headerProto}://${fallbackHost}`
+  return `${proto}://${fallbackHost}`
 }
 
 function percentile(sorted: number[], p: number) {
@@ -1759,6 +1767,17 @@ function registerResellerRoutes({
     if (!reseller) {
       return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create reseller.')
     }
+    const tenantRows = await supabase.select(
+      'tenants',
+      `select=tenant_id&tenant_id=eq.${encodeURIComponent(reseller.id)}&tenant_type=eq.RESELLER&limit=1`
+    )
+    if (!Array.isArray(tenantRows) || tenantRows.length === 0) {
+      await supabase.insert('tenants', {
+        tenant_id: reseller.id,
+        tenant_type: 'RESELLER',
+        name,
+      })
+    }
     await supabase.insert('reseller_branding', {
       reseller_id: reseller.id,
       brand_name: name,
@@ -1786,13 +1805,45 @@ function registerResellerRoutes({
     if (!requirePlatform(req, res)) return
     const statusInput = req.query?.status ? String(req.query.status) : null
     const storageStatus = statusInput ? mapStatusToStorage(statusInput) : null
+    const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
     if (statusInput && !storageStatus) {
       return sendError(res, 400, 'VALIDATION_ERROR', 'status must be ACTIVE, DEACTIVATED, or SUSPENDED.')
+    }
+    if (operatorId && !isValidUuid(operatorId)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
     }
     const { page, pageSize, offset } = parsePagination(req.query ?? {}, { defaultPage: 1, defaultPageSize: 20, maxPageSize: 100 })
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const filters: string[] = []
     if (storageStatus) filters.push(`status=eq.${encodeURIComponent(storageStatus)}`)
+    if (operatorId) {
+      const simRows = await supabase.select(
+        'sims',
+        `select=enterprise_id&operator_id=eq.${encodeURIComponent(operatorId)}`
+      )
+      const enterpriseIds = Array.from(
+        new Set((Array.isArray(simRows) ? simRows : []).map((row: any) => row.enterprise_id).filter(Boolean).map((id: any) => String(id)))
+      )
+      if (enterpriseIds.length === 0) {
+        return res.json({ items: [], total: 0, page, pageSize })
+      }
+      const enterpriseRows = await supabase.select(
+        'tenants',
+        `select=tenant_id,parent_id&tenant_type=eq.ENTERPRISE&tenant_id=in.(${enterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`
+      )
+      const resellerIds = Array.from(
+        new Set(
+          (Array.isArray(enterpriseRows) ? enterpriseRows : [])
+            .map((row: any) => row.parent_id)
+            .filter(Boolean)
+            .map((id: any) => String(id))
+        )
+      )
+      if (resellerIds.length === 0) {
+        return res.json({ items: [], total: 0, page, pageSize })
+      }
+      filters.push(`id=in.(${resellerIds.map((id) => encodeURIComponent(id)).join(',')})`)
+    }
     const filterQs = filters.length ? `&${filters.join('&')}` : ''
     const { data, total } = await supabase.selectWithCount(
       'resellers',
@@ -1841,6 +1892,10 @@ function registerResellerRoutes({
     if (!resellerId) {
       return sendError(res, 400, 'BAD_REQUEST', 'resellerId is required.')
     }
+    const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
+    if (operatorId && !isValidUuid(operatorId)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+    }
     const isPlatform = roleScope === 'platform' || role === 'platform_admin'
     if (!isPlatform) {
       if (roleScope !== 'reseller') {
@@ -1859,6 +1914,25 @@ function registerResellerRoutes({
     const row = Array.isArray(rows) ? rows[0] : null
     if (!row) {
       return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+    }
+    if (operatorId) {
+      const enterpriseRows = await supabase.select(
+        'tenants',
+        `select=tenant_id&tenant_type=eq.ENTERPRISE&parent_id=eq.${encodeURIComponent(resellerId)}`
+      )
+      const enterpriseIds = Array.from(
+        new Set((Array.isArray(enterpriseRows) ? enterpriseRows : []).map((r: any) => String(r.tenant_id)))
+      )
+      if (enterpriseIds.length === 0) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+      }
+      const simRows = await supabase.select(
+        'sims',
+        `select=sim_id&operator_id=eq.${encodeURIComponent(operatorId)}&enterprise_id=in.(${enterpriseIds.map((id) => encodeURIComponent(id)).join(',')})&limit=1`
+      )
+      if (!Array.isArray(simRows) || simRows.length === 0) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+      }
     }
     const brandingRows = await supabase.select(
       'reseller_branding',
@@ -1969,6 +2043,7 @@ function registerResellerRoutes({
     if (!resellerId) {
       return sendError(res, 400, 'BAD_REQUEST', 'resellerId is required.')
     }
+    const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
     const statusInput = req.body?.status ? String(req.body.status) : null
     const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : ''
     const storageStatus = statusInput ? mapStatusToStorage(statusInput) : null
@@ -1978,6 +2053,9 @@ function registerResellerRoutes({
     if (!reason) {
       return sendError(res, 400, 'VALIDATION_ERROR', 'reason is required.')
     }
+    if (operatorId && !isValidUuid(operatorId)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+    }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const rows = await supabase.select(
       'resellers',
@@ -1986,6 +2064,25 @@ function registerResellerRoutes({
     const reseller = Array.isArray(rows) ? rows[0] : null
     if (!reseller) {
       return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+    }
+    if (operatorId) {
+      const enterpriseRows = await supabase.select(
+        'tenants',
+        `select=tenant_id&tenant_type=eq.ENTERPRISE&parent_id=eq.${encodeURIComponent(resellerId)}`
+      )
+      const enterpriseIds = Array.from(
+        new Set((Array.isArray(enterpriseRows) ? enterpriseRows : []).map((r: any) => String(r.tenant_id)))
+      )
+      if (enterpriseIds.length === 0) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+      }
+      const simRows = await supabase.select(
+        'sims',
+        `select=sim_id&operator_id=eq.${encodeURIComponent(operatorId)}&enterprise_id=in.(${enterpriseIds.map((id) => encodeURIComponent(id)).join(',')})&limit=1`
+      )
+      if (!Array.isArray(simRows) || simRows.length === 0) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+      }
     }
     const previousStatus = mapStatusFromStorage(reseller.status)
     const nowIso = new Date().toISOString()
@@ -2129,8 +2226,12 @@ function registerEnterpriseRoutes({
     }
     const statusInput = req.query?.status ? String(req.query.status) : null
     const status = statusInput ? normalizeStatus(statusInput) : null
+    const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
     if (statusInput && !status) {
       return sendError(res, 400, 'VALIDATION_ERROR', 'status must be ACTIVE, INACTIVE, or SUSPENDED.')
+    }
+    if (operatorId && !isValidUuid(operatorId)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
     }
     const queryResellerId = req.query?.resellerId ? String(req.query.resellerId) : null
     const resellerId = isReseller ? auth.resellerId : queryResellerId
@@ -2142,6 +2243,33 @@ function registerEnterpriseRoutes({
     if (status) filters.push(`enterprise_status=eq.${encodeURIComponent(status)}`)
     if (resellerId) filters.push(`parent_id=eq.${encodeURIComponent(resellerId)}`)
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    if (operatorId) {
+      const simRows = await supabase.select(
+        'sims',
+        `select=enterprise_id&operator_id=eq.${encodeURIComponent(operatorId)}`
+      )
+      const enterpriseIds = Array.from(
+        new Set((Array.isArray(simRows) ? simRows : []).map((row: any) => row.enterprise_id).filter(Boolean).map((id: any) => String(id)))
+      )
+      if (enterpriseIds.length === 0) {
+        return res.json({ items: [], total: 0, page, pageSize })
+      }
+      if (resellerId) {
+        const scopedRows = await supabase.select(
+          'tenants',
+          `select=tenant_id&tenant_type=eq.ENTERPRISE&parent_id=eq.${encodeURIComponent(resellerId)}&tenant_id=in.(${enterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`
+        )
+        const scopedIds = Array.from(
+          new Set((Array.isArray(scopedRows) ? scopedRows : []).map((row: any) => String(row.tenant_id)))
+        )
+        if (scopedIds.length === 0) {
+          return res.json({ items: [], total: 0, page, pageSize })
+        }
+        filters.push(`tenant_id=in.(${scopedIds.map((id) => encodeURIComponent(id)).join(',')})`)
+      } else {
+        filters.push(`tenant_id=in.(${enterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`)
+      }
+    }
     if (isReseller) {
       if (resellerAssignedRoles.has(auth.role || '')) {
         if (!auth.userId) {
@@ -2188,6 +2316,10 @@ function registerEnterpriseRoutes({
     if (!enterpriseId) {
       return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required.')
     }
+    const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
+    if (operatorId && !isValidUuid(operatorId)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+    }
     if (!auth.roleScope && !auth.role) {
       return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
     }
@@ -2199,6 +2331,15 @@ function registerEnterpriseRoutes({
     const row = Array.isArray(rows) ? rows[0] : null
     if (!row) {
       return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+    }
+    if (operatorId) {
+      const simRows = await supabase.select(
+        'sims',
+        `select=sim_id&operator_id=eq.${encodeURIComponent(operatorId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`
+      )
+      if (!Array.isArray(simRows) || simRows.length === 0) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+      }
     }
     if (auth.roleScope === 'platform' || auth.role === 'platform_admin') {
     } else if (auth.roleScope === 'reseller') {
@@ -2243,6 +2384,7 @@ function registerEnterpriseRoutes({
     if (!enterpriseId) {
       return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required.')
     }
+    const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
     const statusInput = req.body?.status ? String(req.body.status) : null
     const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : ''
     const status = statusInput ? normalizeStatus(statusInput) : null
@@ -2252,6 +2394,9 @@ function registerEnterpriseRoutes({
     if (!reason) {
       return sendError(res, 400, 'VALIDATION_ERROR', 'reason is required.')
     }
+    if (operatorId && !isValidUuid(operatorId)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+    }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const rows = await supabase.select(
       'tenants',
@@ -2260,6 +2405,15 @@ function registerEnterpriseRoutes({
     const row = Array.isArray(rows) ? rows[0] : null
     if (!row) {
       return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+    }
+    if (operatorId) {
+      const simRows = await supabase.select(
+        'sims',
+        `select=sim_id&operator_id=eq.${encodeURIComponent(operatorId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`
+      )
+      if (!Array.isArray(simRows) || simRows.length === 0) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+      }
     }
     if (auth.scope === 'reseller' && String(row.parent_id || '') !== auth.resellerId) {
       return sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
@@ -2503,6 +2657,55 @@ function registerSupplierRoutes({
     return null
   }
 
+  app.get(`${prefix}/operators`, async (req: any, res: any) => {
+    const auth = getAuthContext(req)
+    if (!auth.roleScope && !auth.role) {
+      sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
+      return
+    }
+    const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
+    const mcc = req.query?.mcc ? String(req.query.mcc).trim() : ''
+    const mnc = req.query?.mnc ? String(req.query.mnc).trim() : ''
+    const name = req.query?.name ? String(req.query.name).trim() : ''
+    if (operatorId && !isValidUuid(operatorId)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+    }
+    if (mcc && !/^\d{3}$/.test(mcc)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'mcc must be 3 digits.')
+    }
+    if (mnc && !/^\d{2,3}$/.test(mnc)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'mnc must be 2-3 digits.')
+    }
+    const { page, pageSize, offset } = parsePagination(req.query ?? {}, {
+      defaultPage: 1,
+      defaultPageSize: 20,
+      maxPageSize: 1000,
+    })
+    const filters: string[] = []
+    if (operatorId) filters.push(`operator_id=eq.${encodeURIComponent(operatorId)}`)
+    if (mcc) filters.push(`mcc=eq.${encodeURIComponent(mcc)}`)
+    if (mnc) filters.push(`mnc=eq.${encodeURIComponent(mnc)}`)
+    if (name) filters.push(`name=ilike.*${encodeURIComponent(name)}*`)
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const filterQs = filters.length ? `&${filters.join('&')}` : ''
+    const { data, total } = await supabase.selectWithCount(
+      'business_operators',
+      `select=operator_id,mcc,mnc,name&order=name.asc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
+    )
+    const rows = Array.isArray(data) ? data : []
+    res.json({
+      items: rows.map((row: any) => ({
+        operatorId: row.operator_id,
+        mcc: row.mcc,
+        mnc: row.mnc,
+        name: row.name,
+      })),
+      total: total ?? rows.length,
+      page,
+      pageSize,
+    })
+  })
+
   app.post(`${prefix}/operators`, async (req: any, res: any) => {
     const auth = ensurePlatformAdmin(req, res)
     if (!auth) return
@@ -2521,13 +2724,13 @@ function registerSupplierRoutes({
     }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const dup = await supabase.select(
-      'carriers',
-      `select=carrier_id&mcc=eq.${encodeURIComponent(mcc)}&mnc=eq.${encodeURIComponent(mnc)}&limit=1`
+      'business_operators',
+      `select=operator_id&mcc=eq.${encodeURIComponent(mcc)}&mnc=eq.${encodeURIComponent(mnc)}&limit=1`
     )
     if (Array.isArray(dup) && dup.length > 0) {
       return sendError(res, 409, 'DUPLICATE_OPERATOR', 'Operator already exists.')
     }
-    const inserted = await supabase.insert('carriers', {
+    const inserted = await supabase.insert('business_operators', {
       mcc,
       mnc,
       name,
@@ -2544,7 +2747,7 @@ function registerSupplierRoutes({
           actor_role: auth.role ?? 'platform_admin',
           action: 'OPERATOR_GSMA_OVERRIDE',
           target_type: 'OPERATOR',
-          target_id: row.carrier_id,
+          target_id: row.operator_id,
           request_id: getTraceId(res),
           source_ip: req.ip,
           after_data: { mcc, mnc, name, gsmaOverride: true },
@@ -2553,11 +2756,171 @@ function registerSupplierRoutes({
       )
     }
     res.status(201).json({
-      operatorId: row.carrier_id,
+      operatorId: row.operator_id,
       mcc: row.mcc,
       mnc: row.mnc,
       name: row.name,
     })
+  })
+
+  app.patch(`${prefix}/operators/:operatorId`, async (req: any, res: any) => {
+    const auth = ensurePlatformAdmin(req, res)
+    if (!auth) return
+    const operatorId = String(req.params.operatorId || '').trim()
+    if (!isValidUuid(operatorId)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+    }
+    const patch: Record<string, any> = {}
+    if (typeof req.body?.name === 'string') {
+      const name = req.body.name.trim()
+      if (!name) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'name is required.')
+      }
+      patch.name = name
+    }
+    if (!Object.keys(patch).length) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'No fields to update.')
+    }
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const updated = await supabase.update(
+      'business_operators',
+      `operator_id=eq.${encodeURIComponent(operatorId)}`,
+      patch
+    )
+    const row = Array.isArray(updated) ? updated[0] : null
+    if (!row) {
+      return sendError(res, 404, 'RESOURCE_NOT_FOUND', 'Operator not found.')
+    }
+    res.json({
+      operatorId: row.operator_id,
+      mcc: row.mcc,
+      mnc: row.mnc,
+      name: row.name,
+    })
+  })
+
+  app.post(`${prefix}/resellers/:resellerId/suppliers`, async (req: any, res: any) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const resellerId = String(req.params.resellerId || '').trim()
+    const supplierId = typeof req.body?.supplierId === 'string' ? req.body.supplierId.trim() : ''
+    if (!isValidUuid(resellerId)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
+    }
+    if (!isValidUuid(supplierId)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'supplierId must be a valid uuid.')
+    }
+    if (auth.scope === 'reseller' && auth.resellerId !== resellerId) {
+      return sendError(res, 403, 'FORBIDDEN', 'resellerId is out of scope.')
+    }
+    try {
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      const resellerRows = await supabase.select('resellers', `select=id&id=eq.${encodeURIComponent(resellerId)}&limit=1`)
+      if (!Array.isArray(resellerRows) || resellerRows.length === 0) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+      }
+      const supplierRows = await supabase.select(
+        'suppliers',
+        `select=supplier_id&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+      )
+      if (!Array.isArray(supplierRows) || supplierRows.length === 0) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `supplier ${supplierId} not found.`)
+      }
+      const existingRows = await supabase.select(
+        'reseller_suppliers',
+        `select=reseller_id,supplier_id,created_at&reseller_id=eq.${encodeURIComponent(resellerId)}&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+      )
+      const existing = Array.isArray(existingRows) ? existingRows[0] : null
+      if (existing?.reseller_id) {
+        return sendError(res, 409, 'ALREADY_BOUND', 'supplierId is already bound to resellerId.')
+      }
+      const insertedRows = await supabase.insert(
+        'reseller_suppliers',
+        { reseller_id: resellerId, supplier_id: supplierId },
+        { returning: 'representation' }
+      )
+      const row = Array.isArray(insertedRows) ? insertedRows[0] : null
+      if (!row) {
+        return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to bind supplier.')
+      }
+      res.status(201).json({
+        resellerId: row.reseller_id,
+        supplierId: row.supplier_id,
+        boundAt: row.created_at ?? null,
+      })
+    } catch (error: any) {
+      const message = String(error?.message ?? '')
+      if (message.includes("Could not find the table 'public.reseller_suppliers'")) {
+        return sendError(res, 503, 'SCHEMA_NOT_READY', 'reseller_suppliers table is not available yet.')
+      }
+      const status = Number(error?.status) || 500
+      const code = error?.code ? String(error.code) : 'INTERNAL_ERROR'
+      const errorMessage = message || 'Failed to bind supplier.'
+      return sendError(res, status, code, errorMessage)
+    }
+  })
+
+  app.get(`${prefix}/resellers/:resellerId/suppliers`, async (req: any, res: any) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const resellerId = String(req.params.resellerId || '').trim()
+    if (!isValidUuid(resellerId)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
+    }
+    if (auth.scope === 'reseller' && auth.resellerId !== resellerId) {
+      return sendError(res, 403, 'FORBIDDEN', 'resellerId is out of scope.')
+    }
+    try {
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      const resellerRows = await supabase.select('resellers', `select=id&id=eq.${encodeURIComponent(resellerId)}&limit=1`)
+      if (!Array.isArray(resellerRows) || resellerRows.length === 0) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+      }
+      const linksRows = await supabase.select(
+        'reseller_suppliers',
+        `select=supplier_id,created_at&reseller_id=eq.${encodeURIComponent(resellerId)}&order=created_at.desc`
+      )
+      const links = Array.isArray(linksRows) ? linksRows : []
+      const supplierIds = Array.from(new Set(links.map((r: any) => (r?.supplier_id ? String(r.supplier_id) : '')).filter(Boolean)))
+      const supplierMap = new Map<string, any>()
+      if (supplierIds.length) {
+        const supplierFilter = supplierIds.map((id: string) => encodeURIComponent(id)).join(',')
+        const supplierRows = await supabase.select(
+          'suppliers',
+          `select=supplier_id,name,status,created_at&supplier_id=in.(${supplierFilter})`
+        )
+        for (const row of Array.isArray(supplierRows) ? supplierRows : []) {
+          const id = row?.supplier_id ? String(row.supplier_id) : ''
+          if (id) supplierMap.set(id, row)
+        }
+      }
+      const items = links.map((link: any) => {
+        const id = link?.supplier_id ? String(link.supplier_id) : null
+        const supplier = id ? supplierMap.get(id) : null
+        return {
+          supplierId: id,
+          name: supplier?.name ?? null,
+          status: supplier?.status ?? null,
+          createdAt: supplier?.created_at ?? null,
+          boundAt: link?.created_at ?? null,
+        }
+      }).filter((item: any) => item.supplierId)
+      res.header('Cache-Control', 'no-store')
+      res.json({
+        resellerId,
+        items,
+        total: items.length,
+      })
+    } catch (error: any) {
+      const message = String(error?.message ?? '')
+      if (message.includes("Could not find the table 'public.reseller_suppliers'")) {
+        return sendError(res, 503, 'SCHEMA_NOT_READY', 'reseller_suppliers table is not available yet.')
+      }
+      const status = Number(error?.status) || 500
+      const code = error?.code ? String(error.code) : 'INTERNAL_ERROR'
+      const errorMessage = message || 'Failed to list reseller suppliers.'
+      return sendError(res, status, code, errorMessage)
+    }
   })
 
   app.post(`${prefix}/suppliers`, async (req: any, res: any) => {
@@ -2582,7 +2945,7 @@ function registerSupplierRoutes({
       return sendError(res, 409, 'DUPLICATE_NAME', 'Supplier name already exists.')
     }
     const operatorFilter = operatorIds.map((id: string) => encodeURIComponent(id)).join(',')
-    const operatorRows = await supabase.select('carriers', `select=carrier_id&carrier_id=in.(${operatorFilter})`)
+    const operatorRows = await supabase.select('business_operators', `select=operator_id,name&operator_id=in.(${operatorFilter})`)
     const operators = Array.isArray(operatorRows) ? operatorRows : []
     if (operators.length !== operatorIds.length) {
       return sendError(res, 400, 'VALIDATION_ERROR', 'operatorIds contains invalid operator id.')
@@ -2592,18 +2955,86 @@ function registerSupplierRoutes({
     if (!row) {
       return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create supplier.')
     }
-    await supabase.insert(
-      'supplier_carriers',
-      operatorIds.map((operatorId: string) => ({ supplier_id: row.supplier_id, carrier_id: operatorId })),
-      { returning: 'minimal' }
-    )
+    const operatorMap = new Map(operators.map((operator: any) => [String(operator.operator_id), operator]))
+    const operatorPayloads = operatorIds.map((operatorId: string) => ({
+      business_operator_id: operatorId,
+      supplier_id: row.supplier_id,
+      name: operatorMap.get(operatorId)?.name ?? null,
+    }))
+    const insertedOperators = await supabase.insert('operators', operatorPayloads, { returning: 'representation' })
+    const createdOperators = Array.isArray(insertedOperators) ? insertedOperators : []
     res.status(201).json({
       supplierId: row.supplier_id,
       name: row.name,
       status: row.status,
       createdAt: row.created_at,
-      operatorIds,
+      operatorIds: createdOperators.map((operator: any) => String(operator.operator_id)).filter(Boolean),
     })
+  })
+
+  app.post(`${prefix}/suppliers/:supplierId/operators`, async (req: any, res: any) => {
+    const auth = ensurePlatformAdmin(req, res)
+    if (!auth) return
+    try {
+      const supplierId = String(req.params.supplierId || '').trim()
+      const operatorId = typeof req.body?.operatorId === 'string' ? req.body.operatorId.trim() : ''
+      if (!supplierId) {
+        return sendError(res, 400, 'BAD_REQUEST', 'supplierId is required.')
+      }
+      if (!operatorId || !isValidUuid(operatorId)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+      }
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      const supplierRows = await supabase.select(
+        'suppliers',
+        `select=supplier_id&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+      )
+      const supplier = Array.isArray(supplierRows) ? supplierRows[0] : null
+      if (!supplier?.supplier_id) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `supplier ${supplierId} not found.`)
+      }
+      const businessRows = await supabase.select(
+        'business_operators',
+        `select=operator_id,name&operator_id=eq.${encodeURIComponent(operatorId)}&limit=1`
+      )
+      const businessOperator = Array.isArray(businessRows) ? businessRows[0] : null
+      if (!businessOperator?.operator_id) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `operator ${operatorId} not found.`)
+      }
+      const existingRows = await supabase.select(
+        'operators',
+        `select=operator_id&supplier_id=eq.${encodeURIComponent(supplierId)}&business_operator_id=eq.${encodeURIComponent(operatorId)}&limit=1`
+      )
+      const legacyExistingRows = await supabase.select(
+        'operators',
+        `select=operator_id&supplier_id=eq.${encodeURIComponent(supplierId)}&operator_id=eq.${encodeURIComponent(operatorId)}&limit=1`
+      )
+      const existing = Array.isArray(existingRows) ? existingRows[0] : null
+      const legacyExisting = Array.isArray(legacyExistingRows) ? legacyExistingRows[0] : null
+      if (existing?.operator_id || legacyExisting?.operator_id) {
+        return sendError(res, 409, 'ALREADY_BOUND', 'operatorId is already bound to supplierId.')
+      }
+      const inserted = await supabase.insert(
+        'operators',
+        {
+          business_operator_id: operatorId,
+          supplier_id: supplierId,
+          name: (businessOperator as any)?.name ?? null,
+        },
+        { returning: 'representation' }
+      )
+      const row = Array.isArray(inserted) ? inserted[0] : null
+      if (!row?.operator_id) {
+        return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to bind operator.')
+      }
+      res.status(201).json({
+        supplierId,
+        operatorId,
+        supplierOperatorId: row.operator_id,
+      })
+    } catch {
+      return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to bind operator.')
+    }
   })
 
   app.get(`${prefix}/suppliers`, async (req: any, res: any) => {
@@ -2611,21 +3042,80 @@ function registerSupplierRoutes({
     if (!auth) return
     const statusInput = req.query.status ? String(req.query.status) : null
     const status = statusInput ? normalizeStatus(statusInput) : null
+    const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
     if (statusInput && !status) {
       return sendError(res, 400, 'VALIDATION_ERROR', 'status must be ACTIVE or SUSPENDED.')
+    }
+    if (operatorId && !isValidUuid(operatorId)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
     }
     const { page, pageSize, offset } = parsePagination(req.query, { defaultPage: 1, defaultPageSize: 20, maxPageSize: 100 })
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const filters: string[] = []
     if (status) filters.push(`status=eq.${encodeURIComponent(status)}`)
+    if (operatorId) {
+      const operatorRows = await supabase.select(
+        'operators',
+        `select=operator_id,supplier_id,business_operator_id&or=(business_operator_id.eq.${encodeURIComponent(operatorId)},operator_id.eq.${encodeURIComponent(operatorId)})&limit=1`
+      )
+      const operator = Array.isArray(operatorRows) ? operatorRows[0] : null
+      if (!operator?.supplier_id) {
+        return res.json({ items: [], total: 0, page, pageSize })
+      }
+      filters.push(`supplier_id=eq.${encodeURIComponent(String(operator.supplier_id))}`)
+    }
     const filterQs = filters.length ? `&${filters.join('&')}` : ''
     const { data, total } = await supabase.selectWithCount(
       'suppliers',
       `select=supplier_id,name,status,created_at&order=created_at.desc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
     )
     const rows = Array.isArray(data) ? data : []
+    const supplierIds = rows.map((r: any) => r?.supplier_id).filter(Boolean).map((v: unknown) => String(v))
+    const operatorMap = new Map<string, Array<{ operatorId: string | null; name: string | null; mcc: string | null; mnc: string | null }>>()
+    if (supplierIds.length) {
+      const idFilter = supplierIds.map((id: string) => encodeURIComponent(id)).join(',')
+      const linkRows = await supabase.select(
+        'operators',
+        `select=operator_id,supplier_id,business_operator_id,name&supplier_id=in.(${idFilter})`
+      )
+      const links = Array.isArray(linkRows) ? linkRows : []
+      const linkedOperatorIds = [
+        ...new Set(links.map((link: any) => String(link?.business_operator_id ?? link?.operator_id ?? '')).filter(Boolean)),
+      ]
+      const operatorInfoMap = new Map<string, any>()
+      if (linkedOperatorIds.length) {
+        const operatorFilter = linkedOperatorIds.map((id: string) => encodeURIComponent(id)).join(',')
+        const operatorRows = await supabase.select(
+          'business_operators',
+          `select=operator_id,name,mcc,mnc&operator_id=in.(${operatorFilter})`
+        )
+        const operatorInfos = Array.isArray(operatorRows) ? operatorRows : []
+        for (const info of operatorInfos) {
+          const infoId = info?.operator_id ? String(info.operator_id) : ''
+          if (infoId) operatorInfoMap.set(infoId, info)
+        }
+      }
+      for (const link of links) {
+        const supplierKey = link?.supplier_id ? String(link.supplier_id) : null
+        if (!supplierKey) continue
+        if (!operatorMap.has(supplierKey)) operatorMap.set(supplierKey, [])
+        const linkedOperatorId = link?.business_operator_id
+          ? String(link.business_operator_id)
+          : (link?.operator_id ? String(link.operator_id) : null)
+        if (!linkedOperatorId) continue
+        const operatorInfo = linkedOperatorId ? operatorInfoMap.get(linkedOperatorId) : null
+        operatorMap.get(supplierKey)?.push({
+          operatorId: linkedOperatorId,
+          name: operatorInfo?.name ?? link?.name ?? null,
+          mcc: operatorInfo?.mcc ?? null,
+          mnc: operatorInfo?.mnc ?? null,
+        })
+      }
+    }
     res.json({
       items: rows.map((r: any) => ({
+        operators: operatorMap.get(String(r.supplier_id)) ?? [],
+        operatorIds: (operatorMap.get(String(r.supplier_id)) ?? []).map((o: any) => o.operatorId).filter(Boolean),
         supplierId: r.supplier_id,
         name: r.name,
         status: r.status,
@@ -2644,6 +3134,10 @@ function registerSupplierRoutes({
     if (!supplierId) {
       return sendError(res, 400, 'BAD_REQUEST', 'supplierId is required.')
     }
+    const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
+    if (operatorId && !isValidUuid(operatorId)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+    }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const rows = await supabase.select(
       'suppliers',
@@ -2653,11 +3147,54 @@ function registerSupplierRoutes({
     if (!row) {
       return sendError(res, 404, 'RESOURCE_NOT_FOUND', `supplier ${supplierId} not found.`)
     }
+    if (operatorId) {
+      const operatorRows = await supabase.select(
+        'operators',
+        `select=operator_id&or=(business_operator_id.eq.${encodeURIComponent(operatorId)},operator_id.eq.${encodeURIComponent(operatorId)})&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+      )
+      if (!Array.isArray(operatorRows) || operatorRows.length === 0) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `supplier ${supplierId} not found.`)
+      }
+    }
+    const linkRows = await supabase.select(
+      'operators',
+      `select=operator_id,supplier_id,business_operator_id,name&supplier_id=eq.${encodeURIComponent(supplierId)}`
+    )
+    const links = Array.isArray(linkRows) ? linkRows : []
+    const linkedOperatorIds = [...new Set(links.map((link: any) => String(link?.business_operator_id ?? link?.operator_id ?? '')).filter(Boolean))]
+    const operatorInfoMap = new Map<string, any>()
+    if (linkedOperatorIds.length) {
+      const operatorFilter = linkedOperatorIds.map((id: string) => encodeURIComponent(id)).join(',')
+      const operatorRows = await supabase.select(
+        'business_operators',
+        `select=operator_id,name,mcc,mnc&operator_id=in.(${operatorFilter})`
+      )
+      const operatorInfos = Array.isArray(operatorRows) ? operatorRows : []
+      for (const info of operatorInfos) {
+        const infoId = info?.operator_id ? String(info.operator_id) : ''
+        if (infoId) operatorInfoMap.set(infoId, info)
+      }
+    }
+    const operators = links.map((link: any) => {
+      const linkedOperatorId = link?.business_operator_id
+        ? String(link.business_operator_id)
+        : (link?.operator_id ? String(link.operator_id) : null)
+      if (!linkedOperatorId) return null
+      const operatorInfo = operatorInfoMap.get(linkedOperatorId)
+      return {
+        operatorId: linkedOperatorId,
+        name: operatorInfo?.name ?? link?.name ?? null,
+        mcc: operatorInfo?.mcc ?? null,
+        mnc: operatorInfo?.mnc ?? null,
+      }
+    }).filter(Boolean)
     res.json({
       supplierId: row.supplier_id,
       name: row.name,
       status: row.status,
       createdAt: row.created_at,
+      operators,
+      operatorIds: operators.map((operator: any) => operator.operatorId).filter(Boolean),
     })
   })
 
@@ -2738,6 +3275,7 @@ function registerSupplierRoutes({
     if (!supplierId) {
       return sendError(res, 400, 'BAD_REQUEST', 'supplierId is required.')
     }
+    const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
     const statusInput = req.body?.status ? String(req.body.status) : null
     const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : ''
     const status = statusInput ? normalizeStatus(statusInput) : null
@@ -2747,6 +3285,9 @@ function registerSupplierRoutes({
     if (!reason) {
       return sendError(res, 400, 'VALIDATION_ERROR', 'reason is required.')
     }
+    if (operatorId && !isValidUuid(operatorId)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+    }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const rows = await supabase.select(
       'suppliers',
@@ -2755,6 +3296,15 @@ function registerSupplierRoutes({
     const row = Array.isArray(rows) ? rows[0] : null
     if (!row) {
       return sendError(res, 404, 'RESOURCE_NOT_FOUND', `supplier ${supplierId} not found.`)
+    }
+    if (operatorId) {
+      const operatorRows = await supabase.select(
+        'operators',
+        `select=operator_id&operator_id=eq.${encodeURIComponent(operatorId)}&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+      )
+      if (!Array.isArray(operatorRows) || operatorRows.length === 0) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `supplier ${supplierId} not found.`)
+      }
     }
     const previousStatus = row.status
     const nowIso = new Date().toISOString()
@@ -2821,7 +3371,7 @@ function registerUserRoutes({
     const roleInput = typeof req.body?.role === 'string' ? req.body.role.trim() : ''
     const role = roleInput ? roleInput.toLowerCase() : ''
     const assignedEnterpriseIds = Array.isArray(req.body?.assignedEnterpriseIds)
-      ? req.body.assignedEnterpriseIds.map((id: unknown) => String(id))
+      ? req.body.assignedEnterpriseIds.map((id: unknown) => String(id)).filter((id: string) => id.trim() !== '')
       : []
     if (!emailRegex.test(email)) {
       return sendError(res, 400, 'VALIDATION_ERROR', 'email is invalid.')
@@ -2831,9 +3381,6 @@ function registerUserRoutes({
     }
     if (!resellerRoles.has(role)) {
       return sendError(res, 400, 'VALIDATION_ERROR', 'role is invalid for reseller users.')
-    }
-    if ((role === 'reseller_sales' || role === 'reseller_sales_director') && assignedEnterpriseIds.length === 0) {
-      return sendError(res, 400, 'VALIDATION_ERROR', 'assignedEnterpriseIds is required for sales roles.')
     }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const tenantRows = await supabase.select(
@@ -2911,6 +3458,111 @@ function registerUserRoutes({
     })
   })
 
+  app.post(`${prefix}/resellers/:resellerId/users/:userId/assign-enterprises`, async (req: any, res: any) => {
+    const auth = getAuthContext(req)
+    const resellerId = String(req.params.resellerId || '')
+    const userId = String(req.params.userId || '')
+    if (!resellerId) {
+      return sendError(res, 400, 'BAD_REQUEST', 'resellerId is required.')
+    }
+    if (!userId) {
+      return sendError(res, 400, 'BAD_REQUEST', 'userId is required.')
+    }
+    if (!auth.roleScope && !auth.role) {
+      return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
+    }
+    if (auth.roleScope === 'reseller') {
+      if (auth.role !== 'reseller_admin' || !auth.resellerId || auth.resellerId !== resellerId) {
+        return sendError(res, 403, 'FORBIDDEN', 'Reseller admin required.')
+      }
+    } else if (!(auth.roleScope === 'platform' || auth.role === 'platform_admin')) {
+      return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
+    }
+    const assignedEnterpriseIds = Array.isArray(req.body?.assignedEnterpriseIds)
+      ? req.body.assignedEnterpriseIds.map((id: unknown) => String(id))
+      : null
+    if (!assignedEnterpriseIds) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'assignedEnterpriseIds is required.')
+    }
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const tenantRows = await supabase.select(
+      'tenants',
+      `select=tenant_id&tenant_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.RESELLER&limit=1`
+    )
+    if (!Array.isArray(tenantRows) || tenantRows.length === 0) {
+      return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+    }
+    const userRows = await supabase.select(
+      'users',
+      `select=user_id,tenant_id&user_id=eq.${encodeURIComponent(userId)}&limit=1`
+    )
+    const userRow = Array.isArray(userRows) ? userRows[0] : null
+    if (!userRow || String((userRow as any).tenant_id || '') !== resellerId) {
+      return sendError(res, 404, 'RESOURCE_NOT_FOUND', `user ${userId} not found.`)
+    }
+    const existingAssignments = await supabase.select(
+      'reseller_enterprise_assignments',
+      `select=enterprise_id&user_id=eq.${encodeURIComponent(userId)}&reseller_id=eq.${encodeURIComponent(resellerId)}`
+    )
+    const previousAssignedEnterpriseIds = Array.isArray(existingAssignments)
+      ? existingAssignments.map((row: any) => String(row.enterprise_id))
+      : []
+    if (assignedEnterpriseIds.length > 0) {
+      const enterpriseFilter = assignedEnterpriseIds.map((id: string) => encodeURIComponent(id)).join(',')
+      const enterpriseRows = await supabase.select(
+        'tenants',
+        `select=tenant_id,parent_id&tenant_id=in.(${enterpriseFilter})&tenant_type=eq.ENTERPRISE`
+      )
+      const enterprises = Array.isArray(enterpriseRows) ? enterpriseRows : []
+      if (enterprises.length !== assignedEnterpriseIds.length) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'assignedEnterpriseIds contains invalid enterprise id.')
+      }
+      if (enterprises.some((e: any) => String(e.parent_id || '') !== resellerId)) {
+        return sendError(res, 403, 'FORBIDDEN', 'assignedEnterpriseIds must belong to reseller.')
+      }
+    }
+    await supabase.delete(
+      'reseller_enterprise_assignments',
+      `user_id=eq.${encodeURIComponent(userId)}&reseller_id=eq.${encodeURIComponent(resellerId)}`
+    )
+    if (assignedEnterpriseIds.length > 0) {
+      await supabase.insert(
+        'reseller_enterprise_assignments',
+        assignedEnterpriseIds.map((enterpriseId: string) => ({
+          user_id: userId,
+          reseller_id: resellerId,
+          enterprise_id: enterpriseId,
+        })),
+        { returning: 'minimal' }
+      )
+    }
+    await supabase.insert(
+      'audit_logs',
+      {
+        actor_user_id: auth.userId,
+        actor_role: auth.role,
+        tenant_id: resellerId,
+        action: 'RESELLER_USER_ENTERPRISES_ASSIGNED',
+        target_type: 'USER',
+        target_id: userId,
+        request_id: getTraceId(res),
+        source_ip: req.ip,
+        before_data: {
+          assignedEnterpriseIds: previousAssignedEnterpriseIds,
+        },
+        after_data: {
+          assignedEnterpriseIds,
+        },
+      },
+      { returning: 'minimal' }
+    )
+    res.json({
+      userId,
+      resellerId,
+      assignedEnterpriseIds,
+    })
+  })
+
   app.get(`${prefix}/resellers/:resellerId/users`, async (req: any, res: any) => {
     const auth = getAuthContext(req)
     const resellerId = String(req.params.resellerId || '')
@@ -2961,6 +3613,72 @@ function registerUserRoutes({
     })
   })
 
+  app.get(`${prefix}/enterprises/:enterpriseId/users`, async (req: any, res: any) => {
+    const auth = getAuthContext(req)
+    const enterpriseId = String(req.params.enterpriseId || '')
+    if (!enterpriseId) {
+      return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required.')
+    }
+    if (!auth.roleScope && !auth.role) {
+      return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
+    }
+    if (auth.roleScope === 'customer') {
+      if (auth.role !== 'customer_admin' || !auth.customerId || auth.customerId !== enterpriseId) {
+        return sendError(res, 403, 'FORBIDDEN', 'Enterprise admin required.')
+      }
+    } else if (auth.roleScope === 'reseller') {
+      if (auth.role !== 'reseller_admin') {
+        return sendError(res, 403, 'FORBIDDEN', 'Reseller admin required.')
+      }
+    } else if (!(auth.roleScope === 'platform' || auth.role === 'platform_admin')) {
+      return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
+    }
+    const { page, pageSize, offset } = parsePagination(req.query, { defaultPage: 1, defaultPageSize: 20, maxPageSize: 100 })
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const enterpriseRows = await supabase.select(
+      'tenants',
+      `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(enterpriseId)}&tenant_type=eq.ENTERPRISE&limit=1`
+    )
+    const enterprise = Array.isArray(enterpriseRows) ? enterpriseRows[0] : null
+    if (!enterprise) {
+      return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+    }
+    if (auth.roleScope === 'reseller' && (!auth.resellerId || String((enterprise as any).parent_id || '') !== auth.resellerId)) {
+      return sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
+    }
+    const { data, total } = await supabase.selectWithCount(
+      'users',
+      `select=user_id,email,display_name,status,created_at&tenant_id=eq.${encodeURIComponent(enterpriseId)}&order=created_at.desc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
+    )
+    const rows = Array.isArray(data) ? data : []
+    const userIds = rows.map((r: any) => String(r.user_id))
+    const roles = userIds.length > 0
+      ? await supabase.select(
+          'user_roles',
+          `select=user_id,role_name&user_id=in.(${userIds.map((id: string) => encodeURIComponent(id)).join(',')})`
+        )
+      : []
+    const roleMap = new Map()
+    for (const r of Array.isArray(roles) ? roles : []) {
+      if (!roleMap.has((r as any).user_id)) roleMap.set((r as any).user_id, (r as any).role_name)
+    }
+    res.json({
+      items: rows.map((r: any) => ({
+        userId: r.user_id,
+        enterpriseId,
+        email: r.email,
+        displayName: r.display_name,
+        role: roleMap.get(r.user_id) ?? null,
+        status: r.status,
+        departmentId: null,
+        createdAt: r.created_at,
+      })),
+      total: typeof total === 'number' ? total : rows.length,
+      page,
+      pageSize,
+    })
+  })
+
   app.post(`${prefix}/enterprises/:enterpriseId/users`, async (req: any, res: any) => {
     const auth = getAuthContext(req)
     const enterpriseId = String(req.params.enterpriseId || '')
@@ -2994,9 +3712,6 @@ function registerUserRoutes({
     }
     if (!enterpriseRoles.has(role)) {
       return sendError(res, 400, 'VALIDATION_ERROR', 'role is invalid for enterprise users.')
-    }
-    if (role === 'customer_ops' && !departmentId) {
-      return sendError(res, 400, 'VALIDATION_ERROR', 'departmentId is required for customer_ops.')
     }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const enterpriseRows = await supabase.select(
@@ -3061,6 +3776,134 @@ function registerUserRoutes({
       departmentId,
       createdAt: row.created_at,
     })
+  })
+
+  app.post(`${prefix}/enterprises/:enterpriseId/users/:userId/assign-departments`, async (req: any, res: any) => {
+    const auth = getAuthContext(req)
+    const enterpriseId = String(req.params.enterpriseId || '')
+    const userId = String(req.params.userId || '')
+    if (!enterpriseId) {
+      return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required.')
+    }
+    if (!userId) {
+      return sendError(res, 400, 'BAD_REQUEST', 'userId is required.')
+    }
+    if (!auth.roleScope && !auth.role) {
+      return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
+    }
+    if (auth.roleScope === 'customer') {
+      if (auth.role !== 'customer_admin' || !auth.customerId || auth.customerId !== enterpriseId) {
+        return sendError(res, 403, 'FORBIDDEN', 'Enterprise admin required.')
+      }
+    } else if (auth.roleScope === 'reseller') {
+      if (auth.role !== 'reseller_admin') {
+        return sendError(res, 403, 'FORBIDDEN', 'Reseller admin required.')
+      }
+    } else if (!(auth.roleScope === 'platform' || auth.role === 'platform_admin')) {
+      return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
+    }
+    const assignedDepartmentIds = Array.isArray(req.body?.assignedDepartmentIds)
+      ? req.body.assignedDepartmentIds.map((id: unknown) => String(id))
+      : null
+    if (!assignedDepartmentIds) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'assignedDepartmentIds is required.')
+    }
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    try {
+      const enterpriseRows = await supabase.select(
+        'tenants',
+        `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(enterpriseId)}&tenant_type=eq.ENTERPRISE&limit=1`
+      )
+      const enterprise = Array.isArray(enterpriseRows) ? enterpriseRows[0] : null
+      if (!enterprise) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+      }
+      if (auth.roleScope === 'reseller' && (!auth.resellerId || String((enterprise as any).parent_id || '') !== auth.resellerId)) {
+        return sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
+      }
+      const userRows = await supabase.select(
+        'users',
+        `select=user_id,tenant_id&user_id=eq.${encodeURIComponent(userId)}&limit=1`
+      )
+      const userRow = Array.isArray(userRows) ? userRows[0] : null
+      if (!userRow || String((userRow as any).tenant_id || '') !== enterpriseId) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `user ${userId} not found.`)
+      }
+      const existingAssignments = await supabase.select(
+        'enterprise_user_departments',
+        `select=department_id&user_id=eq.${encodeURIComponent(userId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}`
+      )
+      const previousAssignedDepartmentIds = Array.isArray(existingAssignments)
+        ? existingAssignments.map((row: any) => String(row.department_id))
+        : []
+      if (assignedDepartmentIds.length > 0) {
+        const departmentFilter = assignedDepartmentIds.map((id: string) => encodeURIComponent(id)).join(',')
+        const departmentRows = await supabase.select(
+          'tenants',
+          `select=tenant_id,parent_id&tenant_id=in.(${departmentFilter})&tenant_type=eq.DEPARTMENT`
+        )
+        const departments = Array.isArray(departmentRows) ? departmentRows : []
+        if (departments.length !== assignedDepartmentIds.length) {
+          return sendError(res, 400, 'VALIDATION_ERROR', 'assignedDepartmentIds contains invalid department id.')
+        }
+        if (departments.some((d: any) => String(d.parent_id || '') !== enterpriseId)) {
+          return sendError(res, 403, 'FORBIDDEN', 'assignedDepartmentIds must belong to enterprise.')
+        }
+      }
+      await supabase.delete(
+        'enterprise_user_departments',
+        `user_id=eq.${encodeURIComponent(userId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}`
+      )
+      if (assignedDepartmentIds.length > 0) {
+        await supabase.insert(
+          'enterprise_user_departments',
+          assignedDepartmentIds.map((departmentId: string) => ({
+            user_id: userId,
+            enterprise_id: enterpriseId,
+            department_id: departmentId,
+          })),
+          { returning: 'minimal' }
+        )
+      }
+      await supabase.insert(
+        'audit_logs',
+        {
+          actor_user_id: auth.userId,
+          actor_role: auth.role,
+          tenant_id: enterpriseId,
+          action: 'ENTERPRISE_USER_DEPARTMENTS_ASSIGNED',
+          target_type: 'USER',
+          target_id: userId,
+          request_id: getTraceId(res),
+          source_ip: req.ip,
+          before_data: {
+            assignedDepartmentIds: previousAssignedDepartmentIds,
+          },
+          after_data: {
+            assignedDepartmentIds,
+          },
+        },
+        { returning: 'minimal' }
+      )
+      res.json({
+        userId,
+        enterpriseId,
+        assignedDepartmentIds,
+      })
+    } catch (err: any) {
+      if (isMissingTableError(err, 'enterprise_user_departments')) {
+        return sendError(
+          res,
+          503,
+          'SCHEMA_NOT_READY',
+          'enterprise_user_departments table is missing. Apply migration 0040_add_enterprise_user_departments.sql.'
+        )
+      }
+      if (typeof err?.status === 'number' && typeof err?.code === 'string' && typeof err?.message === 'string') {
+        return sendError(res, err.status, err.code, err.message)
+      }
+      throw err
+    }
   })
 }
 
@@ -3553,6 +4396,19 @@ export function createApp() {
     },
   })
   registerPackageRoutes({
+    app,
+    prefix: '/v1',
+    deps: {
+      createSupabaseRestClient,
+      getTraceId,
+      sendError,
+      ensureResellerAdmin,
+      ensureResellerSales,
+      resolveEnterpriseForReseller,
+      isValidUuid,
+    },
+  })
+  registerPackageModuleRoutes({
     app,
     prefix: '/v1',
     deps: {
@@ -4196,6 +5052,9 @@ export function createApp() {
         url: ${JSON.stringify(openapiUrl)},
         dom_id: '#swagger-ui',
         deepLinking: true,
+        docExpansion: 'none',
+        tagsSorter: 'alpha',
+        operationsSorter: 'alpha',
         presets: [SwaggerUIBundle.presets.apis],
         layout: 'BaseLayout',
         onComplete: function() {

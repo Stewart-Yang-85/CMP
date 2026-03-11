@@ -177,8 +177,53 @@ async function main() {
       const simsCsvText = await simsCsvRes.text()
       assert(simsCsvRes.ok, `sims csv must be 200, got ${simsCsvRes.status}`)
       const header = simsCsvText.split('\n')[0].trim()
-      assert(header === 'iccid,imsi,msisdn,status,apn,activationDate,imeiLocked', 'sims csv header must match')
+      assert(header.includes('iccid,imsi,msisdn,status'), 'sims csv header must include basic fields')
+      assert(header.includes('resellerId,resellerName'), 'sims csv header must include reseller fields for platform scope')
+      assert(header.includes('enterpriseId,enterpriseName'), 'sims csv header must include enterprise fields')
       log('sims:csv passed')
+    }
+
+    log('Testing /v1/enterprises/:enterpriseId/sims:csv...')
+    {
+      let entId = null
+      if (process.env.SMOKE_SIM_ICCID && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+         const c = createSupabaseRestClient({ useServiceRole: true })
+         const rows = await c.select('sims', `select=enterprise_id&iccid=eq.${encodeURIComponent(process.env.SMOKE_SIM_ICCID)}&limit=1`)
+         if (rows && rows.length > 0 && rows[0].enterprise_id) {
+             entId = rows[0].enterprise_id
+         }
+      }
+      
+      if (!entId) {
+          const sRes = await fetch(`${base}/v1/sims?limit=50&page=1`, { headers: authHeaders() })
+          if (sRes.ok) {
+              const sJson = await sRes.json()
+              const found = sJson.items.find(s => s.enterpriseId)
+              if (found) entId = found.enterpriseId
+          }
+      }
+
+      if (entId) {
+          const entCsvRes = await fetch(`${base}/v1/enterprises/${entId}/sims:csv?limit=1&page=1&supplierId=SUP1&operatorId=OP1`, {
+            method: 'GET',
+            headers: authHeaders(),
+          })
+          log(`enterprises sims:csv status: ${entCsvRes.status}`)
+          assert(entCsvRes.ok, `enterprises sims:csv must be 200, got ${entCsvRes.status}`)
+          const entCsvText = await entCsvRes.text()
+          const entHeader = entCsvText.split('\n')[0].trim()
+          
+          assert(!entHeader.includes('supplierId'), 'enterprise sims csv header must NOT include supplierId')
+          assert(!entHeader.includes('operatorId'), 'enterprise sims csv header must NOT include operatorId')
+          
+          const entFilters = entCsvRes.headers.get('x-filters') || ''
+          log(`enterprise sims:csv x-filters: ${entFilters}`)
+          assert(!entFilters.includes('supplierId'), 'enterprise sims csv x-filters must NOT include supplierId')
+          assert(!entFilters.includes('operatorId'), 'enterprise sims csv x-filters must NOT include operatorId')
+          log('enterprises sims:csv passed')
+      } else {
+          log('SKIP: No enterpriseId found for enterprise CSV test')
+      }
     }
     log('Testing /v1/share-links...')
       const share = await httpJson(`${base}/v1/share-links`, {
@@ -1157,7 +1202,7 @@ async function main() {
     }
 
     try {
-      const simsRes = await fetch(`${base}/v1/sims?limit=1&page=1`, {
+      const simsRes = await fetch(`${base}/v1/sims?limit=50&page=1`, {
         method: 'GET',
         headers: authHeaders(),
       })
@@ -1172,7 +1217,8 @@ async function main() {
       assert(metricsText.includes('cmp_requests_labeled_total'), 'metrics must include labeled counters')
 
       if (sims.items.length > 0) {
-        const sim = sims.items[0]
+        // Prefer a SIM with enterpriseId for subscription tests
+        const sim = sims.items.find(s => s.enterpriseId) || sims.items[0]
         assert(typeof sim?.iccid === 'string' && sim.iccid.length > 5, 'sim.iccid must be string')
 
         const simDetail = await httpJson(`${base}/v1/sims/${encodeURIComponent(sim.iccid)}`, {
@@ -1279,12 +1325,25 @@ async function main() {
       try {
       const c = createSupabaseRestClient({ useServiceRole: true })
       const iccid = String(process.env.SMOKE_SIM_ICCID)
-      const rows = await c.select('sims', `select=sim_id,enterprise_id,supplier_id,carrier_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
+      const rows = await c.select('sims', `select=sim_id,enterprise_id,supplier_id,carrier_id,operator_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
       const simRow = Array.isArray(rows) ? rows[0] : null
       if (simRow) {
         const entId = simRow.enterprise_id
         const supplierId = simRow.supplier_id
         const carrierId = simRow.carrier_id
+        let operatorId = simRow.operator_id
+        if (!operatorId && supplierId && carrierId) {
+          const opRows = await c.select(
+            'operators',
+            `select=operator_id&supplier_id=eq.${encodeURIComponent(supplierId)}&carrier_id=eq.${encodeURIComponent(carrierId)}&limit=1`
+          )
+          if (Array.isArray(opRows) && opRows[0]?.operator_id) {
+            operatorId = opRows[0].operator_id
+          } else {
+            const createdOps = await c.insert('operators', { supplier_id: supplierId, carrier_id: carrierId })
+            operatorId = Array.isArray(createdOps) ? createdOps[0]?.operator_id : null
+          }
+        }
         const plan = await c.insert('price_plans', {
           enterprise_id: entId,
           name: `smoke-${Date.now()}`,
@@ -1319,6 +1378,7 @@ async function main() {
           status: 'PUBLISHED',
           supplier_id: supplierId,
           carrier_id: carrierId,
+          operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: terms1,
           price_plan_version_id: ppvId,
@@ -1333,6 +1393,7 @@ async function main() {
           status: 'PUBLISHED',
           supplier_id: supplierId,
           carrier_id: carrierId,
+          operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: terms2,
           price_plan_version_id: ppvId,
@@ -1344,6 +1405,7 @@ async function main() {
           status: 'PUBLISHED',
           supplier_id: supplierId,
           carrier_id: carrierId,
+          operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: {},
           price_plan_version_id: ppvId,
@@ -1355,6 +1417,7 @@ async function main() {
           status: 'PUBLISHED',
           supplier_id: supplierId,
           carrier_id: carrierId,
+          operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: { commitment_period_days: 5 },
           price_plan_version_id: ppvId,
@@ -1590,13 +1653,26 @@ async function main() {
       try {
         const c = createSupabaseRestClient({ useServiceRole: true })
         const iccid = String(process.env.SMOKE_SIM_ICCID)
-        const simRows = await c.select('sims', `select=supplier_id,carrier_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
+        const simRows = await c.select('sims', `select=supplier_id,carrier_id,operator_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
         const simRow = Array.isArray(simRows) ? simRows[0] : null
         if (!simRow?.supplier_id) {
           process.stdout.write('SKIP: Network profile smoke (SIM missing supplier)\n')
         } else {
           const supplierId = String(simRow.supplier_id)
           const carrierId = simRow.carrier_id ? String(simRow.carrier_id) : null
+          let operatorId = simRow.operator_id ? String(simRow.operator_id) : null
+          if (!operatorId && simRow.supplier_id && simRow.carrier_id) {
+            const opRows = await c.select(
+              'operators',
+              `select=operator_id&supplier_id=eq.${encodeURIComponent(simRow.supplier_id)}&carrier_id=eq.${encodeURIComponent(simRow.carrier_id)}&limit=1`
+            )
+            if (Array.isArray(opRows) && opRows[0]?.operator_id) {
+              operatorId = String(opRows[0].operator_id)
+            } else {
+              const createdOps = await c.insert('operators', { supplier_id: simRow.supplier_id, carrier_id: simRow.carrier_id })
+              operatorId = Array.isArray(createdOps) ? String(createdOps[0]?.operator_id || '') : null
+            }
+          }
           let mccmnc = null
           if (carrierId) {
             const carrierRows = await c.select('carriers', `select=mcc,mnc&carrier_id=eq.${encodeURIComponent(carrierId)}&limit=1`)
@@ -1617,7 +1693,7 @@ async function main() {
               const apn = await httpJson(`${base}/v1/apn-profiles`, {
                 method: 'POST',
                 headers: buildHeaders({ includeAuth: false, extra: { ...auth, 'Content-Type': 'application/json' } }),
-                body: { name: `smoke-apn-${Date.now()}`, apn: 'cmp-smoke', authType: 'NONE', supplierId, carrierId },
+                body: { name: `smoke-apn-${Date.now()}`, apn: 'cmp-smoke', authType: 'NONE', supplierId, operatorId: operatorId || carrierId },
               })
               assert(typeof apn?.apnProfileId === 'string', 'apnProfileId must be string')
               const apnVer = await httpJson(`${base}/v1/apn-profiles/${encodeURIComponent(apn.apnProfileId)}/versions`, {
@@ -1642,7 +1718,7 @@ async function main() {
               const roaming = await httpJson(`${base}/v1/roaming-profiles`, {
                 method: 'POST',
                 headers: buildHeaders({ includeAuth: false, extra: { ...auth, 'Content-Type': 'application/json' } }),
-                body: { name: `smoke-roam-${Date.now()}`, supplierId, carrierId, mccmncList: [mccmnc] },
+                body: { name: `smoke-roam-${Date.now()}`, supplierId, operatorId: operatorId || carrierId, mccmncList: [mccmnc] },
               })
               assert(typeof roaming?.roamingProfileId === 'string', 'roamingProfileId must be string')
               const roamingVer = await httpJson(`${base}/v1/roaming-profiles/${encodeURIComponent(roaming.roamingProfileId)}/versions`, {

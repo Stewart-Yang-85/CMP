@@ -19,7 +19,7 @@
 | `service_type` | DATA, VOICE, SMS | 电信业务类型 |
 | `billing_cycle_type` | CALENDAR_MONTH, CUSTOM_RANGE | 计费周期类型 |
 | `first_cycle_proration` | NONE, DAILY_PRORATION | 首期分摊 |
-| `price_plan_type` | ONE_TIME, SIM_DEPENDENT_BUNDLE, FIXED_BUNDLE, TIERED_VOLUME_PRICING | 资费计划类型 |
+| `price_plan_type` | ONE_TIME, SIM_DEPENDENT_BUNDLE, FIXED_BUNDLE, TIERED_PRICING | 资费计划类型 |
 | `note_type` | CREDIT, DEBIT | 调账单类型 |
 | `note_status` | DRAFT, APPROVED, APPLIED, CANCELLED | 调账单状态 |
 | `subscription_kind` | MAIN, ADD_ON | 订阅种类 |
@@ -50,7 +50,10 @@
 ```
 ── 组织层 ──────────────────────────────────────────────────────
 
-suppliers ──1:N──┐                      operators
+carriers (public catalog)
+business_operators (business dictionary)
+
+suppliers ──1:N──┐                      operators ──N:1── carriers
     │            ▼                          │
     │   upstream_integrations ◄──N:1────────┘
     │     (supplier_id + operator_id UNIQUE)
@@ -69,11 +72,33 @@ suppliers ──1:N──┐                      operators
 
 resellers ──1:N──> customers
     │                  │
-    │                  ├──1:N──> price_plans ──1:N──> price_plan_versions
+    │                  ├──1:N──> roaming_profiles ──1:N──> roaming_profile_entries
+    │                  │                     │
+    │                  │                     └── source_roaming_profile_id (self FK)
+    │                  │
+    │                  ├──1:N──> price_plans (snapshots)
+    │                  │                     │
+    │                  │                     └── source_price_plan_id (self FK)
+    │                  │
+    │                  ├──1:N──> apn_profiles
+    │                  │                     │
+    │                  │                     └── source_apn_profile_id (self FK)
+    │                  │
+    │                  ├──1:N──> control_policies ──1:N──> control_policy_throttling_tiers
+    │                  │                     │
+    │                  │                     └── source_control_policy_id (self FK)
+    │                  │
+    │                  ├──1:N──> commercial_terms
+    │                  │                     │
+    │                  │                     └── source_commercial_terms_id (self FK)
+    │                  │
+    │                  ├──1:N──> carrier_services
+    │                  │                     │
+    │                  │           (apn_profile_id, roaming_profile_id)
     │                  │
     │                  ├──1:N──> packages ──1:N──> package_versions
     │                  │                              │
-    │                  │                    (price_plan_version_id)
+    │                  │              (carrier_service_id, price_plan_id, control_policy_id, commercial_terms_id)
     │                  │
     │                  ├──1:N──> subscriptions
     │                  │              │
@@ -131,25 +156,39 @@ sim_cards ──1:N──> rating_results
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
 
-#### `operators` — 运营商（替代旧 `carriers`）
+#### `carriers` — 公共运营商目录
 
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
-| id | uuid | PK, default gen_random_uuid() | 运营商 ID |
-| name | text | NOT NULL | 运营商名称 |
+| carrier_id | uuid | PK, default gen_random_uuid() | 公共运营商 ID |
 | mcc | char(3) | NOT NULL | 移动国家代码 |
-| mnc | varchar(3) | NOT NULL | 移动网络代码 |
-| apn_default | text | — | 默认 APN |
-| roaming_profile_id | uuid | — | 漫游配置 ID |
-| status | operator_status | NOT NULL, default 'active' | active / deprecated / error |
-| replaced_by_id | uuid | FK→operators(id), nullable | 废弃后的替代运营商 |
-| deprecation_reason | text | — | 废弃原因 |
-| created_by | uuid | — | 创建者 |
-| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
-| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
+| mnc | char(3) | NOT NULL | 移动网络代码 |
+| name | text | — | 运营商名称 |
+| country_name | text | — | 国家名称（英文） |
+| lte_bands | text | — | LTE 频段 |
 | | | UNIQUE(mcc, mnc) | E.212 唯一约束 |
 
-> **废弃工作流**: status=deprecated 的运营商不可用于新 SIM 分配，已有 SIM 保持服务。replaced_by_id 指向接替运营商。
+#### `business_operators` — 业务运营商字典
+
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| operator_id | uuid | PK, default gen_random_uuid() | 业务运营商 ID |
+| mcc | char(3) | NOT NULL | 移动国家代码 |
+| mnc | char(3) | NOT NULL | 移动网络代码 |
+| name | text | NOT NULL | 运营商名称 |
+
+#### `operators` — 供应商-运营商关联
+
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| operator_id | uuid | PK, default gen_random_uuid() | 业务关联 ID |
+| supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
+| carrier_id | uuid | NOT NULL, FK→carriers | 公共运营商 |
+| name | text | — | 运营商名称快照 |
+| status | text | NOT NULL, default 'ACTIVE' | ACTIVE / SUSPENDED |
+| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
+| | | UNIQUE(supplier_id, carrier_id) | 供应商-公共运营商唯一 |
 
 #### `upstream_integrations` — 上游集成配置（替代旧 `supplier_carriers`）
 
@@ -451,7 +490,7 @@ sim_cards ──1:N──> rating_results
 #### `price_plans`
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
-| price_plan_id | uuid | PK, default gen_random_uuid() | 资费计划 ID |
+| price_plan_id | uuid | PK, default gen_random_uuid() | 资费计划快照 ID |
 | customer_id | uuid | NOT NULL, FK→customers | 企业 |
 | name | text | NOT NULL | 名称 |
 | type | price_plan_type | NOT NULL | 类型 |
@@ -459,15 +498,9 @@ sim_cards ──1:N──> rating_results
 | currency | text | NOT NULL | 币种 |
 | billing_cycle_type | billing_cycle_type | NOT NULL, default 'CALENDAR_MONTH' | 计费周期 |
 | first_cycle_proration | first_cycle_proration | NOT NULL, default 'NONE' | 首期分摊 |
-| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
-
-#### `price_plan_versions`
-| 列 | 类型 | 约束 | 说明 |
-|----|------|------|------|
-| price_plan_version_id | uuid | PK, default gen_random_uuid() | 版本 ID |
-| price_plan_id | uuid | NOT NULL, FK→price_plans | 资费计划 |
-| version | int | NOT NULL | 版本号 |
-| effective_from | timestamptz | — | 生效时间 |
+| status | text | NOT NULL, default 'DRAFT' | DRAFT / PUBLISHED / DEPRECATED |
+| published_at | timestamptz | — | 发布时间 |
+| source_price_plan_id | uuid | FK→price_plans | 来源快照 ID（克隆链路） |
 | monthly_fee | numeric(12,2) | NOT NULL, default 0 | 月租费 |
 | deactivated_monthly_fee | numeric(12,2) | NOT NULL, default 0 | 停机保号费 |
 | one_time_fee | numeric(12,2) | — | 一次性费用 |
@@ -479,7 +512,8 @@ sim_cards ──1:N──> rating_results
 | tiers | jsonb | — | 阶梯费率 |
 | payg_rates | jsonb | — | PAYG 费率 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
-| | | UNIQUE(price_plan_id, version) | 版本唯一 |
+
+**索引**: `idx_price_plans_customer_status(customer_id, status)`、`idx_price_plans_customer_published(customer_id, published_at desc)`
 
 **`tiers` JSONB 结构**:
 ```json
@@ -506,6 +540,126 @@ sim_cards ──1:N──> rating_results
 ]
 ```
 
+#### `roaming_profiles`
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| roaming_profile_id | uuid | PK, default gen_random_uuid() | Roaming Profile 快照 ID |
+| reseller_id | uuid | NOT NULL, FK→resellers | 代理商 |
+| supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
+| operator_id | uuid | NOT NULL, FK→operators | 运营商 |
+| name | text | NOT NULL | 展示名称（允许重复） |
+| status | text | NOT NULL, default 'DRAFT' | DRAFT / PUBLISHED / DEPRECATED |
+| published_at | timestamptz | — | 发布时间 |
+| source_roaming_profile_id | uuid | FK→roaming_profiles | 来源快照 ID（克隆链路） |
+| created_by | uuid | — | 创建者 |
+| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
+
+**索引**: `idx_roaming_profiles_reseller_status(reseller_id, status)`、`idx_roaming_profiles_reseller_published(reseller_id, published_at desc)`
+
+#### `roaming_profile_entries`
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| entry_id | uuid | PK, default gen_random_uuid() | 条目 ID |
+| roaming_profile_id | uuid | NOT NULL, FK→roaming_profiles | 所属 Profile 快照 |
+| mcc | char(3) | NOT NULL | 移动国家代码 |
+| mnc | varchar(3) | NOT NULL | 移动网络代码（2~3 位数字或 `*`） |
+| rate_per_kb | numeric(18,8) | NOT NULL | 单价（currency/KB） |
+| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
+| | | UNIQUE(roaming_profile_id, mcc, mnc) | 同一快照内 MCC+MNC 唯一 |
+
+#### `apn_profiles`
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| apn_profile_id | uuid | PK, default gen_random_uuid() | APN Profile 快照 ID |
+| reseller_id | uuid | NOT NULL, FK→resellers | 代理商 |
+| supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
+| operator_id | uuid | NOT NULL, FK→operators | 运营商 |
+| name | text | NOT NULL | 展示名称（允许重复） |
+| apn | text | NOT NULL | APN |
+| auth_type | text | NOT NULL, default 'NONE' | NONE / PAP / CHAP |
+| username | text | — | 用户名 |
+| password_ref | text | — | 密钥引用 |
+| status | text | NOT NULL, default 'DRAFT' | DRAFT / PUBLISHED / DEPRECATED |
+| published_at | timestamptz | — | 发布时间 |
+| source_apn_profile_id | uuid | FK→apn_profiles | 来源快照 ID（克隆链路） |
+| created_by | uuid | — | 创建者 |
+| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
+
+**索引**: `idx_apn_profiles_reseller_status(reseller_id, status)`、`idx_apn_profiles_reseller_published(reseller_id, published_at desc)`
+
+#### `carrier_services`
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| carrier_service_id | uuid | PK, default gen_random_uuid() | Carrier Service ID |
+| customer_id | uuid | NOT NULL, FK→customers | 企业 |
+| supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
+| operator_id | uuid | NOT NULL, FK→operators | 运营商 |
+| service_type | service_type | NOT NULL, default 'DATA' | 业务类型 |
+| rat | text | NOT NULL, default '4G' | 3G / 4G / 5G / NB-IoT |
+| apn_profile_id | uuid | FK→apn_profiles | APN Profile 快照 ID |
+| roaming_profile_id | uuid | FK→roaming_profiles | Roaming Profile 快照 ID |
+| status | text | NOT NULL, default 'ACTIVE' | ACTIVE / INACTIVE |
+| effective_from | timestamptz | — | 生效时间 |
+| effective_to | timestamptz | — | 失效时间 |
+| created_by | uuid | — | 创建者 |
+| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
+
+**索引**: `idx_carrier_services_customer_status(customer_id, status)`、`idx_carrier_services_apn_profile(apn_profile_id)`、`idx_carrier_services_roaming_profile(roaming_profile_id)`
+
+#### `control_policies`
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| control_policy_id | uuid | PK, default gen_random_uuid() | Control Policy 快照 ID |
+| customer_id | uuid | NOT NULL, FK→customers | 企业 |
+| name | text | NOT NULL | 展示名称（允许重复） |
+| enabled | boolean | NOT NULL, default true | 是否启用 |
+| cutoff_time_window | text | — | DAILY / MONTHLY |
+| cutoff_threshold_mb | integer | — | 达量断网阈值（MB） |
+| cutoff_action | text | — | DEACTIVATED |
+| status | text | NOT NULL, default 'DRAFT' | DRAFT / PUBLISHED / DEPRECATED |
+| published_at | timestamptz | — | 发布时间 |
+| source_control_policy_id | uuid | FK→control_policies | 来源快照 ID（克隆链路） |
+| created_by | uuid | — | 创建者 |
+| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
+
+**索引**: `idx_control_policies_customer_status(customer_id, status)`、`idx_control_policies_customer_published(customer_id, published_at desc)`
+
+#### `control_policy_throttling_tiers`
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| tier_id | bigserial | PK | 分层 ID |
+| control_policy_id | uuid | NOT NULL, FK→control_policies | 控制策略快照 ID |
+| threshold_mb | integer | NOT NULL | 达量阈值（MB） |
+| downlink_kbps | integer | NOT NULL | 下行限速 Kbps |
+| uplink_kbps | integer | NOT NULL | 上行限速 Kbps |
+| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+| | | UNIQUE(control_policy_id, threshold_mb) | 阈值唯一 |
+
+#### `commercial_terms`
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| commercial_terms_id | uuid | PK, default gen_random_uuid() | Commercial Terms 快照 ID |
+| customer_id | uuid | NOT NULL, FK→customers | 企业 |
+| name | text | NOT NULL | 展示名称（允许重复） |
+| test_period_days | int | — | 测试期天数 |
+| test_quota_kb | bigint | — | 测试流量配额（KB） |
+| test_expiry_condition | text | — | PERIOD_ONLY / QUOTA_ONLY / PERIOD_OR_QUOTA |
+| test_expiry_action | text | — | ACTIVATED / DEACTIVATED |
+| commitment_period_months | int | — | 承诺期（月） |
+| status | text | NOT NULL, default 'DRAFT' | DRAFT / PUBLISHED / DEPRECATED |
+| published_at | timestamptz | — | 发布时间 |
+| source_commercial_terms_id | uuid | FK→commercial_terms | 来源快照 ID（克隆链路） |
+| created_by | uuid | — | 创建者 |
+| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
+
+**索引**: `idx_commercial_terms_customer_status(customer_id, status)`、`idx_commercial_terms_customer_published(customer_id, published_at desc)`
+
 #### `packages`
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
@@ -522,74 +676,20 @@ sim_cards ──1:N──> rating_results
 | version | int | NOT NULL | 版本号 |
 | status | text | NOT NULL, default 'DRAFT' | 状态 |
 | effective_from | timestamptz | — | 生效时间 |
-| supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
-| operator_id | uuid | NOT NULL, FK→operators | 运营商 |
-| service_type | service_type | NOT NULL, default 'DATA' | 业务类型 |
-| apn | text | — | APN |
-| roaming_profile | jsonb | — | 漫游配置 |
-| throttling_policy | jsonb | — | 限速策略 |
-| control_policy | jsonb | — | 控制策略 |
-| commercial_terms | jsonb | — | 商业条款 |
-| price_plan_version_id | uuid | NOT NULL, FK→price_plan_versions | 资费版本 |
+| carrier_service_id | uuid | NOT NULL, FK→carrier_services | Carrier Service |
+| control_policy_id | uuid | FK→control_policies | 控制策略快照 |
+| commercial_terms_id | uuid | FK→commercial_terms | 商业条款快照 |
+| price_plan_id | uuid | NOT NULL, FK→price_plans | 资费计划快照 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | | | UNIQUE(package_id, version) | 版本唯一 |
 
-#### `cutoff_policies`
-| 列 | 类型 | 约束 | 说明 |
-|----|------|------|------|
-| cutoff_policy_id | uuid | PK, default gen_random_uuid() | 达量断网策略 ID |
-| customer_id | uuid | NOT NULL, FK→customers | 企业 |
-| name | text | NOT NULL | 名称 |
-| time_window | text | NOT NULL | DAILY / MONTHLY |
-| threshold_mb | integer | NOT NULL | 达量阈值（MB） |
-| action | text | NOT NULL, default 'DEACTIVATED' | 动作 |
-| enabled | boolean | NOT NULL, default true | 是否启用 |
-| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
-| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
-| | | UNIQUE(customer_id, name) | 企业内唯一 |
+**索引**: `idx_package_versions_price_plan(price_plan_id)`、`idx_package_versions_commercial_terms(commercial_terms_id)`、`idx_package_versions_control_policy(control_policy_id)`、`idx_package_versions_carrier_service(carrier_service_id)`
 
-#### `throttling_policies`
-| 列 | 类型 | 约束 | 说明 |
-|----|------|------|------|
-| throttling_policy_id | uuid | PK, default gen_random_uuid() | 达量限速策略 ID |
-| customer_id | uuid | NOT NULL, FK→customers | 企业 |
-| name | text | NOT NULL | 名称 |
-| time_window | text | NOT NULL | DAILY / MONTHLY |
-| enabled | boolean | NOT NULL, default true | 是否启用 |
-| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
-| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
-| | | UNIQUE(customer_id, name) | 企业内唯一 |
-
-#### `throttling_policy_tiers`
-| 列 | 类型 | 约束 | 说明 |
-|----|------|------|------|
-| tier_id | bigserial | PK | 分层 ID |
-| throttling_policy_id | uuid | NOT NULL, FK→throttling_policies | 策略 ID |
-| threshold_mb | integer | NOT NULL | 达量阈值（MB） |
-| downlink_kbps | integer | NOT NULL | 下行限速 Kbps |
-| uplink_kbps | integer | NOT NULL | 上行限速 Kbps |
-| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
-| | | UNIQUE(throttling_policy_id, threshold_mb) | 阈值唯一 |
-
-**`control_policy` JSONB 结构**:
-```json
-{
-  "enabled": true,
-  "cutoffPolicyId": "uuid",
-  "throttlingPolicyId": "uuid"
-}
-```
-
-**`commercial_terms` JSONB 结构**:
-```json
-{
-  "testPeriodDays": 30,
-  "testQuotaKb": 10240,
-  "testExpiryCondition": "PERIOD_OR_QUOTA",
-  "testExpiryAction": "ACTIVATED",
-  "commitmentPeriodMonths": 12
-}
-```
+**产品包模块化视图（Package Version）**:
+- 模块 1：Price Plan → `price_plan_id`（关联四种资费计划类型之一）
+- 模块 2：Carrier Service → `carrier_service_id`（Carrier Service 内部再关联 `apn_profile_id` + `roaming_profile_id`）
+- 模块 3：Commercial Terms → `commercial_terms_id`
+- 模块 4：Control Policy → `control_policy_id`
 
 ### 4.5 订阅
 
@@ -724,7 +824,7 @@ sim_cards ──1:N──> rating_results
 | input_ref | text | — | 来源引用 |
 | matched_subscription_id | uuid | FK→subscriptions | 匹配订阅 |
 | matched_package_version_id | uuid | FK→package_versions | 匹配产品包版本 |
-| matched_price_plan_version_id | uuid | FK→price_plan_versions | 匹配资费版本 |
+| matched_price_plan_id | uuid | FK→price_plans | 匹配资费快照 |
 | classification | text | NOT NULL | 分类 |
 | charged_kb | bigint | — | 计费流量 |
 | rate_per_kb | numeric(18,8) | — | 单价 |

@@ -17,6 +17,21 @@ async function main() {
     
     const carriers = await supabase.insert('carriers', { mcc: '999', mnc: randomMnc, name: `E2E_Carrier_${runId}` })
     const carrierId = carriers[0].carrier_id
+    const bizRows = await supabase.select(
+      'business_operators',
+      `select=operator_id&mcc=eq.999&mnc=eq.${encodeURIComponent(randomMnc)}&limit=1`
+    )
+    if (!Array.isArray(bizRows) || bizRows.length === 0) {
+      await supabase.insert('business_operators', { mcc: '999', mnc: randomMnc, name: `E2E_Carrier_${runId}` })
+    }
+    const existingOperators = await supabase.select(
+      'operators',
+      `select=operator_id&supplier_id=eq.${encodeURIComponent(supplierId)}&carrier_id=eq.${encodeURIComponent(carrierId)}&limit=1`
+    )
+    const operatorRow = Array.isArray(existingOperators) && existingOperators.length > 0
+      ? existingOperators[0]
+      : (await supabase.insert('operators', { supplier_id: supplierId, carrier_id: carrierId, name: `E2E_Carrier_${runId}` }))[0]
+    const operatorId = operatorRow.operator_id
     
     // 2. Create Tenant (Enterprise)
     const tenants = await supabase.insert('tenants', { 
@@ -62,6 +77,7 @@ async function main() {
         version: 1,
         supplier_id: supplierId,
         carrier_id: carrierId,
+        operator_id: operatorId,
         price_plan_version_id: ppvId,
         roaming_profile: {
             type: 'MCCMNC_ALLOWLIST',
@@ -77,6 +93,7 @@ async function main() {
         primary_imsi: `99999${Date.now()}`.slice(0, 15),
         supplier_id: supplierId,
         carrier_id: carrierId,
+        operator_id: operatorId,
         enterprise_id: enterpriseId,
         status: 'ACTIVATED'
     })

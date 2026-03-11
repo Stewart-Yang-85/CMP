@@ -380,22 +380,30 @@ export async function runAlertEvaluation(input) {
     }
   }
   const defaultResellerId = resellerIds.length ? resellerIds[0] : null
-  const carrierRows = await supabase.select('carriers', 'select=carrier_id,mcc,mnc')
-  const carriers = Array.isArray(carrierRows) ? carrierRows : []
-  const carrierMap = new Map()
-  for (const row of carriers) {
-    const carrierId = row?.carrier_id ? String(row.carrier_id) : null
-    if (!carrierId) continue
-    const mcc = row?.mcc ? String(row.mcc).trim() : null
-    const mnc = row?.mnc ? String(row.mnc).trim() : null
-    if (!mcc || !mnc) continue
-    carrierMap.set(carrierId, normalizeMccMnc(`${mcc}${mnc}`))
-  }
   const simRows = await supabase.select(
     'sims',
-    'select=sim_id,enterprise_id,carrier_id,status,activation_date,upstream_status,upstream_status_updated_at'
+    'select=sim_id,enterprise_id,operator_id,status,activation_date,upstream_status,upstream_status_updated_at'
   )
   const sims = Array.isArray(simRows) ? simRows : []
+  const operatorIds = Array.from(new Set(sims.map((row) => row?.operator_id).filter(Boolean).map((id) => String(id))))
+  const operatorMap = new Map()
+  if (operatorIds.length) {
+    const inList = operatorIds.map((id) => encodeURIComponent(id)).join(',')
+    const operatorRows = await supabase.select(
+      'operators',
+      `select=operator_id,business_operators(mcc,mnc)&operator_id=in.(${inList})`
+    )
+    const operators = Array.isArray(operatorRows) ? operatorRows : []
+    for (const row of operators) {
+      const operatorId = row?.operator_id ? String(row.operator_id) : null
+      if (!operatorId) continue
+      const business = row?.business_operators ?? null
+      const mcc = business?.mcc ? String(business.mcc).trim() : null
+      const mnc = business?.mnc ? String(business.mnc).trim() : null
+      if (!mcc || !mnc) continue
+      operatorMap.set(operatorId, normalizeMccMnc(`${mcc}${mnc}`))
+    }
+  }
   const simMap = new Map()
   for (const row of sims) {
     const simId = row?.sim_id ? String(row.sim_id) : null
@@ -430,8 +438,8 @@ export async function runAlertEvaluation(input) {
         }
       }
       const sim = simMap.get(simId)
-      const carrierId = sim?.carrier_id ? String(sim.carrier_id) : null
-      const home = carrierId ? carrierMap.get(carrierId) : null
+      const operatorId = sim?.operator_id ? String(sim.operator_id) : null
+      const home = operatorId ? operatorMap.get(operatorId) : null
       const visited = normalizeMccMnc(row?.visited_mccmnc)
       if (home && visited && home !== visited) {
         roamingBySim.set(simId, row?.visited_mccmnc ? String(row.visited_mccmnc) : visited)

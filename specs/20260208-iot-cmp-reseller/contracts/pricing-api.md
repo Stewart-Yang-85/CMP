@@ -2,329 +2,248 @@
 
 **Feature**: `iot-cmp-reseller` | **Date**: 2026-02-08
 **关联 User Story**: US3（产品包与资费计划配置）、US4（订阅关系管理）
-**关联需求**: FR-015 ~ FR-022
+**关联需求**: FR-015 ~ FR-022, FR-052 ~ FR-053
 
 ---
 
-## 1. 资费计划（Price Plan）
+## 1. US3 模块统一规则（快照模型）
 
-### 1.1 创建资费计划
+- APN Profile、Roaming Profile、Control Policy、Price Plan、Commercial Terms 采用不可变快照模型：每次编辑都创建新 ID，状态初始为 `DRAFT`
+- 仅 `DRAFT` 可更新，`PUBLISHED`/`DEPRECATED` 只读
+- 列表展示统一包含：`name + publishedAt + status`，名称允许重复
+- 统一支持 `:clone` 接口，通过 `source*Id` 记录来源快照链路
+- Package 引用的是模块快照 ID，不再使用 `*VersionId`
+
+---
+
+## 2. Price Plan（快照）
+
+### 2.1 创建草稿快照
 
 ```
-POST /v1/enterprises/{enterpriseId}/price-plans
+POST /v1/price-plans
 ```
 
 **权限**: 代理商管理员
 
-**Request Body**:
-```json
-{
-  "name": "string (required)",
-  "type": "ONE_TIME | SIM_DEPENDENT_BUNDLE | FIXED_BUNDLE | TIERED_VOLUME_PRICING",
-  "serviceType": "DATA | VOICE | SMS",
-  "currency": "string (inherited from reseller, read-only)",
-  "billingCycleType": "CALENDAR_MONTH | CUSTOM_RANGE",
-  "firstCycleProration": "NONE | DAILY_PRORATION",
-  "prorationRounding": "ROUND_HALF_UP (default)",
-
-  "oneTimeFee": "number (ONE_TIME only, >= 0)",
-  "quotaKb": "integer (ONE_TIME only, >= 0)",
-  "validityDays": "integer (ONE_TIME only, > 0)",
-  "expiryBoundary": "CALENDAR_DAY_END | DURATION_EXCLUSIVE_END",
-
-  "monthlyFee": "number (recurring types, >= 0)",
-  "deactivatedMonthlyFee": "number (recurring types, >= 0, < monthlyFee)",
-  "perSimQuotaKb": "integer (SIM_DEPENDENT_BUNDLE only, >= 0)",
-  "totalQuotaKb": "integer (FIXED_BUNDLE only, >= 0)",
-  "overageRatePerKb": "number (BUNDLE types, >= 0)",
-
-  "tiers": [
-    {
-      "fromKb": 0,
-      "toKb": 1073741824,
-      "ratePerKb": 0.001
-    }
-  ],
-
-  "paygRates": [
-    {
-      "zoneCode": "string",
-      "countries": ["460-00", "460-*"],
-      "ratePerKb": 0.002
-    }
-  ],
-
-  "commercialTerms": {
-    "testPeriodDays": "integer (optional)",
-    "testQuotaKb": "integer (optional)",
-    "testExpiryCondition": "PERIOD_ONLY | QUOTA_ONLY | PERIOD_OR_QUOTA",
-    "commitmentPeriodMonths": "integer (optional)"
-  },
-
-  "controlPolicy": {
-    "enabled": true,
-    "throttlingPolicyId": "uuid (optional)",
-    "cutoffThresholdKb": "integer (optional, 达量断网阈值)"
-  }
-}
-```
-
-**字段校验规则**:
-| 类型 | 必填字段 | 可选字段 |
-|------|---------|---------|
-| ONE_TIME | oneTimeFee, quotaKb, validityDays, expiryBoundary | paygRates |
-| SIM_DEPENDENT_BUNDLE | monthlyFee, deactivatedMonthlyFee, perSimQuotaKb | overageRatePerKb, paygRates |
-| FIXED_BUNDLE | monthlyFee, deactivatedMonthlyFee, totalQuotaKb | overageRatePerKb, paygRates |
-| TIERED_VOLUME_PRICING | monthlyFee, deactivatedMonthlyFee, tiers[] | paygRates |
+**Request Body（按 `pricePlanType` 分型）**:
+- 公共字段：`name`、`pricePlanType`、`serviceType`、`currency`、`billingCycleType`、`firstCycleProration`、`prorationRounding`、`paygRates`
+- 类型：`ONE_TIME | SIM_DEPENDENT_BUNDLE | FIXED_BUNDLE | TIERED_PRICING`
+- 各类型专属字段与校验：
+  - ONE_TIME：`oneTimeFee`、`quotaKb`、`validityDays`、`expiryBoundary`
+  - SIM_DEPENDENT_BUNDLE：`monthlyFee`、`deactivatedMonthlyFee`、`perSimQuotaKb`、`overageRatePerKb`
+  - FIXED_BUNDLE：`monthlyFee`、`deactivatedMonthlyFee`、`totalQuotaKb`、`overageRatePerKb`
+  - TIERED_PRICING：`monthlyFee`、`deactivatedMonthlyFee`、`tiers[]`
 
 **Response 201**:
 ```json
 {
   "pricePlanId": "uuid",
-  "pricePlanVersionId": "uuid",
-  "version": 1,
   "status": "DRAFT",
   "createdAt": "2026-02-08T10:00:00Z"
 }
 ```
 
-### 1.2 查询资费计划
+### 2.2 克隆为新草稿快照
 
 ```
-GET /v1/enterprises/{enterpriseId}/price-plans?type={type}&status={status}&page={}&pageSize={}
+POST /v1/price-plans:clone
 ```
 
-### 1.3 查询资费计划详情
+**Request Body**:
+```json
+{
+  "sourcePricePlanId": "uuid (required)",
+  "name": "string (optional)"
+}
+```
+
+### 2.3 更新草稿快照
 
 ```
+PUT /v1/price-plans/{pricePlanId}
+```
+
+**约束**:
+- 仅允许更新 `DRAFT`
+- `pricePlanType` 不可变更
+
+### 2.4 发布快照
+
+```
+POST /v1/price-plans/{pricePlanId}:publish
+```
+
+**前置**: `status=DRAFT`
+
+### 2.5 查询
+
+```
+GET /v1/price-plans?type={type}&status={status}&page={}&pageSize={}
 GET /v1/price-plans/{pricePlanId}
 ```
 
-**Response 200**: 完整资费计划信息 + 当前生效版本 + 历史版本列表
+---
 
-### 1.4 创建新版本
+## 3. Commercial Terms（快照）
+
+### 3.1 创建草稿快照
 
 ```
-POST /v1/price-plans/{pricePlanId}/versions
+POST /v1/commercial-terms
 ```
 
-**权限**: 代理商管理员
-**说明**: 修改已发布的资费计划需创建新版本（DRAFT），不可修改已发布版本
+### 3.2 克隆为新草稿快照
+
+```
+POST /v1/commercial-terms:clone
+```
+
+### 3.3 更新草稿快照
+
+```
+PUT /v1/commercial-terms/{commercialTermsId}
+```
+
+### 3.4 发布快照
+
+```
+POST /v1/commercial-terms/{commercialTermsId}:publish
+```
+
+### 3.5 查询
+
+```
+GET /v1/commercial-terms?status={status}&page={}&pageSize={}
+GET /v1/commercial-terms/{commercialTermsId}
+```
 
 ---
 
-## 2. 产品包（Package）
+## 4. Network Profiles 与 Carrier Service
 
-### 2.1 创建产品包
+### 4.1 APN Profile（快照）
+
+```
+POST /v1/apn-profiles
+POST /v1/apn-profiles:clone
+PUT /v1/apn-profiles/{apnProfileId}
+POST /v1/apn-profiles/{apnProfileId}:publish
+GET /v1/apn-profiles?supplierId={}&operatorId={}&status={}&page={}&pageSize={}
+GET /v1/apn-profiles/{apnProfileId}
+```
+
+### 4.2 Roaming Profile（快照）
+
+```
+POST /v1/roaming-profiles
+POST /v1/roaming-profiles:clone
+PUT /v1/roaming-profiles/{roamingProfileId}
+POST /v1/roaming-profiles/{roamingProfileId}:publish
+GET /v1/roaming-profiles?supplierId={}&operatorId={}&status={}&page={}&pageSize={}
+GET /v1/roaming-profiles/{roamingProfileId}
+```
+
+**Roaming Entries 校验**:
+- `mcc` 必填且为 3 位数字
+- `mnc` 为 2~3 位数字或 `*`
+- 同一快照内 `mcc+mnc` 唯一
+- 同一快照内同一 `mcc-*` 仅允许一条
+
+### 4.3 Carrier Service（引用 APN/Roaming 快照）
+
+```
+POST /v1/carrier-services
+PUT /v1/carrier-services/{carrierServiceId}
+GET /v1/carrier-services?supplierId={}&operatorId={}&status={}&page={}&pageSize={}
+GET /v1/carrier-services/{carrierServiceId}
+GET /v1/carrier-services?apnProfileId={apnProfileId}
+GET /v1/carrier-services?roamingProfileId={roamingProfileId}
+```
+
+**反向查询返回字段**:
+- `carrierServiceId`
+- `supplierId`
+- `operatorId`
+- `status`
+- `effectiveFrom`
+
+---
+
+## 5. Control Policy（快照）
+
+```
+POST /v1/control-policies
+POST /v1/control-policies:clone
+PUT /v1/control-policies/{controlPolicyId}
+POST /v1/control-policies/{controlPolicyId}:publish
+GET /v1/control-policies?status={status}&page={}&pageSize={}
+GET /v1/control-policies/{controlPolicyId}
+```
+
+**快照字段**:
+- 开关：`enabled`
+- 达量断网：`cutoffRules`
+- 达量限速：`throttlingRules`
+
+---
+
+## 6. Package（产品包）
+
+### 6.1 创建产品包
 
 ```
 POST /v1/enterprises/{enterpriseId}/packages
 ```
-
-**权限**: 代理商管理员
 
 **Request Body**:
 ```json
 {
   "name": "string (required)",
   "description": "string (optional)",
-  "pricePlanVersionId": "uuid (required, 必须绑定一个 Price Plan Version)",
-  "carrierServiceConfig": {
-    "supplierId": "uuid (required)",
-    "carrierId": "uuid (optional)",
-    "rat": "4G (default) | 3G | 5G | NB-IoT",
-    "apn": "string (required)",
-    "apnProfileVersionId": "uuid (optional)",
-    "roamingProfileVersionId": "uuid (optional)",
-    "roamingProfile": {
-      "allowedMccMnc": ["208-01", "262-*"]
-    }
-  }
+  "carrierServiceId": "uuid (required)",
+  "pricePlanId": "uuid (required)",
+  "commercialTermsId": "uuid (required)",
+  "controlPolicyId": "uuid (required)"
 }
 ```
 
 **业务规则**:
-- 产品包必须绑定且仅绑定一个 Price Plan
+- 产品包由四模块组成：`Carrier Service + Price Plan + Commercial Terms + Control Policy`
+- 创建/更新时引用快照 ID，不允许引用未发布快照
 - 产品包变更次月生效
+- 模块创建依赖顺序：
+  1. APN Profile、Roaming Profile
+  2. Carrier Service（引用 APN/Roaming）
+  3. Control Policy、Commercial Terms、Price Plan
+  4. Package
 
-**Response 201**:
-```json
-{
-  "packageId": "uuid",
-  "packageVersionId": "uuid",
-  "version": 1,
-  "status": "DRAFT",
-  "createdAt": "2026-02-08T10:00:00Z"
-}
-```
-
-### 2.2 修改产品包
+### 6.2 更新与发布
 
 ```
 PUT /v1/packages/{packageId}
-```
-
-**权限**: 代理商管理员
-**说明**: 仅 DRAFT 状态可修改
-
-### 2.3 发布产品包
-
-```
 POST /v1/packages/{packageId}:publish
 ```
 
-**权限**: 代理商管理员
-**前置**: DRAFT 状态
-**校验**: PAYG Rates 冲突校验（同级冲突视为配置错误，阻断发布）
+**约束**:
+- 仅 `DRAFT` 可更新
+- 发布时执行 PAYG 冲突校验
 
-**Response 200**:
-```json
-{
-  "packageId": "uuid",
-  "packageVersionId": "uuid",
-  "status": "PUBLISHED",
-  "publishedAt": "2026-02-08T10:00:00Z"
-}
-```
-
-### 2.4 查询产品包
+### 6.3 查询
 
 ```
-GET /v1/enterprises/{enterpriseId}/packages?status={}&page={}&pageSize={}
-```
-
-### 2.5 查询产品包详情
-
-```
+GET /v1/enterprises/{enterpriseId}/packages?status={status}&page={}&pageSize={}
 GET /v1/packages/{packageId}
+GET /v1/packages?pricePlanId={pricePlanId}
+GET /v1/packages?commercialTermsId={commercialTermsId}
+GET /v1/packages?controlPolicyId={controlPolicyId}
 ```
 
 ---
 
-## 3. 网络 Profile
+## 7. 订阅管理
 
-### 3.1 创建 APN Profile
-
-```
-POST /v1/apn-profiles
-```
-
-**权限**: 代理商管理员
-
-**Request Body**:
-```json
-{
-  "name": "string (required)",
-  "apn": "string (required)",
-  "authType": "NONE | PAP | CHAP",
-  "username": "string (optional)",
-  "passwordRef": "string (optional)",
-  "supplierId": "uuid (required)",
-  "carrierId": "uuid (optional)"
-}
-```
-
-**Response 201**:
-```json
-{
-  "apnProfileId": "uuid",
-  "profileVersionId": "uuid",
-  "version": 1,
-  "status": "DRAFT",
-  "createdAt": "2026-02-08T10:00:00Z"
-}
-```
-
-### 3.2 创建 Roaming Profile
-
-```
-POST /v1/roaming-profiles
-```
-
-**权限**: 代理商管理员
-
-**Request Body**:
-```json
-{
-  "name": "string (required)",
-  "mccmncList": ["460-00", "460-*"],
-  "supplierId": "uuid (required)",
-  "carrierId": "uuid (optional)"
-}
-```
-
-**Response 201**:
-```json
-{
-  "roamingProfileId": "uuid",
-  "profileVersionId": "uuid",
-  "version": 1,
-  "status": "DRAFT",
-  "createdAt": "2026-02-08T10:00:00Z"
-}
-```
-
-### 3.3 查询 APN Profile
-
-```
-GET /v1/apn-profiles?supplierId={}&carrierId={}&status={}&page={}&pageSize={}
-```
-
-### 3.4 查询 Roaming Profile
-
-```
-GET /v1/roaming-profiles?supplierId={}&carrierId={}&status={}&page={}&pageSize={}
-```
-
-### 3.5 查询 APN Profile 详情
-
-```
-GET /v1/apn-profiles/{apnProfileId}
-```
-
-### 3.6 查询 Roaming Profile 详情
-
-```
-GET /v1/roaming-profiles/{roamingProfileId}
-```
-
-### 3.7 创建 APN Profile 新版本
-
-```
-POST /v1/apn-profiles/{apnProfileId}/versions
-```
-
-### 3.8 创建 Roaming Profile 新版本
-
-```
-POST /v1/roaming-profiles/{roamingProfileId}/versions
-```
-
-### 3.9 发布 APN Profile（次月生效）
-
-```
-POST /v1/apn-profiles/{apnProfileId}:publish
-```
-
-### 3.10 发布 Roaming Profile（次月生效）
-
-```
-POST /v1/roaming-profiles/{roamingProfileId}:publish
-```
-
-### 3.11 回滚已排期版本
-
-```
-POST /v1/profile-versions/{profileVersionId}:rollback
-```
-
-**说明**: 仅允许回滚未来生效的已发布版本
-
----
-
-## 4. 订阅管理
-
-### 3.1 创建订阅
+### 7.1 创建订阅
 
 ```
 POST /v1/subscriptions
@@ -373,7 +292,7 @@ POST /v1/subscriptions
 | 404 | SIM_NOT_FOUND | SIM 不存在 |
 | 404 | PACKAGE_NOT_FOUND | 产品包不存在或未发布 |
 
-### 3.2 套餐切换
+### 7.2 套餐切换
 
 ```
 POST /v1/subscriptions:switch
@@ -404,7 +323,7 @@ POST /v1/subscriptions:switch
 }
 ```
 
-### 3.3 退订
+### 7.3 退订
 
 ```
 POST /v1/subscriptions/{subscriptionId}:cancel
@@ -422,7 +341,7 @@ POST /v1/subscriptions/{subscriptionId}:cancel
 - 立即退订：当月月租不退费，ACTIVE → CANCELLED
 - 月内取消：当月仍按全额月租计费，配额保留至月底
 
-### 3.4 查询 SIM 订阅历史
+### 7.4 查询 SIM 订阅历史
 
 ```
 GET /v1/sims/{simId}/subscriptions?state={}&kind={}&page={}&pageSize={}

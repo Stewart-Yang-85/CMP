@@ -53,7 +53,7 @@ async function loadSim(supabase, iccid, enterpriseId) {
   const tenantFilter = enterpriseId ? `&enterprise_id=eq.${encodeURIComponent(String(enterpriseId))}` : ''
   const rows = await supabase.select(
     'sims',
-    `select=sim_id,iccid,enterprise_id,apn,supplier_id,carriers(mcc,mnc),suppliers(name)&iccid=eq.${encodeURIComponent(iccid)}${tenantFilter}&limit=1`
+    `select=sim_id,iccid,enterprise_id,apn,supplier_id,operators(name,business_operator_id,business_operators(name,mcc,mnc)),suppliers(name)&iccid=eq.${encodeURIComponent(iccid)}${tenantFilter}&limit=1`
   )
   return Array.isArray(rows) ? rows[0] : null
 }
@@ -206,7 +206,8 @@ export async function getConnectivityStatus(input) {
   const upstreamStatus = upstreamData ? buildStatusFromUpstream(upstreamData) : null
   const lastActiveTime = upstreamStatus?.lastActiveTime ?? normalizeDate(usage?.created_at)
   const servingMccMnc = upstreamStatus?.servingMccMnc ?? (usage?.visited_mccmnc ? String(usage.visited_mccmnc) : null)
-  const registrationStatus = upstreamStatus?.registrationStatus ?? resolveRegistrationStatus(servingMccMnc, sim?.carriers?.mcc ?? null, sim?.carriers?.mnc ?? null)
+  const businessOperator = sim?.operators?.business_operators ?? null
+  const registrationStatus = upstreamStatus?.registrationStatus ?? resolveRegistrationStatus(servingMccMnc, businessOperator?.mcc ?? null, businessOperator?.mnc ?? null)
   const onlineStatus = upstreamStatus?.onlineStatus ?? resolveOnlineStatus(lastActiveTime)
   return {
     ok: true,

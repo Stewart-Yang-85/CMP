@@ -2,6 +2,9 @@
 /* istanbul ignore file */
 /* tslint:disable */
 /* eslint-disable */
+import type { ShareLinkCreateRequest } from '../models/ShareLinkCreateRequest';
+import type { ShareLinkCreateResponse } from '../models/ShareLinkCreateResponse';
+import type { ShareLinkParamsResponse } from '../models/ShareLinkParamsResponse';
 import type { CancelablePromise } from '../core/CancelablePromise';
 import { OpenAPI } from '../core/OpenAPI';
 import { request as __request } from '../core/request';
@@ -9,20 +12,14 @@ export class DocsService {
     /**
      * Create Share Link
      * Creates a short share link for Docs filters. Returns a short code and URL.
-     * @returns any Share link created
+     * @returns ShareLinkCreateResponse Share link created
      * @throws ApiError
      */
     public static postShareLinks({
         requestBody,
     }: {
-        requestBody: {
-            kind: 'packages' | 'packageVersions' | 'bills';
-            params: Record<string, any>;
-        },
-    }): CancelablePromise<{
-        code?: string;
-        url?: string;
-    }> {
+        requestBody: ShareLinkCreateRequest,
+    }): CancelablePromise<ShareLinkCreateResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/share-links',
@@ -33,17 +30,14 @@ export class DocsService {
     /**
      * Get Share Link Params
      * Returns the saved filter parameters for a given share code.
-     * @returns any Share link params
+     * @returns ShareLinkParamsResponse Share link params
      * @throws ApiError
      */
     public static getSJson({
         code,
     }: {
         code: string,
-    }): CancelablePromise<{
-        kind?: 'packages' | 'packageVersions' | 'bills';
-        params?: Record<string, any>;
-    }> {
+    }): CancelablePromise<ShareLinkParamsResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/s/{code}.json',

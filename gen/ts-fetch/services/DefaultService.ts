@@ -2,7 +2,24 @@
 /* istanbul ignore file */
 /* tslint:disable */
 /* eslint-disable */
+import type { AuditLogDetailResponse } from '../models/AuditLogDetailResponse';
 import type { Bill } from '../models/Bill';
+import type { BillingAdjustmentRequest } from '../models/BillingAdjustmentRequest';
+import type { BillingAdjustmentResponse } from '../models/BillingAdjustmentResponse';
+import type { BillingMarkPaidRequest } from '../models/BillingMarkPaidRequest';
+import type { EventDetailResponse } from '../models/EventDetailResponse';
+import type { JobDetailResponse } from '../models/JobDetailResponse';
+import type { JobListResponse } from '../models/JobListResponse';
+import type { ShareLinkDeleteResponse } from '../models/ShareLinkDeleteResponse';
+import type { ShareLinkInvalidateResponse } from '../models/ShareLinkInvalidateResponse';
+import type { ShareLinkListResponse } from '../models/ShareLinkListResponse';
+import type { WebhookSimStatusChangedRequest } from '../models/WebhookSimStatusChangedRequest';
+import type { WebhookSimStatusChangedResponse } from '../models/WebhookSimStatusChangedResponse';
+import type { WxWebhookAcceptedResponse } from '../models/WxWebhookAcceptedResponse';
+import type { WxWebhookProductOrderRequest } from '../models/WxWebhookProductOrderRequest';
+import type { WxWebhookSimOnlineRequest } from '../models/WxWebhookSimOnlineRequest';
+import type { WxWebhookSimStatusChangedRequest } from '../models/WxWebhookSimStatusChangedRequest';
+import type { WxWebhookTrafficAlertRequest } from '../models/WxWebhookTrafficAlertRequest';
 import type { CancelablePromise } from '../core/CancelablePromise';
 import { OpenAPI } from '../core/OpenAPI';
 import { request as __request } from '../core/request';
@@ -10,7 +27,7 @@ export class DefaultService {
     /**
      * List Share Links (Admin)
      * Internal admin endpoint to list persisted share links with filters.
-     * @returns any List of share links
+     * @returns ShareLinkListResponse List of share links
      * @throws ApiError
      */
     public static getAdminShareLinks({
@@ -56,21 +73,7 @@ export class DefaultService {
         sortOrder?: 'asc' | 'desc',
         page?: number,
         limit?: number,
-    }): CancelablePromise<{
-        items?: Array<{
-            code?: string;
-            enterpriseId?: string | null;
-            kind?: string;
-            expiresAt?: string;
-            createdAt?: string;
-            requestId?: string | null;
-            /**
-             * Resolved short link URL
-             */
-            url?: string;
-        }>;
-        total?: number;
-    }> {
+    }): CancelablePromise<ShareLinkListResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/admin/share-links',
@@ -164,18 +167,14 @@ export class DefaultService {
     /**
      * Invalidate Share Link (Admin)
      * Set share link as expired immediately.
-     * @returns any Invalidate success
+     * @returns ShareLinkInvalidateResponse Invalidate success
      * @throws ApiError
      */
     public static adminShareLinksInvalidate({
         code,
     }: {
         code: string,
-    }): CancelablePromise<{
-        code?: string;
-        expiresAt?: string;
-        status?: 'INVALIDATED';
-    }> {
+    }): CancelablePromise<ShareLinkInvalidateResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/admin/share-links/{code}:invalidate',
@@ -187,17 +186,14 @@ export class DefaultService {
     /**
      * Delete Share Link (Admin)
      * Permanently delete a share link.
-     * @returns any Delete success
+     * @returns ShareLinkDeleteResponse Delete success
      * @throws ApiError
      */
     public static deleteAdminShareLinks({
         code,
     }: {
         code: string,
-    }): CancelablePromise<{
-        code?: string;
-        deleted?: boolean;
-    }> {
+    }): CancelablePromise<ShareLinkDeleteResponse> {
         return __request(OpenAPI, {
             method: 'DELETE',
             url: '/admin/share-links/{code}',
@@ -209,22 +205,14 @@ export class DefaultService {
     /**
      * Get Event Detail (Admin)
      * Internal admin endpoint to fetch a single event by eventId.
-     * @returns any Event detail
+     * @returns EventDetailResponse Event detail
      * @throws ApiError
      */
     public static getAdminEvents({
         eventId,
     }: {
         eventId: string,
-    }): CancelablePromise<{
-        eventId?: string;
-        eventType?: string;
-        occurredAt?: string;
-        tenantId?: string | null;
-        requestId?: string | null;
-        jobId?: string | null;
-        payload?: Record<string, any>;
-    }> {
+    }): CancelablePromise<EventDetailResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/admin/events/{eventId}',
@@ -306,7 +294,7 @@ export class DefaultService {
     /**
      * WXZHONGGENG SIM Online Webhook
      * Supplier callback to notify SIM online events.
-     * @returns any Accepted
+     * @returns WxWebhookAcceptedResponse Accepted
      * @throws ApiError
      */
     public static postWxWebhookSimOnline({
@@ -314,21 +302,8 @@ export class DefaultService {
         requestBody,
     }: {
         xApiKey: string,
-        requestBody: {
-            messageType: string;
-            iccid: string;
-            msisdn: string;
-            sign: string;
-            uuid: string;
-            data: {
-                mncList: string;
-                eventTime: string;
-                mcc: string;
-            };
-        },
-    }): CancelablePromise<{
-        success?: boolean;
-    }> {
+        requestBody: WxWebhookSimOnlineRequest,
+    }): CancelablePromise<WxWebhookAcceptedResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/wx/webhook/sim-online',
@@ -342,7 +317,7 @@ export class DefaultService {
     /**
      * WXZHONGGENG Traffic Alert Webhook
      * Supplier callback to notify data usage alerts.
-     * @returns any Accepted
+     * @returns WxWebhookAcceptedResponse Accepted
      * @throws ApiError
      */
     public static postWxWebhookTrafficAlert({
@@ -350,24 +325,8 @@ export class DefaultService {
         requestBody,
     }: {
         xApiKey: string,
-        requestBody: {
-            messageType: string;
-            iccid: string;
-            msisdn: string;
-            data: {
-                thresholdReached: string;
-                eventTime: string;
-                limit: string;
-                eventName: string;
-                balanceAmount: string;
-                addOnID: string;
-            };
-            sign: string;
-            uuid: string;
-        },
-    }): CancelablePromise<{
-        success?: boolean;
-    }> {
+        requestBody: WxWebhookTrafficAlertRequest,
+    }): CancelablePromise<WxWebhookAcceptedResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/wx/webhook/traffic-alert',
@@ -381,7 +340,7 @@ export class DefaultService {
     /**
      * WXZHONGGENG Product Order Webhook
      * Supplier callback to notify product order events.
-     * @returns any Accepted
+     * @returns WxWebhookAcceptedResponse Accepted
      * @throws ApiError
      */
     public static postWxWebhookProductOrder({
@@ -389,23 +348,8 @@ export class DefaultService {
         requestBody,
     }: {
         xApiKey: string,
-        requestBody: {
-            messageType: string;
-            iccid: string;
-            msisdn: string;
-            data: {
-                addOnId: string;
-                addOnType: string;
-                startDate: string;
-                transactionId: string;
-                expirationDate: string;
-            };
-            sign: string;
-            uuid: string;
-        },
-    }): CancelablePromise<{
-        success?: boolean;
-    }> {
+        requestBody: WxWebhookProductOrderRequest,
+    }): CancelablePromise<WxWebhookAcceptedResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/wx/webhook/product-order',
@@ -419,7 +363,7 @@ export class DefaultService {
     /**
      * WXZHONGGENG SIM Status Changed Webhook
      * Supplier callback to notify SIM status changes.
-     * @returns any Accepted
+     * @returns WxWebhookAcceptedResponse Accepted
      * @throws ApiError
      */
     public static postWxWebhookSimStatusChanged({
@@ -427,22 +371,8 @@ export class DefaultService {
         requestBody,
     }: {
         xApiKey: string,
-        requestBody: {
-            messageType: string;
-            iccid: string;
-            msisdn: string;
-            sign: string;
-            uuid: string;
-            data: {
-                toStatus: string;
-                fromStatus: string;
-                eventTime: string;
-                transactionId: string;
-            };
-        },
-    }): CancelablePromise<{
-        success?: boolean;
-    }> {
+        requestBody: WxWebhookSimStatusChangedRequest,
+    }): CancelablePromise<WxWebhookAcceptedResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/wx/webhook/sim-status-changed',
@@ -496,26 +426,14 @@ export class DefaultService {
     /**
      * Get Audit Detail (Admin)
      * Internal admin endpoint to fetch a single audit log by auditId.
-     * @returns any Audit detail
+     * @returns AuditLogDetailResponse Audit detail
      * @throws ApiError
      */
     public static getAdminAudits({
         auditId,
     }: {
         auditId: string,
-    }): CancelablePromise<{
-        auditId?: string;
-        actorUserId?: string | null;
-        actorRole?: string;
-        tenantId?: string | null;
-        action?: string;
-        targetType?: string;
-        targetId?: string;
-        requestId?: string;
-        createdAt?: string;
-        sourceIp?: string | null;
-        afterData?: Record<string, any>;
-    }> {
+    }): CancelablePromise<AuditLogDetailResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/admin/audits/{auditId}',
@@ -527,7 +445,7 @@ export class DefaultService {
     /**
      * List Jobs (Admin)
      * Internal admin endpoint to list background jobs.
-     * @returns any List of jobs
+     * @returns JobListResponse List of jobs
      * @throws ApiError
      */
     public static getAdminJobs({
@@ -559,21 +477,7 @@ export class DefaultService {
         endDate?: string,
         page?: number,
         limit?: number,
-    }): CancelablePromise<{
-        items?: Array<{
-            jobId?: string;
-            jobType?: string;
-            status?: string;
-            progress?: {
-                processed?: number;
-                total?: number;
-            };
-            startedAt?: string;
-            finishedAt?: string | null;
-            requestId?: string;
-        }>;
-        total?: number;
-    }> {
+    }): CancelablePromise<JobListResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/admin/jobs',
@@ -593,25 +497,14 @@ export class DefaultService {
     /**
      * Get Job Detail (Admin)
      * Internal admin endpoint to fetch a single job by jobId.
-     * @returns any Job detail
+     * @returns JobDetailResponse Job detail
      * @throws ApiError
      */
     public static getAdminJobs1({
         jobId,
     }: {
         jobId: string,
-    }): CancelablePromise<{
-        jobId?: string;
-        jobType?: string;
-        status?: string;
-        progress?: {
-            processed?: number;
-            total?: number;
-        };
-        startedAt?: string;
-        finishedAt?: string | null;
-        requestId?: string;
-    }> {
+    }): CancelablePromise<JobDetailResponse> {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/admin/jobs/{jobId}',
@@ -623,20 +516,14 @@ export class DefaultService {
     /**
      * CMP Webhook - SIM Status Changed
      * Upstream CMP calls this webhook when a SIM lifecycle status changes.
-     * @returns any Webhook processed
+     * @returns WebhookSimStatusChangedResponse Webhook processed
      * @throws ApiError
      */
     public static postCmpWebhookSimStatusChanged({
         requestBody,
     }: {
-        requestBody: {
-            iccid: string;
-            status: 'INVENTORY' | 'TEST_READY' | 'ACTIVATED' | 'DEACTIVATED' | 'RETIRED';
-        },
-    }): CancelablePromise<{
-        success?: boolean;
-        changed?: boolean;
-    }> {
+        requestBody: WebhookSimStatusChangedRequest,
+    }): CancelablePromise<WebhookSimStatusChangedResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/cmp/webhook/sim-status-changed',
@@ -654,10 +541,7 @@ export class DefaultService {
         requestBody,
     }: {
         billId: string,
-        requestBody: {
-            paymentRef?: string;
-            paidAt?: string;
-        },
+        requestBody: BillingMarkPaidRequest,
     }): CancelablePromise<Bill> {
         return __request(OpenAPI, {
             method: 'POST',
@@ -671,7 +555,7 @@ export class DefaultService {
     }
     /**
      * Create Adjustment Note
-     * @returns any Adjustment note created
+     * @returns BillingAdjustmentResponse Adjustment note created
      * @throws ApiError
      */
     public static postBills-:adjust({
@@ -679,14 +563,8 @@ export class DefaultService {
         requestBody,
     }: {
         billId: string,
-        requestBody: {
-            type: 'CREDIT' | 'DEBIT';
-            amount: number;
-            reason?: string;
-        },
-    }): CancelablePromise<{
-        noteId?: string;
-    }> {
+        requestBody: BillingAdjustmentRequest,
+    }): CancelablePromise<BillingAdjustmentResponse> {
         return __request(OpenAPI, {
             method: 'POST',
             url: '/bills/{billId}:adjust',
