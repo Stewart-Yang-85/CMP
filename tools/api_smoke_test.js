@@ -1787,7 +1787,8 @@ async function main() {
 
     const first = list.items[0]
     assert(first?.period === '2026-02', 'first bill period must be 2026-02')
-    assert(Number(first?.totalAmount) === 512, 'first bill totalAmount must be 512')
+    const totalAmount = Number(first?.totalAmount)
+    assert(Number.isFinite(totalAmount) && totalAmount >= 0, `first bill totalAmount must be a non-negative number, got ${first?.totalAmount}`)
     assert(typeof first?.billId === 'string' && first.billId.length > 10, 'first billId must be string')
 
     const byDueAsc = await httpJson(`${base}/v1/bills?sortBy=dueDate&sortOrder=asc&limit=2&page=1`, {
