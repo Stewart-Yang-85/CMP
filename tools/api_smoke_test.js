@@ -316,7 +316,7 @@ async function main() {
         const header = evCsvText.split('\n')[0].trim()
         assert(header === 'eventId,eventType,occurredAt,tenantId,requestId,jobId,payload', 'events csv header must match')
         const xFilters = evCsvRes.headers.get('X-Filters')
-        assert(typeof xFilters === 'string' && xFilters.includes('limit='), 'events csv must include X-Filters header')
+        assert(typeof xFilters === 'string' && (xFilters.includes('limit=') || xFilters.includes('limit%3D')), 'events csv must include X-Filters header')
         log('events:csv passed')
       }
       {
@@ -332,7 +332,7 @@ async function main() {
         const header = jobsCsvText.split('\n')[0].trim()
         assert(header === 'jobId,jobType,status,progress,startedAt,finishedAt,requestId,error', 'jobs csv header must match')
         const xFilters = jobsCsvRes.headers.get('X-Filters')
-        assert(typeof xFilters === 'string' && xFilters.includes('limit='), 'jobs csv must include X-Filters header')
+        assert(typeof xFilters === 'string' && (xFilters.includes('limit=') || xFilters.includes('limit%3D')), 'jobs csv must include X-Filters header')
         log('jobs:csv passed')
       }
       {
@@ -348,7 +348,7 @@ async function main() {
         const header = auditsCsvText.split('\n')[0].trim()
         assert(header === 'auditId,action,targetType,targetId,occurredAt,actor,tenantId,requestId,changes', 'audits csv header must match')
         const xFilters = auditsCsvRes.headers.get('X-Filters')
-        assert(typeof xFilters === 'string' && xFilters.includes('limit='), 'audits csv must include X-Filters header')
+        assert(typeof xFilters === 'string' && (xFilters.includes('limit=') || xFilters.includes('limit%3D')), 'audits csv must include X-Filters header')
         log('audits:csv passed')
       }
       {
