@@ -1849,28 +1849,34 @@ async function main() {
     assert(listCsvText.split('\n').length >= 2, 'bills:csv must contain at least header + 1 line')
 
     if (process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      const paid = await httpJson(`${base}/v1/bills/${first.billId}:mark-paid`, {
-        method: 'POST',
-        headers: authHeaders({ 'Content-Type': 'application/json' }),
-        body: {
-          paymentRef: 'smoke',
-          paidAt: new Date().toISOString(),
-        },
-      })
-      assert(paid?.billId === first.billId, 'mark-paid billId must match')
-      assert(paid?.status === 'PAID', 'mark-paid must set status=PAID')
+      const payableStatuses = ['PUBLISHED', 'OVERDUE']
+      const billForWrite = list.items.find((b) => payableStatuses.includes(String(b?.status || '').toUpperCase()))
+      if (billForWrite) {
+        const paid = await httpJson(`${base}/v1/bills/${billForWrite.billId}:mark-paid`, {
+          method: 'POST',
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
+          body: {
+            paymentRef: 'smoke',
+            paidAt: new Date().toISOString(),
+          },
+        })
+        assert(paid?.billId === billForWrite.billId, 'mark-paid billId must match')
+        assert(paid?.status === 'PAID', 'mark-paid must set status=PAID')
 
-      const note = await httpJson(`${base}/v1/bills/${first.billId}:adjust`, {
-        method: 'POST',
-        headers: authHeaders({ 'Content-Type': 'application/json' }),
-        body: {
-          type: 'CREDIT',
-          amount: 1.23,
-          reason: 'smoke',
-        },
-      })
-      assert(typeof note?.noteId === 'string' && note.noteId.length > 10, 'adjust must return noteId')
-      process.stdout.write('PASS: API write smoke (mark-paid + adjust)\n')
+        const note = await httpJson(`${base}/v1/bills/${billForWrite.billId}:adjust`, {
+          method: 'POST',
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
+          body: {
+            type: 'CREDIT',
+            amount: 1.23,
+            reason: 'smoke',
+          },
+        })
+        assert(typeof note?.noteId === 'string' && note.noteId.length > 10, 'adjust must return noteId')
+        process.stdout.write('PASS: API write smoke (mark-paid + adjust)\n')
+      } else {
+        process.stdout.write('SKIP: API write smoke (no bill in PUBLISHED or OVERDUE status)\n')
+      }
     } else {
       process.stdout.write('SKIP: API write smoke (set SUPABASE_SERVICE_ROLE_KEY to enable)\n')
     }
