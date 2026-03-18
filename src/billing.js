@@ -5,6 +5,21 @@ import { createSupabaseRestClient } from './supabaseRest.js'
  * Ported from tools/run_billing_engine.ps1
  */
 
+// ============================================================
+// T-NEW-4: Rounding Strategy
+// ============================================================
+// Global billing precision: ROUND_HALF_UP to 2 decimal places.
+// - rating_results.amount: intermediate precision (stored as-is from calculation)
+// - bill_line_items.amount: final precision (rounded to BILLING_PRECISION)
+// - bill.total_amount = SUM(line_items.amount), NOT re-rounded from rating_results
+export const BILLING_PRECISION = 2
+export function roundAmount(value) {
+  if (!Number.isFinite(value)) return 0
+  // ROUND_HALF_UP: standard rounding (0.005 → 0.01)
+  const factor = Math.pow(10, BILLING_PRECISION)
+  return Math.round(value * factor + Number.EPSILON) / factor
+}
+
 // Helper: Convert MB to KB with Ceiling
 function convertMbToKbCeil(mb, mbToKb = 1024) {
   return Math.ceil(mb * mbToKb)
@@ -106,9 +121,10 @@ function selectMatchingPackage(subscriptions, visitedMccMnc, packageDetailsMap) 
 
 // Helper: Resolve PAYG rate
 function resolvePaygRatePerKb(mainPkg, visitedMccMnc) {
-  if (!mainPkg || !mainPkg.price_plan_versions || !mainPkg.price_plan_versions.payg_rates) return null
+  const planVersion = mainPkg?.resolved_price_plan_version ?? mainPkg?.price_plan_versions ?? null
+  if (!mainPkg || !planVersion || !planVersion.payg_rates) return null
   
-  const zones = mainPkg.price_plan_versions.payg_rates.zones
+  const zones = planVersion.payg_rates.zones
   if (!zones) return null
 
   let bestScore = -1
@@ -232,7 +248,7 @@ function calculateProratedFee({ fee, effectiveAt, rangeStart, rangeEnd }) {
   const msPerDay = 24 * 60 * 60 * 1000
   const activeDays = Math.max(0, Math.ceil((rangeEnd.getTime() - start.getTime()) / msPerDay))
   const perDayFee = fee / Math.max(1, daysInMonth)
-  return Number((perDayFee * activeDays).toFixed(2))
+  return roundAmount(perDayFee * activeDays)
 }
 
 function calculateTieredCharge(usageKb, tiers) {
@@ -260,7 +276,7 @@ function calculateTieredCharge(usageKb, tiers) {
     const last = sorted[sorted.length - 1]
     total += remaining * last.ratePerKb
   }
-  return Number(total.toFixed(2))
+  return roundAmount(total)
 }
 
 export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculationId }, supabaseClient) {
@@ -273,24 +289,36 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
   const nextMonth = new Date(startDate)
   nextMonth.setMonth(nextMonth.getMonth() + 1)
   const endDate = nextMonth
+  const periodStart = startDate.toISOString().slice(0, 10)
+  const periodEnd = endDate.toISOString().slice(0, 10)
 
-  // 2. Fetch SIMs (simplified: all SIMs or by enterprise)
-  let simQuery = 'select=sim_id,iccid,enterprise_id,status&limit=1000'
-  if (enterpriseId) simQuery += `&enterprise_id=eq.${enterpriseId}`
-  
-  // supabaseRest selectWithCount returns { data, total }
-  const { data: sims } = await supabase.selectWithCount('sims', simQuery)
+  // 2. Fetch SIMs — paginated to handle >1000 SIMs
+  const allSims = []
+  const SIM_PAGE_SIZE = 500
+  let simOffset = 0
+  while (true) {
+    let simQuery = `select=sim_id,iccid,enterprise_id,status&order=sim_id.asc&limit=${SIM_PAGE_SIZE}&offset=${simOffset}`
+    if (enterpriseId) simQuery += `&enterprise_id=eq.${enterpriseId}`
+    const { data: page } = await supabase.selectWithCount('sims', simQuery)
+    if (!page || page.length === 0) break
+    allSims.push(...page)
+    if (page.length < SIM_PAGE_SIZE) break
+    simOffset += SIM_PAGE_SIZE
+  }
+  const sims = allSims
 
   if (!sims || sims.length === 0) {
       console.log('[Billing] No SIMs found.')
-      return
+      return { calculationId: calcId, totalBillAmount: 0, lineItems: [], ratingResults: [], currency: 'USD' }
   }
   console.log(`[Billing] Found ${sims.length} SIMs to process`)
 
-  // 3. Pre-fetch Packages and Price Plans
-  // supabaseRest select returns array directly
-  const packagesData = await supabase.select('package_versions', 'select=*,packages(*),price_plan_versions(*)')
-  
+  // 3. Pre-fetch Packages and Price Plans (unchanged — these are global/small sets)
+  const packagesData = await supabase.select(
+    'package_versions',
+    'select=*,packages(*),price_plan_id,price_plan_version_id'
+  )
+
   const packageMap = {}
   if (packagesData) {
     packagesData.forEach(p => {
@@ -299,10 +327,56 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
   }
 
   const pricePlanIds = Object.values(packageMap)
-    .map((p) => p?.price_plan_versions?.price_plan_id)
+    .map((p) => p?.price_plan_id)
     .filter(Boolean)
     .map((id) => String(id))
   const uniquePlanIds = Array.from(new Set(pricePlanIds))
+  const versionIds = Object.values(packageMap)
+    .map((p) => p?.price_plan_version_id)
+    .filter(Boolean)
+    .map((id) => String(id))
+  const uniqueVersionIds = Array.from(new Set(versionIds))
+  const latestPlanVersionMap = new Map()
+  const versionByIdMap = new Map()
+  if (uniquePlanIds.length) {
+    const idFilter = uniquePlanIds.map((id) => encodeURIComponent(id)).join(',')
+    const rows = await supabase.select(
+      'price_plan_versions',
+      `select=price_plan_version_id,price_plan_id,version,payg_rates,monthly_fee,deactivated_monthly_fee,quota_kb,per_sim_quota_kb,total_quota_kb,overage_rate_per_kb,tiers&price_plan_id=in.(${idFilter})&order=version.desc`
+    )
+    const versions = Array.isArray(rows) ? rows : []
+    for (const version of versions) {
+      if (version?.price_plan_version_id) {
+        versionByIdMap.set(String(version.price_plan_version_id), version)
+      }
+      if (version?.price_plan_id && !latestPlanVersionMap.has(String(version.price_plan_id))) {
+        latestPlanVersionMap.set(String(version.price_plan_id), version)
+      }
+    }
+  }
+  if (uniqueVersionIds.length) {
+    const missing = uniqueVersionIds.filter((id) => !versionByIdMap.has(id))
+    if (missing.length) {
+      const idFilter = missing.map((id) => encodeURIComponent(id)).join(',')
+      const rows = await supabase.select(
+        'price_plan_versions',
+        `select=price_plan_version_id,price_plan_id,version,payg_rates,monthly_fee,deactivated_monthly_fee,quota_kb,per_sim_quota_kb,total_quota_kb,overage_rate_per_kb,tiers&price_plan_version_id=in.(${idFilter})`
+      )
+      const versions = Array.isArray(rows) ? rows : []
+      for (const version of versions) {
+        if (version?.price_plan_version_id) versionByIdMap.set(String(version.price_plan_version_id), version)
+        if (version?.price_plan_id && !latestPlanVersionMap.has(String(version.price_plan_id))) {
+          latestPlanVersionMap.set(String(version.price_plan_id), version)
+        }
+      }
+    }
+  }
+  for (const pkg of Object.values(packageMap)) {
+    const planId = pkg?.price_plan_id ? String(pkg.price_plan_id) : null
+    const versionId = pkg?.price_plan_version_id ? String(pkg.price_plan_version_id) : null
+    const resolved = (planId ? latestPlanVersionMap.get(planId) : null) || (versionId ? versionByIdMap.get(versionId) : null) || null
+    if (resolved) pkg.resolved_price_plan_version = resolved
+  }
   const pricePlanMap = new Map()
   if (uniquePlanIds.length) {
     const idFilter = uniquePlanIds.map((id) => encodeURIComponent(id)).join(',')
@@ -324,22 +398,67 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
     return resolvePlanCurrency(firstPlan)
   })()
 
+  // ============================================================
+  // FIX: Batch-fetch subscriptions, usage, and state history
+  // instead of N+1 per-SIM queries (30万→3 queries)
+  // ============================================================
+
+  // Process SIMs in batches to avoid too-long IN clauses
+  const BATCH_SIZE = 500
   const simContexts = []
-  for (const sim of sims) {
-    const subs = await supabase.select('subscriptions', `select=*&sim_id=eq.${sim.sim_id}`)
-    const usageLogs = await supabase.select(
-      'usage_daily_summary',
-      `select=*&sim_id=eq.${sim.sim_id}&usage_day=gte.${startDate.toISOString().slice(0, 10)}&usage_day=lt.${endDate.toISOString().slice(0, 10)}`
-    )
-    const historyRows = await supabase.select(
-      'sim_state_history',
-      `select=after_status,start_time,end_time&sim_id=eq.${sim.sim_id}&start_time=lt.${endDate.toISOString()}`
-    )
-    const history = Array.isArray(historyRows) ? historyRows : []
-    if ((!subs || subs.length === 0) && (!usageLogs || usageLogs.length === 0)) continue
-    const highWater = resolveHighWaterStatus(history, startDate, endDate, sim.status)
-    simContexts.push({ sim, subs, usageLogs, history, highWater })
+
+  for (let batchStart = 0; batchStart < sims.length; batchStart += BATCH_SIZE) {
+    const batch = sims.slice(batchStart, batchStart + BATCH_SIZE)
+    const simIds = batch.map(s => s.sim_id)
+    const simIdFilter = simIds.map(id => encodeURIComponent(id)).join(',')
+
+    // Batch-fetch all 3 data sets in parallel
+    const [allSubs, allUsage, allHistory] = await Promise.all([
+      supabase.select('subscriptions', `select=*&sim_id=in.(${simIdFilter})`),
+      supabase.select(
+        'usage_daily_summary',
+        `select=*&sim_id=in.(${simIdFilter})&usage_day=gte.${periodStart}&usage_day=lt.${periodEnd}`
+      ),
+      supabase.select(
+        'sim_state_history',
+        `select=sim_id,after_status,start_time,end_time&sim_id=in.(${simIdFilter})&start_time=lt.${endDate.toISOString()}`
+      ),
+    ])
+
+    // Index by sim_id
+    const subsBySimId = new Map()
+    for (const sub of (Array.isArray(allSubs) ? allSubs : [])) {
+      const key = sub.sim_id
+      if (!subsBySimId.has(key)) subsBySimId.set(key, [])
+      subsBySimId.get(key).push(sub)
+    }
+    const usageBySimId = new Map()
+    for (const usage of (Array.isArray(allUsage) ? allUsage : [])) {
+      const key = usage.sim_id
+      if (!usageBySimId.has(key)) usageBySimId.set(key, [])
+      usageBySimId.get(key).push(usage)
+    }
+    const historyBySimId = new Map()
+    for (const h of (Array.isArray(allHistory) ? allHistory : [])) {
+      const key = h.sim_id
+      if (!historyBySimId.has(key)) historyBySimId.set(key, [])
+      historyBySimId.get(key).push(h)
+    }
+
+    for (const sim of batch) {
+      const subs = subsBySimId.get(sim.sim_id) || []
+      const usageLogs = usageBySimId.get(sim.sim_id) || []
+      const history = historyBySimId.get(sim.sim_id) || []
+      if (subs.length === 0 && usageLogs.length === 0) continue
+      const highWater = resolveHighWaterStatus(history, startDate, endDate, sim.status)
+      simContexts.push({ sim, subs, usageLogs, history, highWater })
+    }
   }
+
+  // FIX: Sort simContexts by sim_id for deterministic pool usage order
+  // This ensures FIXED_BUNDLE/SIM_DEPENDENT_BUNDLE shared pool deduction
+  // follows a stable, reproducible order (alphabetical by sim_id).
+  simContexts.sort((a, b) => String(a.sim.sim_id).localeCompare(String(b.sim.sim_id)))
 
   const packageCounts = new Map()
   for (const ctx of simContexts) {
@@ -359,8 +478,12 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
 
   const packagePool = new Map()
   for (const [packageVersionId, pkg] of Object.entries(packageMap)) {
-    const pricePlanVersion = pkg?.price_plan_versions ?? null
-    const pricePlanId = pricePlanVersion?.price_plan_id ? String(pricePlanVersion.price_plan_id) : null
+    const pricePlanVersion = pkg?.resolved_price_plan_version ?? pkg?.price_plan_versions ?? null
+    const pricePlanId = pkg?.price_plan_id
+      ? String(pkg.price_plan_id)
+      : pricePlanVersion?.price_plan_id
+        ? String(pricePlanVersion.price_plan_id)
+        : null
     const planRow = pricePlanId ? pricePlanMap.get(pricePlanId) : null
     const planType = resolvePlanType(planRow)
     const currency = resolvePlanCurrency(planRow)
@@ -396,8 +519,12 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
       for (const sub of subs) {
         const pkg = packageMap[sub.package_version_id]
         if (!pkg) continue
-        const pricePlanVersion = pkg.price_plan_versions ?? null
-        const pricePlanId = pricePlanVersion?.price_plan_id ? String(pricePlanVersion.price_plan_id) : null
+        const pricePlanVersion = pkg?.resolved_price_plan_version ?? pkg?.price_plan_versions ?? null
+        const pricePlanId = pkg?.price_plan_id
+          ? String(pkg.price_plan_id)
+          : pricePlanVersion?.price_plan_id
+            ? String(pricePlanVersion.price_plan_id)
+            : null
         const planRow = pricePlanId ? pricePlanMap.get(pricePlanId) : null
         let fee = 0
         let feeType = 'NO_CHARGE'
@@ -466,7 +593,8 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
           inProfile = true
           matchedPackageVersionId = match.pkg?.package_version_id ?? null
           matchedSubscriptionId = match.sub?.subscription_id ?? null
-          matchedPricePlanVersionId = match.pkg?.price_plan_versions?.price_plan_version_id ?? null
+          const matchedPlanVersion = match.pkg?.resolved_price_plan_version ?? match.pkg?.price_plan_versions ?? null
+          matchedPricePlanVersionId = matchedPlanVersion?.price_plan_version_id ?? match.pkg?.price_plan_version_id ?? null
           const pool = matchedPackageVersionId ? packagePool.get(String(matchedPackageVersionId)) : null
           const planType = pool?.planType ?? null
           if (planType === 'TIERED_VOLUME_PRICING') {
@@ -489,13 +617,13 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
               const overageRate = pool?.overageRatePerKb ?? 0
               chargeType = overKb > 0 ? 'OVERAGE' : 'IN_PACKAGE'
               rateApplied = overKb > 0 ? overageRate : null
-              chargeAmount = overKb > 0 ? Number((overKb * overageRate).toFixed(2)) : 0
+              chargeAmount = overKb > 0 ? roundAmount(overKb * overageRate) : 0
               deductFromPackageVersionId = matchedPackageVersionId
               poolUsageByPackage.set(usageKey, usedKb + totalKb)
             }
             currency = pool?.currency ?? currencyFallback
           } else {
-            const pricePlan = match.pkg?.price_plan_versions ?? null
+            const pricePlan = match.pkg?.resolved_price_plan_version ?? match.pkg?.price_plan_versions ?? null
             const quotaKb = resolveQuotaKb(pricePlan)
             const usageKey = `${sim.sim_id}:${matchedPackageVersionId || 'unknown'}`
             const usedKb = Number(usageByPackage.get(usageKey) || 0)
@@ -509,7 +637,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
               const overageRate = resolveOverageRatePerKb(pricePlan) ?? 0
               chargeType = overKb > 0 ? 'OVERAGE' : 'IN_PACKAGE'
               rateApplied = overKb > 0 ? overageRate : null
-              chargeAmount = overKb > 0 ? Number((overKb * overageRate).toFixed(2)) : 0
+              chargeAmount = overKb > 0 ? roundAmount(overKb * overageRate) : 0
               deductFromPackageVersionId = matchedPackageVersionId
               usageByPackage.set(usageKey, usedKb + totalKb)
             }
@@ -519,10 +647,12 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
           const mainSub = validSubs.find(s => s.subscription_kind === 'MAIN') || activeSubs.find(s => s.subscription_kind === 'MAIN')
           const mainPkg = mainSub ? packageMap[mainSub.package_version_id] : null
           const rate = resolvePaygRatePerKb(mainPkg, visitedMccMnc)
-          matchedPricePlanVersionId = mainPkg?.price_plan_versions?.price_plan_version_id ?? null
-          currency = resolvePlanCurrency(pricePlanMap.get(String(mainPkg?.price_plan_versions?.price_plan_id ?? '')))
+          const mainPlanVersion = mainPkg?.resolved_price_plan_version ?? mainPkg?.price_plan_versions ?? null
+          matchedPricePlanVersionId = mainPlanVersion?.price_plan_version_id ?? mainPkg?.price_plan_version_id ?? null
+          const mainPlanId = mainPkg?.price_plan_id ?? mainPlanVersion?.price_plan_id ?? null
+          currency = resolvePlanCurrency(pricePlanMap.get(String(mainPlanId ?? '')))
           if (rate !== null) {
-            chargeAmount = Number((totalKb * rate).toFixed(2))
+            chargeAmount = roundAmount(totalKb * rate)
             chargeType = simActive ? 'PAYG' : 'PAYG_INACTIVE'
             rateApplied = rate
             alerts = simActive ? ['UNEXPECTED_ROAMING'] : ['INACTIVE_USAGE', 'UNEXPECTED_ROAMING']
@@ -618,17 +748,31 @@ export async function generateMonthlyBill(job, supabaseClient) {
   const calculationId = payload.calculationId || job.job_id || `calc-${Date.now()}`
   console.log(`[Billing] Generating bill for period ${billPeriod}, enterprise: ${enterpriseId || 'ALL'}`)
 
-  const result = await computeMonthlyCharges({ enterpriseId, billPeriod, calculationId }, supabase)
-
   const startDate = new Date(`${billPeriod}-01T00:00:00Z`)
   const nextMonth = new Date(startDate)
   nextMonth.setMonth(nextMonth.getMonth() + 1)
   const endDate = nextMonth
+  const periodStartStr = startDate.toISOString().slice(0, 10)
+  const periodEndStr = endDate.toISOString().slice(0, 10)
+
+  // FIX: Idempotency check — skip if bill already exists for this enterprise+period
+  if (enterpriseId) {
+    const existing = await supabase.select(
+      'bills',
+      `select=bill_id,status,total_amount&enterprise_id=eq.${enterpriseId}&period_start=eq.${periodStartStr}&period_end=eq.${periodEndStr}&limit=1`
+    )
+    if (Array.isArray(existing) && existing.length > 0) {
+      console.log(`[Billing] Bill already exists for enterprise ${enterpriseId} period ${billPeriod} (bill_id=${existing[0].bill_id}), skipping.`)
+      return { billId: existing[0].bill_id, skipped: true, totalBillAmount: Number(existing[0].total_amount) }
+    }
+  }
+
+  const result = await computeMonthlyCharges({ enterpriseId, billPeriod, calculationId }, supabase)
 
   const billRows = await supabase.insert('bills', {
     enterprise_id: enterpriseId,
-    period_start: startDate.toISOString().slice(0, 10),
-    period_end: endDate.toISOString().slice(0, 10),
+    period_start: periodStartStr,
+    period_end: periodEndStr,
     status: 'GENERATED',
     total_amount: result.totalBillAmount,
     currency: result.currency ?? 'USD',

@@ -107,6 +107,18 @@
     {
       "name": "AuditLogs",
       "description": "Audit log access for tenant operations"
+    },
+    {
+      "name": "CommercialTerms",
+      "description": "Commercial terms module validation"
+    },
+    {
+      "name": "ControlPolicy",
+      "description": "Control policy module validation"
+    },
+    {
+      "name": "CarrierService",
+      "description": "Carrier service module validation"
     }
   ],
   "components": {
@@ -564,16 +576,40 @@
           },
           "name": {
             "type": "string"
-          },
-          "gsmaOverride": {
-            "type": "boolean"
           }
         },
         "example": {
           "mcc": "460",
           "mnc": "01",
-          "name": "China Unicom",
-          "gsmaOverride": false
+          "name": "China Unicom"
+        }
+      },
+      "OperatorUpdateRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "OperatorListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Operator"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "page": {
+            "type": "integer"
+          },
+          "pageSize": {
+            "type": "integer"
+          }
         }
       },
       "Supplier": {
@@ -603,6 +639,35 @@
               "type": "string",
               "format": "uuid"
             },
+            "nullable": true
+          },
+          "operators": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SupplierBoundOperator"
+            },
+            "nullable": true
+          }
+        }
+      },
+      "SupplierBoundOperator": {
+        "type": "object",
+        "properties": {
+          "operatorId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "mcc": {
+            "type": "string",
+            "nullable": true
+          },
+          "mnc": {
+            "type": "string",
             "nullable": true
           }
         }
@@ -748,6 +813,114 @@
           }
         }
       },
+      "SupplierBindOperatorRequest": {
+        "type": "object",
+        "required": [
+          "operatorId"
+        ],
+        "properties": {
+          "operatorId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "SupplierBindOperatorResponse": {
+        "type": "object",
+        "properties": {
+          "supplierId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "operatorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "supplierOperatorId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "ResellerBindSupplierRequest": {
+        "type": "object",
+        "required": [
+          "supplierId"
+        ],
+        "properties": {
+          "supplierId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "ResellerBindSupplierResponse": {
+        "type": "object",
+        "properties": {
+          "resellerId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "supplierId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "boundAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "ResellerSupplierBinding": {
+        "type": "object",
+        "properties": {
+          "supplierId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "SUSPENDED"
+            ],
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "boundAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "ResellerSuppliersListResponse": {
+        "type": "object",
+        "properties": {
+          "resellerId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResellerSupplierBinding"
+            }
+          },
+          "total": {
+            "type": "integer"
+          }
+        }
+      },
       "TenantUser": {
         "type": "object",
         "properties": {
@@ -838,6 +1011,46 @@
           ]
         }
       },
+      "ResellerUserAssignEnterprisesRequest": {
+        "type": "object",
+        "required": [
+          "assignedEnterpriseIds"
+        ],
+        "properties": {
+          "assignedEnterpriseIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "example": {
+          "assignedEnterpriseIds": [
+            "2c6b8f18-2dbf-4e7f-8bc7-96b81b48279b"
+          ]
+        }
+      },
+      "ResellerUserAssignEnterprisesResponse": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "resellerId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "assignedEnterpriseIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        }
+      },
       "EnterpriseUserCreateRequest": {
         "type": "object",
         "required": [
@@ -871,6 +1084,46 @@
           "displayName": "Enterprise Ops",
           "role": "customer_ops",
           "departmentId": "d9eb2b8b-9b55-4030-9d2a-2b7bbd3dd1c2"
+        }
+      },
+      "EnterpriseUserAssignDepartmentsRequest": {
+        "type": "object",
+        "required": [
+          "assignedDepartmentIds"
+        ],
+        "properties": {
+          "assignedDepartmentIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "example": {
+          "assignedDepartmentIds": [
+            "d9eb2b8b-9b55-4030-9d2a-2b7bbd3dd1c2"
+          ]
+        }
+      },
+      "EnterpriseUserAssignDepartmentsResponse": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "enterpriseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "assignedDepartmentIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
         }
       },
       "TenantUserListResponse": {
@@ -2337,13 +2590,119 @@
           }
         }
       },
+      "SimListItem": {
+        "type": "object",
+        "properties": {
+          "simId": {
+            "type": "string"
+          },
+          "iccid": {
+            "type": "string"
+          },
+          "imsi": {
+            "type": "string",
+            "nullable": true
+          },
+          "msisdn": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string"
+          },
+          "lifecycleSubStatus": {
+            "type": "string",
+            "nullable": true
+          },
+          "upstreamStatus": {
+            "type": "string",
+            "nullable": true
+          },
+          "upstreamStatusUpdatedAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "formFactor": {
+            "type": "string",
+            "nullable": true
+          },
+          "activationCode": {
+            "type": "string",
+            "nullable": true
+          },
+          "supplierId": {
+            "type": "string",
+            "nullable": true
+          },
+          "supplierName": {
+            "type": "string",
+            "nullable": true
+          },
+          "operatorId": {
+            "type": "string",
+            "nullable": true
+          },
+          "operatorName": {
+            "type": "string",
+            "nullable": true
+          },
+          "mcc": {
+            "type": "string",
+            "nullable": true
+          },
+          "mnc": {
+            "type": "string",
+            "nullable": true
+          },
+          "apn": {
+            "type": "string",
+            "nullable": true
+          },
+          "resellerId": {
+            "type": "string",
+            "nullable": true
+          },
+          "resellerName": {
+            "type": "string",
+            "nullable": true
+          },
+          "enterpriseId": {
+            "type": "string",
+            "nullable": true
+          },
+          "enterpriseName": {
+            "type": "string",
+            "nullable": true
+          },
+          "departmentId": {
+            "type": "string",
+            "nullable": true
+          },
+          "departmentName": {
+            "type": "string",
+            "nullable": true
+          },
+          "activationDate": {
+            "type": "string",
+            "nullable": true
+          },
+          "totalUsageBytes": {
+            "type": "integer",
+            "nullable": true
+          },
+          "imei": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "SimCardListResponse": {
         "type": "object",
         "properties": {
           "items": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/SimCard"
+              "$ref": "#/components/schemas/SimListItem"
             }
           },
           "total": {
@@ -2366,6 +2725,130 @@
           },
           "idempotencyKey": {
             "type": "string"
+          }
+        }
+      },
+      "SimBatchStatusChangeRequest": {
+        "type": "object",
+        "required": [
+          "action",
+          "iccids"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "ACTIVATE",
+              "DEACTIVATE",
+              "REACTIVATE",
+              "RETIRE"
+            ]
+          },
+          "iccids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9]{18,20}$"
+            }
+          },
+          "enterpriseId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "confirm": {
+            "type": "boolean"
+          },
+          "commitmentExempt": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SimBatchStatusChangeErrorCode": {
+        "type": "string",
+        "enum": [
+          "INVALID_SIM_ID",
+          "RESOURCE_NOT_FOUND",
+          "INVALID_STATE",
+          "ENTERPRISE_INACTIVE",
+          "COMMITMENT_NOT_MET",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "SimBatchStatusChangeItem": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "string",
+            "nullable": true
+          },
+          "simId": {
+            "type": "string",
+            "nullable": true
+          },
+          "iccid": {
+            "type": "string",
+            "nullable": true
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "idempotent": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "beforeStatus": {
+            "type": "string",
+            "nullable": true
+          },
+          "afterStatus": {
+            "type": "string",
+            "nullable": true
+          },
+          "errorCode": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SimBatchStatusChangeErrorCode"
+              }
+            ],
+            "nullable": true
+          },
+          "errorMessage": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "SimBatchStatusChangeResponse": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "targetStatus": {
+            "type": "string"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "succeeded": {
+            "type": "integer"
+          },
+          "failed": {
+            "type": "integer"
+          },
+          "idempotent": {
+            "type": "integer"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SimBatchStatusChangeItem"
+            }
           }
         }
       },
@@ -2415,6 +2898,30 @@
           },
           "totalRows": {
             "type": "integer"
+          }
+        }
+      },
+      "SimImportJobAcceptedResponse": {
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "QUEUED",
+              "RUNNING",
+              "SUCCEEDED",
+              "FAILED"
+            ]
+          },
+          "totalRows": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -3200,7 +3707,17 @@
               "PERIOD_OR_QUOTA"
             ]
           },
+          "testExpiryAction": {
+            "type": "string",
+            "enum": [
+              "ACTIVATED",
+              "DEACTIVATED"
+            ]
+          },
           "commitmentPeriodMonths": {
+            "type": "integer"
+          },
+          "commitmentPeriodDays": {
             "type": "integer"
           }
         }
@@ -3211,31 +3728,450 @@
           "enabled": {
             "type": "boolean"
           },
+          "cutoffPolicyId": {
+            "type": "string"
+          },
           "throttlingPolicyId": {
             "type": "string"
           },
           "cutoffThresholdKb": {
             "type": "integer"
+          },
+          "cutoffThresholdMb": {
+            "type": "integer"
+          }
+        }
+      },
+      "CommercialTermsValidateRequest": {
+        "type": "object",
+        "required": [
+          "commercialTerms"
+        ],
+        "properties": {
+          "commercialTerms": {
+            "$ref": "#/components/schemas/CommercialTerms"
+          }
+        }
+      },
+      "CommercialTermsValidateResponse": {
+        "type": "object",
+        "properties": {
+          "commercialTerms": {
+            "$ref": "#/components/schemas/CommercialTerms"
+          }
+        }
+      },
+      "CommercialTermsCreateRequest": {
+        "type": "object",
+        "required": [
+          "commercialTerms"
+        ],
+        "properties": {
+          "commercialTerms": {
+            "$ref": "#/components/schemas/CommercialTerms"
+          },
+          "enterpriseId": {
+            "type": "string"
+          },
+          "resellerId": {
+            "type": "string"
+          }
+        }
+      },
+      "CommercialTermsUpdateRequest": {
+        "type": "object",
+        "required": [
+          "commercialTerms"
+        ],
+        "properties": {
+          "commercialTerms": {
+            "$ref": "#/components/schemas/CommercialTerms"
+          }
+        }
+      },
+      "CommercialTermsModuleResponse": {
+        "type": "object",
+        "properties": {
+          "commercialTermsId": {
+            "type": "string"
+          },
+          "commercialTerms": {
+            "$ref": "#/components/schemas/CommercialTerms"
+          },
+          "enterpriseId": {
+            "type": "string"
+          },
+          "resellerId": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ControlPolicyValidateRequest": {
+        "type": "object",
+        "required": [
+          "controlPolicy"
+        ],
+        "properties": {
+          "controlPolicy": {
+            "$ref": "#/components/schemas/ControlPolicy"
+          }
+        }
+      },
+      "ControlPolicyValidateResponse": {
+        "type": "object",
+        "properties": {
+          "controlPolicy": {
+            "$ref": "#/components/schemas/ControlPolicy"
+          }
+        }
+      },
+      "ControlPolicyCreateRequest": {
+        "type": "object",
+        "required": [
+          "controlPolicy"
+        ],
+        "properties": {
+          "controlPolicy": {
+            "$ref": "#/components/schemas/ControlPolicy"
+          },
+          "enterpriseId": {
+            "type": "string"
+          },
+          "resellerId": {
+            "type": "string"
+          }
+        }
+      },
+      "ControlPolicyUpdateRequest": {
+        "type": "object",
+        "required": [
+          "controlPolicy"
+        ],
+        "properties": {
+          "controlPolicy": {
+            "$ref": "#/components/schemas/ControlPolicy"
+          }
+        }
+      },
+      "ControlPolicyModuleResponse": {
+        "type": "object",
+        "properties": {
+          "controlPolicyId": {
+            "type": "string"
+          },
+          "controlPolicy": {
+            "$ref": "#/components/schemas/ControlPolicy"
+          },
+          "enterpriseId": {
+            "type": "string"
+          },
+          "resellerId": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CarrierServiceValidateRequest": {
+        "type": "object",
+        "required": [
+          "carrierServiceConfig"
+        ],
+        "properties": {
+          "carrierServiceConfig": {
+            "$ref": "#/components/schemas/CarrierServiceConfig"
+          }
+        }
+      },
+      "CarrierServiceValidateResponse": {
+        "type": "object",
+        "properties": {
+          "carrierServiceConfig": {
+            "$ref": "#/components/schemas/CarrierServiceConfig"
+          }
+        }
+      },
+      "CarrierServiceCreateRequest": {
+        "type": "object",
+        "required": [
+          "carrierServiceConfig"
+        ],
+        "properties": {
+          "carrierServiceConfig": {
+            "$ref": "#/components/schemas/CarrierServiceConfig"
+          },
+          "enterpriseId": {
+            "type": "string"
+          },
+          "resellerId": {
+            "type": "string"
+          }
+        }
+      },
+      "CarrierServiceUpdateRequest": {
+        "type": "object",
+        "required": [
+          "carrierServiceConfig"
+        ],
+        "properties": {
+          "carrierServiceConfig": {
+            "$ref": "#/components/schemas/CarrierServiceConfig"
+          }
+        }
+      },
+      "CarrierServiceModuleResponse": {
+        "type": "object",
+        "properties": {
+          "carrierServiceId": {
+            "type": "string"
+          },
+          "supplierId": {
+            "type": "string",
+            "nullable": true
+          },
+          "operatorId": {
+            "type": "string",
+            "nullable": true
+          },
+          "carrierServiceConfig": {
+            "$ref": "#/components/schemas/CarrierServiceConfig"
+          },
+          "enterpriseId": {
+            "type": "string"
+          },
+          "resellerId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "nullable": true
+          },
+          "effectiveFrom": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CarrierServiceListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CarrierServiceModuleResponse"
+            }
+          },
+          "total": {
+            "type": "integer"
           }
         }
       },
       "PricePlanCreateRequest": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/PricePlanCreateOneTime"
+          },
+          {
+            "$ref": "#/components/schemas/PricePlanCreateSimDependentBundle"
+          },
+          {
+            "$ref": "#/components/schemas/PricePlanCreateFixedBundle"
+          },
+          {
+            "$ref": "#/components/schemas/PricePlanCreateTieredPricing"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "price_plan_type",
+          "mapping": {
+            "ONE_TIME": "#/components/schemas/PricePlanCreateOneTime",
+            "SIM_DEPENDENT_BUNDLE": "#/components/schemas/PricePlanCreateSimDependentBundle",
+            "FIXED_BUNDLE": "#/components/schemas/PricePlanCreateFixedBundle",
+            "TIERED_PRICING": "#/components/schemas/PricePlanCreateTieredPricing"
+          }
+        },
+        "examples": {
+          "oneTimeWithPolicies": {
+            "value": {
+              "name": "One-Time Plan",
+              "price_plan_type": "ONE_TIME",
+              "serviceType": "DATA",
+              "currency": "USD",
+              "billingCycleType": "CALENDAR_MONTH",
+              "firstCycleProration": "NONE",
+              "prorationRounding": "ROUND_HALF_UP",
+              "oneTimeFee": 29.9,
+              "quotaKb": 15728640,
+              "validityDays": 45,
+              "expiryBoundary": "CALENDAR_DAY_END",
+              "commercialTerms": {
+                "testPeriodDays": 7,
+                "testQuotaKb": 1048576,
+                "testExpiryCondition": "PERIOD_OR_QUOTA",
+                "testExpiryAction": "ACTIVATED"
+              },
+              "controlPolicy": {
+                "enabled": true,
+                "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                "cutoffThresholdMb": 512
+              },
+              "carrierServiceConfig": {
+                "roamingProfileVersionId": "55555555-5555-5555-5555-555555555555"
+              }
+            }
+          },
+          "simDependentBundleWithPolicies": {
+            "value": {
+              "name": "SIM Bundle A",
+              "price_plan_type": "SIM_DEPENDENT_BUNDLE",
+              "serviceType": "DATA",
+              "currency": "USD",
+              "billingCycleType": "CALENDAR_MONTH",
+              "firstCycleProration": "NONE",
+              "prorationRounding": "ROUND_HALF_UP",
+              "monthlyFee": 10,
+              "deactivatedMonthlyFee": 1,
+              "perSimQuotaKb": 1048576,
+              "commercialTerms": {
+                "testPeriodDays": 15,
+                "testQuotaKb": 2097152,
+                "testExpiryCondition": "PERIOD_OR_QUOTA",
+                "testExpiryAction": "ACTIVATED",
+                "commitmentPeriodMonths": 6
+              },
+              "controlPolicy": {
+                "enabled": true,
+                "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                "throttlingPolicyId": "22222222-2222-2222-2222-222222222222",
+                "cutoffThresholdMb": 1024
+              },
+              "carrierServiceConfig": {
+                "roamingProfileVersionId": "55555555-5555-5555-5555-555555555555"
+              }
+            }
+          },
+          "fixedBundleWithPolicies": {
+            "value": {
+              "name": "Fixed Bundle",
+              "price_plan_type": "FIXED_BUNDLE",
+              "serviceType": "DATA",
+              "currency": "USD",
+              "billingCycleType": "CALENDAR_MONTH",
+              "firstCycleProration": "NONE",
+              "prorationRounding": "ROUND_HALF_UP",
+              "monthlyFee": 150,
+              "deactivatedMonthlyFee": 10,
+              "totalQuotaKb": 157286400,
+              "overageRatePerKb": 0.00007,
+              "commercialTerms": {
+                "testPeriodDays": 15,
+                "testQuotaKb": 2097152,
+                "testExpiryCondition": "PERIOD_OR_QUOTA",
+                "testExpiryAction": "ACTIVATED",
+                "commitmentPeriodMonths": 6
+              },
+              "controlPolicy": {
+                "enabled": true,
+                "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                "throttlingPolicyId": "22222222-2222-2222-2222-222222222222",
+                "cutoffThresholdMb": 1024
+              },
+              "carrierServiceConfig": {
+                "roamingProfileVersionId": "55555555-5555-5555-5555-555555555555"
+              }
+            }
+          },
+          "tieredPricingWithPolicies": {
+            "value": {
+              "name": "Tiered Pricing",
+              "price_plan_type": "TIERED_PRICING",
+              "serviceType": "DATA",
+              "currency": "USD",
+              "billingCycleType": "CALENDAR_MONTH",
+              "firstCycleProration": "NONE",
+              "prorationRounding": "ROUND_HALF_UP",
+              "monthlyFee": 8,
+              "deactivatedMonthlyFee": 1,
+              "tiers": [
+                {
+                  "fromKb": 0,
+                  "toKb": 1073741824,
+                  "ratePerKb": 0.001
+                },
+                {
+                  "fromKb": 1073741824,
+                  "toKb": 5368709120,
+                  "ratePerKb": 0.0006
+                }
+              ],
+              "commercialTerms": {
+                "testPeriodDays": 15,
+                "testQuotaKb": 2097152,
+                "testExpiryCondition": "PERIOD_OR_QUOTA",
+                "testExpiryAction": "ACTIVATED",
+                "commitmentPeriodMonths": 6
+              },
+              "controlPolicy": {
+                "enabled": true,
+                "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                "throttlingPolicyId": "22222222-2222-2222-2222-222222222222",
+                "cutoffThresholdMb": 1024
+              },
+              "carrierServiceConfig": {
+                "roamingProfileVersionId": "55555555-5555-5555-5555-555555555555"
+              }
+            }
+          }
+        }
+      },
+      "PricePlanCreateCommon": {
         "type": "object",
         "required": [
           "name",
-          "type"
+          "price_plan_type",
+          "serviceType",
+          "currency",
+          "billingCycleType",
+          "firstCycleProration",
+          "prorationRounding",
+          "commercialTerms",
+          "controlPolicy",
+          "carrierServiceConfig"
         ],
         "properties": {
           "name": {
             "type": "string"
           },
-          "type": {
+          "price_plan_type": {
             "type": "string",
             "enum": [
               "ONE_TIME",
               "SIM_DEPENDENT_BUNDLE",
               "FIXED_BUNDLE",
-              "TIERED_VOLUME_PRICING"
+              "TIERED_PRICING"
             ]
           },
           "serviceType": {
@@ -3269,43 +4205,6 @@
               "ROUND_HALF_UP"
             ]
           },
-          "oneTimeFee": {
-            "type": "number"
-          },
-          "quotaKb": {
-            "type": "integer"
-          },
-          "validityDays": {
-            "type": "integer"
-          },
-          "expiryBoundary": {
-            "type": "string",
-            "enum": [
-              "CALENDAR_DAY_END",
-              "DURATION_EXCLUSIVE_END"
-            ]
-          },
-          "monthlyFee": {
-            "type": "number"
-          },
-          "deactivatedMonthlyFee": {
-            "type": "number"
-          },
-          "perSimQuotaKb": {
-            "type": "integer"
-          },
-          "totalQuotaKb": {
-            "type": "integer"
-          },
-          "overageRatePerKb": {
-            "type": "number"
-          },
-          "tiers": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/PricePlanTier"
-            }
-          },
           "paygRates": {
             "type": "array",
             "items": {
@@ -3317,16 +4216,168 @@
           },
           "controlPolicy": {
             "$ref": "#/components/schemas/ControlPolicy"
+          },
+          "carrierServiceConfig": {
+            "$ref": "#/components/schemas/CarrierServiceConfig"
+          },
+          "carrierService": {
+            "$ref": "#/components/schemas/CarrierServiceConfig"
           }
         }
+      },
+      "PricePlanCreateOneTime": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PricePlanCreateCommon"
+          },
+          {
+            "type": "object",
+            "required": [
+              "price_plan_type",
+              "oneTimeFee",
+              "quotaKb",
+              "validityDays",
+              "expiryBoundary"
+            ],
+            "properties": {
+              "price_plan_type": {
+                "type": "string",
+                "enum": [
+                  "ONE_TIME"
+                ]
+              },
+              "oneTimeFee": {
+                "type": "number"
+              },
+              "quotaKb": {
+                "type": "integer"
+              },
+              "validityDays": {
+                "type": "integer"
+              },
+              "expiryBoundary": {
+                "type": "string",
+                "enum": [
+                  "CALENDAR_DAY_END",
+                  "DURATION_EXCLUSIVE_END"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "PricePlanCreateSimDependentBundle": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PricePlanCreateCommon"
+          },
+          {
+            "type": "object",
+            "required": [
+              "price_plan_type",
+              "monthlyFee",
+              "deactivatedMonthlyFee",
+              "perSimQuotaKb"
+            ],
+            "properties": {
+              "price_plan_type": {
+                "type": "string",
+                "enum": [
+                  "SIM_DEPENDENT_BUNDLE"
+                ]
+              },
+              "monthlyFee": {
+                "type": "number"
+              },
+              "deactivatedMonthlyFee": {
+                "type": "number"
+              },
+              "perSimQuotaKb": {
+                "type": "integer"
+              },
+              "overageRatePerKb": {
+                "type": "number"
+              }
+            }
+          }
+        ]
+      },
+      "PricePlanCreateFixedBundle": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PricePlanCreateCommon"
+          },
+          {
+            "type": "object",
+            "required": [
+              "price_plan_type",
+              "monthlyFee",
+              "deactivatedMonthlyFee",
+              "totalQuotaKb"
+            ],
+            "properties": {
+              "price_plan_type": {
+                "type": "string",
+                "enum": [
+                  "FIXED_BUNDLE"
+                ]
+              },
+              "monthlyFee": {
+                "type": "number"
+              },
+              "deactivatedMonthlyFee": {
+                "type": "number"
+              },
+              "totalQuotaKb": {
+                "type": "integer"
+              },
+              "overageRatePerKb": {
+                "type": "number"
+              }
+            }
+          }
+        ]
+      },
+      "PricePlanCreateTieredPricing": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PricePlanCreateCommon"
+          },
+          {
+            "type": "object",
+            "required": [
+              "price_plan_type",
+              "monthlyFee",
+              "deactivatedMonthlyFee",
+              "tiers"
+            ],
+            "properties": {
+              "price_plan_type": {
+                "type": "string",
+                "enum": [
+                  "TIERED_PRICING"
+                ]
+              },
+              "monthlyFee": {
+                "type": "number"
+              },
+              "deactivatedMonthlyFee": {
+                "type": "number"
+              },
+              "tiers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/PricePlanTier"
+                }
+              }
+            }
+          }
+        ]
       },
       "PricePlanCreateResponse": {
         "type": "object",
         "properties": {
           "pricePlanId": {
-            "type": "string"
-          },
-          "pricePlanVersionId": {
             "type": "string"
           },
           "version": {
@@ -3393,6 +4444,18 @@
               "$ref": "#/components/schemas/PaygRate"
             }
           },
+          "commercialTerms": {
+            "$ref": "#/components/schemas/CommercialTerms"
+          },
+          "controlPolicy": {
+            "$ref": "#/components/schemas/ControlPolicy"
+          },
+          "carrierServiceConfig": {
+            "$ref": "#/components/schemas/CarrierServiceConfig"
+          },
+          "carrierService": {
+            "$ref": "#/components/schemas/CarrierServiceConfig"
+          },
           "createdAt": {
             "type": "string",
             "format": "date-time"
@@ -3409,6 +4472,18 @@
             "type": "string"
           },
           "type": {
+            "type": "string"
+          },
+          "serviceType": {
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "billingCycleType": {
+            "type": "string"
+          },
+          "firstCycleProration": {
             "type": "string"
           },
           "status": {
@@ -3476,31 +4551,153 @@
         }
       },
       "PricePlanVersionCreateRequest": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/PricePlanVersionCreateOneTime"
+          },
+          {
+            "$ref": "#/components/schemas/PricePlanVersionCreateSimDependentBundle"
+          },
+          {
+            "$ref": "#/components/schemas/PricePlanVersionCreateFixedBundle"
+          },
+          {
+            "$ref": "#/components/schemas/PricePlanVersionCreateTieredPricing"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "price_plan_type",
+          "mapping": {
+            "ONE_TIME": "#/components/schemas/PricePlanVersionCreateOneTime",
+            "SIM_DEPENDENT_BUNDLE": "#/components/schemas/PricePlanVersionCreateSimDependentBundle",
+            "FIXED_BUNDLE": "#/components/schemas/PricePlanVersionCreateFixedBundle",
+            "TIERED_PRICING": "#/components/schemas/PricePlanVersionCreateTieredPricing"
+          }
+        },
+        "examples": {
+          "oneTime": {
+            "value": {
+              "price_plan_type": "ONE_TIME",
+              "oneTimeFee": 29.9,
+              "quotaKb": 15728640,
+              "validityDays": 45,
+              "expiryBoundary": "CALENDAR_DAY_END",
+              "commercialTerms": {
+                "testPeriodDays": 15,
+                "testQuotaKb": 2097152,
+                "testExpiryCondition": "PERIOD_OR_QUOTA",
+                "testExpiryAction": "ACTIVATED"
+              },
+              "controlPolicy": {
+                "enabled": true,
+                "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                "cutoffThresholdMb": 1024
+              },
+              "carrierServiceConfig": {
+                "roamingProfileVersionId": "55555555-5555-5555-5555-555555555555"
+              }
+            }
+          },
+          "simDependentBundle": {
+            "value": {
+              "price_plan_type": "SIM_DEPENDENT_BUNDLE",
+              "monthlyFee": 12,
+              "deactivatedMonthlyFee": 1,
+              "perSimQuotaKb": 2097152,
+              "overageRatePerKb": 0.00009,
+              "commercialTerms": {
+                "testPeriodDays": 15,
+                "testQuotaKb": 2097152,
+                "testExpiryCondition": "PERIOD_OR_QUOTA",
+                "testExpiryAction": "ACTIVATED"
+              },
+              "controlPolicy": {
+                "enabled": true,
+                "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                "throttlingPolicyId": "22222222-2222-2222-2222-222222222222",
+                "cutoffThresholdMb": 1024
+              },
+              "carrierServiceConfig": {
+                "roamingProfileVersionId": "55555555-5555-5555-5555-555555555555"
+              }
+            }
+          },
+          "fixedBundle": {
+            "value": {
+              "price_plan_type": "FIXED_BUNDLE",
+              "monthlyFee": 150,
+              "deactivatedMonthlyFee": 10,
+              "totalQuotaKb": 157286400,
+              "overageRatePerKb": 0.00007,
+              "commercialTerms": {
+                "testPeriodDays": 15,
+                "testQuotaKb": 2097152,
+                "testExpiryCondition": "PERIOD_OR_QUOTA",
+                "testExpiryAction": "ACTIVATED"
+              },
+              "controlPolicy": {
+                "enabled": true,
+                "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                "throttlingPolicyId": "22222222-2222-2222-2222-222222222222",
+                "cutoffThresholdMb": 1024
+              },
+              "carrierServiceConfig": {
+                "roamingProfileVersionId": "55555555-5555-5555-5555-555555555555"
+              }
+            }
+          },
+          "tieredPricing": {
+            "value": {
+              "price_plan_type": "TIERED_PRICING",
+              "monthlyFee": 8,
+              "deactivatedMonthlyFee": 1,
+              "tiers": [
+                {
+                  "fromKb": 0,
+                  "toKb": 1073741824,
+                  "ratePerKb": 0.001
+                },
+                {
+                  "fromKb": 1073741824,
+                  "toKb": 5368709120,
+                  "ratePerKb": 0.0006
+                }
+              ],
+              "commercialTerms": {
+                "testPeriodDays": 15,
+                "testQuotaKb": 2097152,
+                "testExpiryCondition": "PERIOD_OR_QUOTA",
+                "testExpiryAction": "ACTIVATED"
+              },
+              "controlPolicy": {
+                "enabled": true,
+                "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                "throttlingPolicyId": "22222222-2222-2222-2222-222222222222",
+                "cutoffThresholdMb": 1024
+              },
+              "carrierServiceConfig": {
+                "roamingProfileVersionId": "55555555-5555-5555-5555-555555555555"
+              }
+            }
+          }
+        }
+      },
+      "PricePlanVersionCreateCommon": {
         "type": "object",
+        "required": [
+          "price_plan_type",
+          "commercialTerms",
+          "controlPolicy",
+          "carrierServiceConfig"
+        ],
         "properties": {
-          "serviceType": {
+          "price_plan_type": {
             "type": "string",
             "enum": [
-              "DATA",
-              "VOICE",
-              "SMS"
-            ]
-          },
-          "currency": {
-            "type": "string"
-          },
-          "billingCycleType": {
-            "type": "string",
-            "enum": [
-              "CALENDAR_MONTH",
-              "CUSTOM_RANGE"
-            ]
-          },
-          "firstCycleProration": {
-            "type": "string",
-            "enum": [
-              "NONE",
-              "DAILY_PRORATION"
+              "ONE_TIME",
+              "SIM_DEPENDENT_BUNDLE",
+              "FIXED_BUNDLE",
+              "TIERED_PRICING"
             ]
           },
           "prorationRounding": {
@@ -3508,43 +4705,6 @@
             "enum": [
               "ROUND_HALF_UP"
             ]
-          },
-          "oneTimeFee": {
-            "type": "number"
-          },
-          "quotaKb": {
-            "type": "integer"
-          },
-          "validityDays": {
-            "type": "integer"
-          },
-          "expiryBoundary": {
-            "type": "string",
-            "enum": [
-              "CALENDAR_DAY_END",
-              "DURATION_EXCLUSIVE_END"
-            ]
-          },
-          "monthlyFee": {
-            "type": "number"
-          },
-          "deactivatedMonthlyFee": {
-            "type": "number"
-          },
-          "perSimQuotaKb": {
-            "type": "integer"
-          },
-          "totalQuotaKb": {
-            "type": "integer"
-          },
-          "overageRatePerKb": {
-            "type": "number"
-          },
-          "tiers": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/PricePlanTier"
-            }
           },
           "paygRates": {
             "type": "array",
@@ -3557,8 +4717,163 @@
           },
           "controlPolicy": {
             "$ref": "#/components/schemas/ControlPolicy"
+          },
+          "carrierServiceConfig": {
+            "$ref": "#/components/schemas/CarrierServiceConfig"
+          },
+          "carrierService": {
+            "$ref": "#/components/schemas/CarrierServiceConfig"
           }
         }
+      },
+      "PricePlanVersionCreateOneTime": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PricePlanVersionCreateCommon"
+          },
+          {
+            "type": "object",
+            "required": [
+              "price_plan_type",
+              "oneTimeFee",
+              "quotaKb",
+              "validityDays",
+              "expiryBoundary"
+            ],
+            "properties": {
+              "price_plan_type": {
+                "type": "string",
+                "enum": [
+                  "ONE_TIME"
+                ]
+              },
+              "oneTimeFee": {
+                "type": "number"
+              },
+              "quotaKb": {
+                "type": "integer"
+              },
+              "validityDays": {
+                "type": "integer"
+              },
+              "expiryBoundary": {
+                "type": "string",
+                "enum": [
+                  "CALENDAR_DAY_END",
+                  "DURATION_EXCLUSIVE_END"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "PricePlanVersionCreateSimDependentBundle": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PricePlanVersionCreateCommon"
+          },
+          {
+            "type": "object",
+            "required": [
+              "price_plan_type",
+              "monthlyFee",
+              "deactivatedMonthlyFee",
+              "perSimQuotaKb"
+            ],
+            "properties": {
+              "price_plan_type": {
+                "type": "string",
+                "enum": [
+                  "SIM_DEPENDENT_BUNDLE"
+                ]
+              },
+              "monthlyFee": {
+                "type": "number"
+              },
+              "deactivatedMonthlyFee": {
+                "type": "number"
+              },
+              "perSimQuotaKb": {
+                "type": "integer"
+              },
+              "overageRatePerKb": {
+                "type": "number"
+              }
+            }
+          }
+        ]
+      },
+      "PricePlanVersionCreateFixedBundle": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PricePlanVersionCreateCommon"
+          },
+          {
+            "type": "object",
+            "required": [
+              "price_plan_type",
+              "monthlyFee",
+              "deactivatedMonthlyFee",
+              "totalQuotaKb"
+            ],
+            "properties": {
+              "price_plan_type": {
+                "type": "string",
+                "enum": [
+                  "FIXED_BUNDLE"
+                ]
+              },
+              "monthlyFee": {
+                "type": "number"
+              },
+              "deactivatedMonthlyFee": {
+                "type": "number"
+              },
+              "totalQuotaKb": {
+                "type": "integer"
+              },
+              "overageRatePerKb": {
+                "type": "number"
+              }
+            }
+          }
+        ]
+      },
+      "PricePlanVersionCreateTieredPricing": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PricePlanVersionCreateCommon"
+          },
+          {
+            "type": "object",
+            "required": [
+              "price_plan_type",
+              "monthlyFee",
+              "deactivatedMonthlyFee",
+              "tiers"
+            ],
+            "properties": {
+              "price_plan_type": {
+                "type": "string",
+                "enum": [
+                  "TIERED_PRICING"
+                ]
+              },
+              "monthlyFee": {
+                "type": "number"
+              },
+              "deactivatedMonthlyFee": {
+                "type": "number"
+              },
+              "tiers": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/PricePlanTier"
+                }
+              }
+            }
+          }
+        ]
       },
       "PricePlanVersionCreateResponse": {
         "type": "object",
@@ -3589,9 +4904,40 @@
           }
         }
       },
+      "RoamingRateEntry": {
+        "type": "object",
+        "required": [
+          "mcc",
+          "mnc",
+          "ratePerKb"
+        ],
+        "properties": {
+          "mcc": {
+            "type": "string",
+            "pattern": "^\\d{3}$",
+            "example": "460"
+          },
+          "mnc": {
+            "type": "string",
+            "pattern": "^(\\d{2,3}|\\*)$",
+            "example": "00"
+          },
+          "ratePerKb": {
+            "type": "number",
+            "minimum": 0,
+            "example": 0.0008
+          }
+        }
+      },
       "CarrierServiceConfig": {
         "type": "object",
+        "required": [
+          "roamingProfileVersionId"
+        ],
         "properties": {
+          "roamingProfileId": {
+            "type": "string"
+          },
           "supplierId": {
             "type": "string"
           },
@@ -3626,7 +4972,9 @@
         "required": [
           "name",
           "pricePlanVersionId",
-          "carrierServiceConfig"
+          "carrierServiceId",
+          "controlPolicyId",
+          "commercialTermsId"
         ],
         "properties": {
           "name": {
@@ -3638,8 +4986,14 @@
           "pricePlanVersionId": {
             "type": "string"
           },
-          "carrierServiceConfig": {
-            "$ref": "#/components/schemas/CarrierServiceConfig"
+          "carrierServiceId": {
+            "type": "string"
+          },
+          "controlPolicyId": {
+            "type": "string"
+          },
+          "commercialTermsId": {
+            "type": "string"
           }
         }
       },
@@ -3649,11 +5003,20 @@
           "name": {
             "type": "string"
           },
+          "description": {
+            "type": "string"
+          },
           "pricePlanVersionId": {
             "type": "string"
           },
-          "carrierServiceConfig": {
-            "$ref": "#/components/schemas/CarrierServiceConfig"
+          "carrierServiceId": {
+            "type": "string"
+          },
+          "controlPolicyId": {
+            "type": "string"
+          },
+          "commercialTermsId": {
+            "type": "string"
           }
         }
       },
@@ -3729,6 +5092,9 @@
           "supplierId": {
             "type": "string"
           },
+          "operatorId": {
+            "type": "string"
+          },
           "carrierId": {
             "type": "string"
           },
@@ -3741,8 +5107,23 @@
           "roamingProfile": {
             "$ref": "#/components/schemas/RoamingProfileConfig"
           },
+          "carrierServiceConfig": {
+            "$ref": "#/components/schemas/CarrierServiceConfig"
+          },
+          "carrierServiceId": {
+            "type": "string"
+          },
+          "controlPolicyId": {
+            "type": "string"
+          },
+          "commercialTermsId": {
+            "type": "string"
+          },
           "controlPolicy": {
             "$ref": "#/components/schemas/ControlPolicy"
+          },
+          "commercialTerms": {
+            "$ref": "#/components/schemas/CommercialTerms"
           },
           "pricePlanVersionId": {
             "type": "string"
@@ -3759,6 +5140,9 @@
           "packageId": {
             "type": "string"
           },
+          "enterpriseId": {
+            "type": "string"
+          },
           "name": {
             "type": "string"
           },
@@ -3767,6 +5151,10 @@
           },
           "latestVersion": {
             "$ref": "#/components/schemas/PackageVersion"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -3902,6 +5290,12 @@
           "profileVersionId": {
             "type": "string"
           },
+          "profileType": {
+            "type": "string"
+          },
+          "profileId": {
+            "type": "string"
+          },
           "version": {
             "type": "integer"
           },
@@ -3910,14 +5304,17 @@
           },
           "effectiveFrom": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "nullable": true
           },
           "effectiveTo": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "nullable": true
           },
           "config": {
-            "type": "object"
+            "type": "object",
+            "nullable": true
           },
           "createdAt": {
             "type": "string",
@@ -3930,7 +5327,8 @@
         "required": [
           "name",
           "apn",
-          "supplierId"
+          "supplierId",
+          "operatorId"
         ],
         "properties": {
           "name": {
@@ -3956,7 +5354,7 @@
           "supplierId": {
             "type": "string"
           },
-          "carrierId": {
+          "operatorId": {
             "type": "string"
           }
         }
@@ -3966,8 +5364,10 @@
         "required": [
           "name",
           "mccmncList",
+          "resellerId",
           "supplierId"
         ],
+        "description": "mccmncList 仅做格式与冲突校验，不校验是否存在于 business_operators/operators。",
         "properties": {
           "name": {
             "type": "string"
@@ -3975,15 +5375,36 @@
           "mccmncList": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/RoamingRateEntry"
             }
+          },
+          "resellerId": {
+            "type": "string"
           },
           "supplierId": {
             "type": "string"
           },
-          "carrierId": {
+          "operatorId": {
             "type": "string"
           }
+        },
+        "example": {
+          "name": "SEA roaming v1",
+          "resellerId": "92e24e68-5f66-4ca4-bf52-31e63294f8e7",
+          "supplierId": "54c4b5d2-a574-4f13-a84d-3c0d17b13113",
+          "operatorId": "1f53b6ea-0e95-4c37-82de-d425fd2f0f32",
+          "mccmncList": [
+            {
+              "mcc": "460",
+              "mnc": "00",
+              "ratePerKb": 0.0008
+            },
+            {
+              "mcc": "460",
+              "mnc": "*",
+              "ratePerKb": 0.0012
+            }
+          ]
         }
       },
       "ApnProfileCreateResponse": {
@@ -4046,14 +5467,23 @@
           "supplierId": {
             "type": "string"
           },
-          "carrierId": {
-            "type": "string"
+          "operatorId": {
+            "type": "string",
+            "nullable": true
           },
           "status": {
             "type": "string"
           },
-          "currentVersion": {
+          "latestVersion": {
             "$ref": "#/components/schemas/ProfileVersion"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -4069,20 +5499,33 @@
           "mccmncList": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/RoamingRateEntry"
             }
           },
           "supplierId": {
             "type": "string"
           },
+          "operatorId": {
+            "type": "string",
+            "nullable": true
+          },
           "carrierId": {
-            "type": "string"
+            "type": "string",
+            "nullable": true
           },
           "status": {
             "type": "string"
           },
-          "currentVersion": {
+          "latestVersion": {
             "$ref": "#/components/schemas/ProfileVersion"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -4138,7 +5581,7 @@
           "supplierId": {
             "type": "string"
           },
-          "carrierId": {
+          "operatorId": {
             "type": "string"
           },
           "status": {
@@ -4175,14 +5618,19 @@
           "mccmncList": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/RoamingRateEntry"
             }
           },
           "supplierId": {
             "type": "string"
           },
+          "operatorId": {
+            "type": "string",
+            "nullable": true
+          },
           "carrierId": {
-            "type": "string"
+            "type": "string",
+            "nullable": true
           },
           "status": {
             "type": "string"
@@ -4230,12 +5678,163 @@
       },
       "RoamingProfileVersionCreateRequest": {
         "type": "object",
+        "description": "提交目标版本的完整 mccmncList；同一版本内 mcc+mnc 组合必须唯一。",
         "properties": {
           "mccmncList": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/RoamingRateEntry"
             }
+          }
+        },
+        "example": {
+          "mccmncList": [
+            {
+              "mcc": "454",
+              "mnc": "12",
+              "ratePerKb": 0.0015
+            },
+            {
+              "mcc": "454",
+              "mnc": "*",
+              "ratePerKb": 0.0018
+            }
+          ]
+        }
+      },
+      "RoamingProfileVersionDeriveRequest": {
+        "type": "object",
+        "required": [
+          "baseVersionId"
+        ],
+        "properties": {
+          "baseVersionId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "基于该版本复制全部 entries 创建新 DRAFT 版本。"
+          },
+          "draftName": {
+            "type": "string",
+            "description": "可选，覆盖新版本草稿展示名称。"
+          }
+        }
+      },
+      "RoamingProfileEntry": {
+        "type": "object",
+        "properties": {
+          "entryId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mcc": {
+            "type": "string",
+            "pattern": "^\\d{3}$"
+          },
+          "mnc": {
+            "type": "string",
+            "pattern": "^(\\d{2,3}|\\*)$"
+          },
+          "ratePerKb": {
+            "type": "number",
+            "minimum": 0
+          },
+          "isDeleted": {
+            "type": "boolean"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "RoamingProfileEntryPatchOperation": {
+        "type": "object",
+        "required": [
+          "op"
+        ],
+        "properties": {
+          "op": {
+            "type": "string",
+            "enum": [
+              "UPSERT",
+              "DELETE"
+            ]
+          },
+          "entryId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "可选，按 entryId 定位行。"
+          },
+          "mcc": {
+            "type": "string",
+            "pattern": "^\\d{3}$"
+          },
+          "mnc": {
+            "type": "string",
+            "pattern": "^(\\d{2,3}|\\*)$"
+          },
+          "ratePerKb": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "description": "UPSERT 可按 entryId 或 mcc+mnc 定位并更新，未命中时新增；DELETE 将目标行标记为 isDeleted=true。"
+      },
+      "RoamingProfileEntriesPatchRequest": {
+        "type": "object",
+        "required": [
+          "operations"
+        ],
+        "properties": {
+          "operations": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/RoamingProfileEntryPatchOperation"
+            }
+          }
+        }
+      },
+      "RoamingProfileEntriesPatchResponse": {
+        "type": "object",
+        "properties": {
+          "profileVersionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "applied": {
+            "type": "integer"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "DRAFT",
+              "PUBLISHED",
+              "DEPRECATED"
+            ]
+          }
+        }
+      },
+      "RoamingProfileEntriesListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoamingProfileEntry"
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "page": {
+            "type": "integer"
+          },
+          "pageSize": {
+            "type": "integer"
           }
         }
       },
@@ -4924,6 +6523,16 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       },
@@ -5254,6 +6863,99 @@
       }
     },
     "/operators": {
+      "get": {
+        "tags": [
+          "Suppliers"
+        ],
+        "summary": "List Operators",
+        "description": "Query operators by operatorId or MCC/MNC/name. Authentication required.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "operatorId",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "in": "query",
+            "name": "mcc",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "mnc",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "name",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operator list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "Suppliers"
@@ -5313,6 +7015,88 @@
           },
           "409": {
             "description": "Duplicate operator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/operators/{operatorId}": {
+      "patch": {
+        "tags": [
+          "Suppliers"
+        ],
+        "summary": "Update Operator",
+        "description": "Update operator fields. Platform admin only.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operatorId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Operator updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operator"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -5511,6 +7295,105 @@
             }
           }
         }
+      }
+    },
+    "/resellers/{resellerId}/users/{userId}/assign-enterprises": {
+      "post": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Assign Reseller User Enterprises",
+        "parameters": [
+          {
+            "name": "resellerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResellerUserAssignEnterprisesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reseller user enterprises assigned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResellerUserAssignEnterprisesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "missingAssignedEnterpriseIds": {
+                    "value": {
+                      "code": "VALIDATION_ERROR",
+                      "message": "assignedEnterpriseIds is required.",
+                      "traceId": "req_123456789"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Reseller or user not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
       },
       "patch": {
         "tags": [
@@ -5555,6 +7438,15 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "missingDisplayName": {
+                    "value": {
+                      "code": "VALIDATION_ERROR",
+                      "message": "displayName is required.",
+                      "traceId": "req_123456789"
+                    }
+                  }
                 }
               }
             }
@@ -5859,6 +7751,105 @@
           },
           "404": {
             "description": "Enterprise not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/enterprises/{enterpriseId}/users/{userId}/assign-departments": {
+      "post": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "Assign Enterprise User Departments",
+        "parameters": [
+          {
+            "name": "enterpriseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnterpriseUserAssignDepartmentsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Enterprise user departments assigned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnterpriseUserAssignDepartmentsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "missingAssignedDepartmentIds": {
+                    "value": {
+                      "code": "VALIDATION_ERROR",
+                      "message": "assignedDepartmentIds is required.",
+                      "traceId": "req_123456789"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Enterprise or user not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -6506,6 +8497,227 @@
         }
       }
     },
+    "/suppliers/{supplierId}/operators": {
+      "post": {
+        "tags": [
+          "Suppliers"
+        ],
+        "summary": "Bind Operator to Supplier",
+        "parameters": [
+          {
+            "name": "supplierId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SupplierBindOperatorRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Operator bound to supplier",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupplierBindOperatorResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Supplier or operator not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Operator already bound",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/resellers/{resellerId}/suppliers": {
+      "post": {
+        "tags": [
+          "Resellers"
+        ],
+        "summary": "Bind Supplier to Reseller",
+        "parameters": [
+          {
+            "name": "resellerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResellerBindSupplierRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Supplier bound to reseller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResellerBindSupplierResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Reseller or supplier not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Supplier already bound",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Resellers"
+        ],
+        "summary": "List Reseller Suppliers",
+        "parameters": [
+          {
+            "name": "resellerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reseller suppliers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResellerSuppliersListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Reseller not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/resellers/{resellerId}/users": {
       "post": {
         "tags": [
@@ -6550,6 +8762,15 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "missingDisplayName": {
+                    "value": {
+                      "code": "VALIDATION_ERROR",
+                      "message": "displayName is required.",
+                      "traceId": "req_123456789"
+                    }
+                  }
                 }
               }
             }
@@ -6663,6 +8884,91 @@
       }
     },
     "/enterprises/{enterpriseId}/users": {
+      "get": {
+        "tags": [
+          "Users"
+        ],
+        "summary": "List Enterprise Users",
+        "parameters": [
+          {
+            "name": "enterpriseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Enterprise user list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TenantUserListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Enterprise not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "Users"
@@ -6706,6 +9012,15 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "missingDisplayName": {
+                    "value": {
+                      "code": "VALIDATION_ERROR",
+                      "message": "displayName is required.",
+                      "traceId": "req_123456789"
+                    }
+                  }
                 }
               }
             }
@@ -8892,6 +11207,33 @@
         "description": "Retrieve a list of SIM cards based on filters.",
         "parameters": [
           {
+            "name": "enterpriseId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Optional enterprise filter"
+          },
+          {
+            "name": "departmentId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Optional department filter (requires enterpriseId)"
+          },
+          {
+            "name": "resellerId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Optional reseller filter (platform only)"
+          },
+          {
             "name": "iccid",
             "in": "query",
             "schema": {
@@ -8924,12 +11266,39 @@
             "description": "Filter by lifecycle status"
           },
           {
+            "name": "supplierId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Filter by supplier"
+          },
+          {
+            "name": "operatorId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Filter by operator UUID or business operator UUID"
+          },
+          {
             "name": "page",
             "in": "query",
             "schema": {
               "type": "integer",
               "default": 1
             }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            },
+            "description": "Alias of limit, preferred"
           },
           {
             "name": "limit",
@@ -8971,6 +11340,161 @@
         "summary": "Export SIM Cards CSV",
         "description": "Exports SIM list as CSV with applied filters.",
         "parameters": [
+          {
+            "name": "enterpriseId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Optional enterprise filter"
+          },
+          {
+            "name": "departmentId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Optional department filter (requires enterpriseId)"
+          },
+          {
+            "name": "resellerId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Optional reseller filter (platform only)"
+          },
+          {
+            "name": "iccid",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{18,20}$"
+            },
+            "description": "Filter by exact ICCID"
+          },
+          {
+            "name": "msisdn",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by MSISDN"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "INVENTORY",
+                "TEST_READY",
+                "ACTIVATED",
+                "DEACTIVATED",
+                "RETIRED"
+              ]
+            },
+            "description": "Filter by lifecycle status"
+          },
+          {
+            "name": "supplierId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Filter by supplier"
+          },
+          {
+            "name": "operatorId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Filter by operator UUID or business operator UUID"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1000
+            },
+            "description": "Alias of limit, preferred"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV file of SIM cards",
+            "headers": {
+              "X-Filters": {
+                "description": "Summary of current filter parameters",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/enterprises/{enterpriseId}/sims:csv": {
+      "get": {
+        "tags": [
+          "SIMs"
+        ],
+        "operationId": "enterpriseSimsCsv",
+        "summary": "Export Enterprise SIM Cards CSV",
+        "description": "Exports SIM list for a specific enterprise as CSV with applied filters.",
+        "parameters": [
+          {
+            "name": "enterpriseId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "departmentId",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Optional department filter within the enterprise"
+          },
           {
             "name": "iccid",
             "in": "query",
@@ -9045,6 +11569,103 @@
         }
       }
     },
+    "/sims/import-jobs": {
+      "post": {
+        "tags": [
+          "SIMs"
+        ],
+        "summary": "Import SIMs from CSV",
+        "description": "Upload a CSV file to create SIMs in bulk as an async job. Allowed roles are platform_admin and reseller_admin.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "resellerId",
+                  "supplierId",
+                  "operatorId",
+                  "apn",
+                  "file"
+                ],
+                "properties": {
+                  "resellerId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "supplierId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "operatorId": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "apn": {
+                    "type": "string"
+                  },
+                  "batchId": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "CSV file. Required columns: iccid, imsi. Optional columns: msisdn, secondaryImsi1, secondaryImsi2, secondaryImsi3, formFactor, activationCode, imei, imeiLockEnabled. See example below."
+                  }
+                }
+              },
+              "examples": {
+                "sample": {
+                  "summary": "CSV example",
+                  "value": {
+                    "resellerId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "supplierId": "11111111-1111-1111-1111-111111111111",
+                    "batchId": "import-2026-03-07",
+                    "operatorId": "22222222-2222-2222-2222-222222222222",
+                    "apn": "internet",
+                    "file": "iccid,imsi,msisdn\n893107032536638556,460001234567890,13900000000\n"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Import job accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimImportJobAcceptedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/sims:batch-deactivate": {
       "post": {
         "tags": [
@@ -9085,6 +11706,158 @@
           },
           "400": {
             "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sims:batch-status-change": {
+      "post": {
+        "tags": [
+          "SIMs"
+        ],
+        "summary": "Batch Change SIM Status",
+        "description": "Batch update SIM status with per-SIM results.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimBatchStatusChangeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "All SIMs processed successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimBatchStatusChangeResponse"
+                },
+                "examples": {
+                  "success": {
+                    "summary": "All succeeded",
+                    "value": {
+                      "action": "DEACTIVATE",
+                      "targetStatus": "DEACTIVATED",
+                      "total": 2,
+                      "succeeded": 2,
+                      "failed": 0,
+                      "idempotent": 1,
+                      "items": [
+                        {
+                          "simId": "11111111-1111-1111-1111-111111111111",
+                          "iccid": 8986012345678901000,
+                          "ok": true,
+                          "idempotent": true,
+                          "beforeStatus": "DEACTIVATED",
+                          "afterStatus": "DEACTIVATED"
+                        },
+                        {
+                          "simId": "22222222-2222-2222-2222-222222222222",
+                          "iccid": 8986012345678901000,
+                          "ok": true,
+                          "beforeStatus": "ACTIVATED",
+                          "afterStatus": "DEACTIVATED"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "207": {
+            "description": "Partial success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimBatchStatusChangeResponse"
+                },
+                "examples": {
+                  "partial": {
+                    "summary": "Mixed results with error codes",
+                    "value": {
+                      "action": "RETIRE",
+                      "targetStatus": "RETIRED",
+                      "total": 4,
+                      "succeeded": 1,
+                      "failed": 3,
+                      "idempotent": 0,
+                      "items": [
+                        {
+                          "simId": "33333333-3333-3333-3333-333333333333",
+                          "iccid": 8986012345678901000,
+                          "ok": true,
+                          "beforeStatus": "DEACTIVATED",
+                          "afterStatus": "RETIRED"
+                        },
+                        {
+                          "input": 8986012345678901000,
+                          "ok": false,
+                          "errorCode": "COMMITMENT_NOT_MET",
+                          "errorMessage": "Retire blocked until 2026-08-01T00:00:00.000Z."
+                        },
+                        {
+                          "input": "bad-id",
+                          "ok": false,
+                          "errorCode": "INVALID_SIM_ID",
+                          "errorMessage": "simId must be a valid uuid or 18-20 digit iccid."
+                        },
+                        {
+                          "simId": "44444444-4444-4444-4444-444444444444",
+                          "iccid": 8986012345678901000,
+                          "ok": false,
+                          "errorCode": "INVALID_STATE",
+                          "errorMessage": "sim status ACTIVATED cannot transition to RETIRED."
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request or all SIMs failed",
             "content": {
               "application/json": {
                 "schema": {
@@ -10561,47 +13334,49 @@
         "tags": [
           "Packages"
         ],
-        "summary": "List Packages",
-        "description": "Lists packages accessible to the calling enterprise.",
+        "operationId": "listPackagesByModuleRefs",
+        "summary": "Reverse Lookup Packages",
+        "description": "Reverse lookup packages by module references for tenant-visible scope.",
         "parameters": [
           {
-            "name": "q",
+            "name": "pricePlanId",
             "in": "query",
             "schema": {
               "type": "string"
             },
-            "description": "Filter by package name substring (case-insensitive)"
+            "description": "Reverse lookup by price plan id."
           },
           {
-            "name": "sortBy",
+            "name": "commercialTermsId",
             "in": "query",
             "schema": {
-              "type": "string",
-              "enum": [
-                "name"
-              ]
+              "type": "string"
             },
-            "description": "Sort field"
+            "description": "Reverse lookup by commercial terms id."
           },
           {
-            "name": "sortOrder",
+            "name": "controlPolicyId",
             "in": "query",
             "schema": {
-              "type": "string",
-              "enum": [
-                "asc",
-                "desc"
-              ]
+              "type": "string"
             },
-            "description": "Sort direction"
+            "description": "Reverse lookup by control policy id."
           },
           {
-            "name": "limit",
+            "name": "enterpriseId",
             "in": "query",
             "schema": {
-              "type": "integer",
-              "default": 100
-            }
+              "type": "string"
+            },
+            "description": "Enterprise scope filter, required for reseller role."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by package status."
           },
           {
             "name": "page",
@@ -10610,23 +13385,23 @@
               "type": "integer",
               "default": 1
             }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Packages",
+            "description": "Reverse lookup package list",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PackageSummaryListResponse"
-                }
-              }
-            },
-            "headers": {
-              "X-Filters": {
-                "description": "Summary of current filter parameters",
-                "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/PackageListResponse"
                 }
               }
             }
@@ -10735,6 +13510,136 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/PricePlanCreateRequest"
+              },
+              "examples": {
+                "oneTime": {
+                  "value": {
+                    "price_plan_type": "ONE_TIME",
+                    "name": "One-Time Plan",
+                    "serviceType": "DATA",
+                    "currency": "USD",
+                    "billingCycleType": "CALENDAR_MONTH",
+                    "firstCycleProration": "NONE",
+                    "prorationRounding": "ROUND_HALF_UP",
+                    "oneTimeFee": 29.9,
+                    "quotaKb": 15728640,
+                    "validityDays": 45,
+                    "expiryBoundary": "CALENDAR_DAY_END",
+                    "commercialTerms": {
+                      "testPeriodDays": 15,
+                      "testQuotaKb": 2097152,
+                      "testExpiryCondition": "PERIOD_OR_QUOTA",
+                      "testExpiryAction": "ACTIVATED"
+                    },
+                    "controlPolicy": {
+                      "enabled": true,
+                      "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                      "cutoffThresholdMb": 1024
+                    },
+                    "carrierServiceConfig": {
+                      "roamingProfileVersionId": "55555555-5555-5555-5555-555555555555"
+                    }
+                  }
+                },
+                "simDependentBundle": {
+                  "value": {
+                    "price_plan_type": "SIM_DEPENDENT_BUNDLE",
+                    "name": "SIM-Dependent Bundle",
+                    "serviceType": "DATA",
+                    "currency": "USD",
+                    "billingCycleType": "CALENDAR_MONTH",
+                    "firstCycleProration": "DAILY_PRORATION",
+                    "prorationRounding": "ROUND_HALF_UP",
+                    "monthlyFee": 12,
+                    "deactivatedMonthlyFee": 1,
+                    "perSimQuotaKb": 2097152,
+                    "overageRatePerKb": 0.00009,
+                    "commercialTerms": {
+                      "testPeriodDays": 15,
+                      "testQuotaKb": 2097152,
+                      "testExpiryCondition": "PERIOD_OR_QUOTA",
+                      "testExpiryAction": "ACTIVATED",
+                      "commitmentPeriodMonths": 6
+                    },
+                    "controlPolicy": {
+                      "enabled": true,
+                      "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                      "throttlingPolicyId": "22222222-2222-2222-2222-222222222222",
+                      "cutoffThresholdMb": 1024
+                    },
+                    "carrierServiceConfig": {
+                      "roamingProfileVersionId": "55555555-5555-5555-5555-555555555555"
+                    }
+                  }
+                },
+                "fixedBundle": {
+                  "value": {
+                    "price_plan_type": "FIXED_BUNDLE",
+                    "name": "Fixed Bundle",
+                    "serviceType": "DATA",
+                    "currency": "USD",
+                    "billingCycleType": "CALENDAR_MONTH",
+                    "firstCycleProration": "NONE",
+                    "prorationRounding": "ROUND_HALF_UP",
+                    "monthlyFee": 150,
+                    "deactivatedMonthlyFee": 10,
+                    "totalQuotaKb": 157286400,
+                    "overageRatePerKb": 0.00007,
+                    "commercialTerms": {
+                      "testPeriodDays": 15,
+                      "testQuotaKb": 2097152,
+                      "testExpiryCondition": "PERIOD_OR_QUOTA",
+                      "testExpiryAction": "ACTIVATED"
+                    },
+                    "controlPolicy": {
+                      "enabled": true,
+                      "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                      "cutoffThresholdMb": 1024
+                    },
+                    "carrierServiceConfig": {
+                      "roamingProfileVersionId": "55555555-5555-5555-5555-555555555555"
+                    }
+                  }
+                },
+                "tieredPricing": {
+                  "value": {
+                    "price_plan_type": "TIERED_PRICING",
+                    "name": "Tiered Pricing",
+                    "serviceType": "DATA",
+                    "currency": "USD",
+                    "billingCycleType": "CALENDAR_MONTH",
+                    "firstCycleProration": "NONE",
+                    "prorationRounding": "ROUND_HALF_UP",
+                    "monthlyFee": 8,
+                    "deactivatedMonthlyFee": 1,
+                    "tiers": [
+                      {
+                        "fromKb": 0,
+                        "toKb": 1073741824,
+                        "ratePerKb": 0.001
+                      },
+                      {
+                        "fromKb": 1073741824,
+                        "toKb": 5368709120,
+                        "ratePerKb": 0.0006
+                      }
+                    ],
+                    "commercialTerms": {
+                      "testPeriodDays": 15,
+                      "testQuotaKb": 2097152,
+                      "testExpiryCondition": "PERIOD_OR_QUOTA",
+                      "testExpiryAction": "ACTIVATED"
+                    },
+                    "controlPolicy": {
+                      "enabled": true,
+                      "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                      "cutoffThresholdMb": 1024
+                    },
+                    "carrierServiceConfig": {
+                      "roamingProfileVersionId": "55555555-5555-5555-5555-555555555555"
+                    }
+                  }
+                }
               }
             }
           }
@@ -10746,6 +13651,30 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PricePlanCreateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "examples": {
+                  "invalidFirstCycleProration": {
+                    "value": {
+                      "error": "BAD_REQUEST",
+                      "message": "firstCycleProration is invalid."
+                    }
+                  },
+                  "missingTypeRequiredField": {
+                    "value": {
+                      "error": "BAD_REQUEST",
+                      "message": "perSimQuotaKb must be >= 0."
+                    }
+                  }
                 }
               }
             }
@@ -10804,6 +13733,58 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PricePlanListResponse"
+                },
+                "examples": {
+                  "withPolicies": {
+                    "value": {
+                      "items": [
+                        {
+                          "pricePlanId": "7dbeb5e8-9189-4d95-9d8f-f0db638f7eca",
+                          "name": "SIM Bundle A",
+                          "type": "SIM_DEPENDENT_BUNDLE",
+                          "serviceType": "DATA",
+                          "currency": "USD",
+                          "billingCycleType": "CALENDAR_MONTH",
+                          "firstCycleProration": "NONE",
+                          "status": "DRAFT",
+                          "latestVersion": {
+                            "pricePlanVersionId": "72f3dc76-a003-4f41-89cb-44f2235ebde0",
+                            "version": 1,
+                            "status": "DRAFT",
+                            "monthlyFee": 10,
+                            "deactivatedMonthlyFee": 1,
+                            "perSimQuotaKb": 1048576,
+                            "commercialTerms": {
+                              "testPeriodDays": 15,
+                              "testQuotaKb": 2097152,
+                              "testExpiryCondition": "PERIOD_OR_QUOTA",
+                              "testExpiryAction": "ACTIVATED",
+                              "commitmentPeriodMonths": 6
+                            },
+                            "controlPolicy": {
+                              "enabled": true,
+                              "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                              "throttlingPolicyId": "22222222-2222-2222-2222-222222222222",
+                              "cutoffThresholdMb": 1024
+                            },
+                            "carrierServiceConfig": {
+                              "supplierId": "33333333-3333-3333-3333-333333333333",
+                              "operatorId": "55555555-5555-5555-5555-555555555555",
+                              "rat": "4G",
+                              "apn": "iot",
+                              "roamingProfile": {
+                                "allowedMccMnc": [
+                                  "460-00",
+                                  "460-*"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      ],
+                      "total": 1
+                    }
+                  }
                 }
               }
             }
@@ -10834,46 +13815,88 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PricePlanDetailResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/price-plans/{pricePlanId}/versions": {
-      "post": {
-        "tags": [
-          "PricePlans"
-        ],
-        "summary": "Create Price Plan Version",
-        "parameters": [
-          {
-            "name": "pricePlanId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PricePlanVersionCreateRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Price plan version created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PricePlanVersionCreateResponse"
+                },
+                "examples": {
+                  "withPolicies": {
+                    "value": {
+                      "pricePlanId": "7dbeb5e8-9189-4d95-9d8f-f0db638f7eca",
+                      "enterpriseId": "7efcd5a2-4c7a-4d9f-a9ba-6bcf709cf31b",
+                      "name": "SIM Bundle A",
+                      "type": "SIM_DEPENDENT_BUNDLE",
+                      "serviceType": "DATA",
+                      "currency": "USD",
+                      "billingCycleType": "CALENDAR_MONTH",
+                      "firstCycleProration": "NONE",
+                      "currentVersion": {
+                        "pricePlanVersionId": "72f3dc76-a003-4f41-89cb-44f2235ebde0",
+                        "version": 1,
+                        "status": "DRAFT",
+                        "monthlyFee": 10,
+                        "deactivatedMonthlyFee": 1,
+                        "perSimQuotaKb": 1048576,
+                        "commercialTerms": {
+                          "testPeriodDays": 15,
+                          "testQuotaKb": 2097152,
+                          "testExpiryCondition": "PERIOD_OR_QUOTA",
+                          "testExpiryAction": "ACTIVATED",
+                          "commitmentPeriodMonths": 6
+                        },
+                        "controlPolicy": {
+                          "enabled": true,
+                          "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                          "throttlingPolicyId": "22222222-2222-2222-2222-222222222222",
+                          "cutoffThresholdMb": 1024
+                        },
+                        "carrierServiceConfig": {
+                          "supplierId": "33333333-3333-3333-3333-333333333333",
+                          "operatorId": "55555555-5555-5555-5555-555555555555",
+                          "rat": "4G",
+                          "apn": "iot",
+                          "roamingProfile": {
+                            "allowedMccMnc": [
+                              "460-00",
+                              "460-*"
+                            ]
+                          }
+                        }
+                      },
+                      "versions": [
+                        {
+                          "pricePlanVersionId": "72f3dc76-a003-4f41-89cb-44f2235ebde0",
+                          "version": 1,
+                          "status": "DRAFT",
+                          "monthlyFee": 10,
+                          "deactivatedMonthlyFee": 1,
+                          "perSimQuotaKb": 1048576,
+                          "commercialTerms": {
+                            "testPeriodDays": 15,
+                            "testQuotaKb": 2097152,
+                            "testExpiryCondition": "PERIOD_OR_QUOTA",
+                            "testExpiryAction": "ACTIVATED",
+                            "commitmentPeriodMonths": 6
+                          },
+                          "controlPolicy": {
+                            "enabled": true,
+                            "cutoffPolicyId": "11111111-1111-1111-1111-111111111111",
+                            "throttlingPolicyId": "22222222-2222-2222-2222-222222222222",
+                            "cutoffThresholdMb": 1024
+                          },
+                          "carrierServiceConfig": {
+                            "supplierId": "33333333-3333-3333-3333-333333333333",
+                            "operatorId": "55555555-5555-5555-5555-555555555555",
+                            "rat": "4G",
+                            "apn": "iot",
+                            "roamingProfile": {
+                              "allowedMccMnc": [
+                                "460-00",
+                                "460-*"
+                              ]
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
                 }
               }
             }
@@ -10903,6 +13926,24 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/PackageCreateRequest"
+              },
+              "examples": {
+                "explicitFourModules": {
+                  "value": {
+                    "name": "企业物联网标准包",
+                    "description": "含资费、运营商业务、商业条款、控制策略",
+                    "pricePlanVersionId": "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
+                    "carrierServiceId": "4f4f4f4f-4f4f-4f4f-8f4f-4f4f4f4f4f4f",
+                    "controlPolicyId": "7f7f7f7f-7f7f-4f7f-8f7f-7f7f7f7f7f7f",
+                    "commercialTermsId": "3f3f3f3f-3f3f-4f3f-8f3f-3f3f3f3f3f3f"
+                  }
+                },
+                "indexFromPricePlanMeta": {
+                  "value": {
+                    "name": "企业物联网简化包",
+                    "pricePlanVersionId": "8f8f8f8f-8f8f-4f8f-8f8f-8f8f8f8f8f8f"
+                  }
+                }
               }
             }
           }
@@ -10914,6 +13955,17 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PackageCreateResponse"
+                },
+                "examples": {
+                  "created": {
+                    "value": {
+                      "packageId": "a1a1a1a1-a1a1-4fa1-8fa1-a1a1a1a1a1a1",
+                      "packageVersionId": "b1b1b1b1-b1b1-4fb1-8fb1-b1b1b1b1b1b1",
+                      "version": 1,
+                      "status": "DRAFT",
+                      "createdAt": "2026-03-10T09:00:00Z"
+                    }
+                  }
                 }
               }
             }
@@ -10995,6 +14047,55 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PackageDetailResponse"
+                },
+                "examples": {
+                  "detailWithFourModules": {
+                    "value": {
+                      "packageId": "a1a1a1a1-a1a1-4fa1-8fa1-a1a1a1a1a1a1",
+                      "enterpriseId": "c1c1c1c1-c1c1-4fc1-8fc1-c1c1c1c1c1c1",
+                      "name": "企业物联网标准包",
+                      "createdAt": "2026-03-10T09:00:00Z",
+                      "currentVersion": {
+                        "packageVersionId": "b1b1b1b1-b1b1-4fb1-8fb1-b1b1b1b1b1b1",
+                        "version": 1,
+                        "status": "DRAFT",
+                        "effectiveFrom": null,
+                        "supplierId": "1f1f1f1f-1f1f-4f1f-8f1f-1f1f1f1f1f1f",
+                        "operatorId": "2f2f2f2f-2f2f-4f2f-8f2f-2f2f2f2f2f2f",
+                        "carrierId": "2f2f2f2f-2f2f-4f2f-8f2f-2f2f2f2f2f2f",
+                        "serviceType": "DATA",
+                        "apn": "iot.enterprise",
+                        "roamingProfile": {
+                          "rat": "4G",
+                          "profileVersionId": "4f4f4f4f-4f4f-4f4f-8f4f-4f4f4f4f4f4f",
+                          "apnProfileVersionId": "3f3f3f3f-3f3f-4f3f-8f3f-3f3f3f3f3f3f"
+                        },
+                        "carrierServiceConfig": {
+                          "supplierId": "1f1f1f1f-1f1f-4f1f-8f1f-1f1f1f1f1f1f",
+                          "operatorId": "2f2f2f2f-2f2f-4f2f-8f2f-2f2f2f2f2f2f",
+                          "rat": "4G",
+                          "apn": "iot.enterprise",
+                          "apnProfileVersionId": "3f3f3f3f-3f3f-4f3f-8f3f-3f3f3f3f3f3f",
+                          "roamingProfileVersionId": "4f4f4f4f-4f4f-4f4f-8f4f-4f4f4f4f4f4f"
+                        },
+                        "controlPolicy": {
+                          "enabled": true,
+                          "cutoffPolicyId": "6f6f6f6f-6f6f-4f6f-8f6f-6f6f6f6f6f6f",
+                          "throttlingPolicyId": "7f7f7f7f-7f7f-4f7f-8f7f-7f7f7f7f7f7f",
+                          "cutoffThresholdMb": 10240
+                        },
+                        "commercialTerms": {
+                          "testPeriodDays": 30,
+                          "testQuotaKb": 524288,
+                          "testExpiryCondition": "PERIOD_OR_QUOTA",
+                          "testExpiryAction": "DEACTIVATED",
+                          "commitmentPeriodMonths": 12
+                        },
+                        "pricePlanVersionId": "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
+                        "createdAt": "2026-03-10T09:00:00Z"
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -11022,6 +14123,16 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/PackageUpdateRequest"
+              },
+              "examples": {
+                "updateFourModules": {
+                  "value": {
+                    "name": "企业物联网标准包-更新",
+                    "carrierServiceId": "9f9f9f9f-9f9f-4f9f-8f9f-9f9f9f9f9f9f",
+                    "controlPolicyId": "8f8f8f8f-8f8f-4f8f-8f8f-8f8f8f8f8f8f",
+                    "commercialTermsId": "6f6f6f6f-6f6f-4f6f-8f6f-6f6f6f6f6f6f"
+                  }
+                }
               }
             }
           }
@@ -11033,6 +14144,15 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PackageUpdateResponse"
+                },
+                "examples": {
+                  "updated": {
+                    "value": {
+                      "packageVersionId": "b1b1b1b1-b1b1-4fb1-8fb1-b1b1b1b1b1b1",
+                      "version": 1,
+                      "status": "DRAFT"
+                    }
+                  }
                 }
               }
             }
@@ -11063,6 +14183,610 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PackagePublishResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/commercial-terms": {
+      "post": {
+        "tags": [
+          "CommercialTerms"
+        ],
+        "summary": "Create Commercial Terms Module",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommercialTermsCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Commercial terms module created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommercialTermsModuleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/commercial-terms/{commercialTermsId}": {
+      "get": {
+        "tags": [
+          "CommercialTerms"
+        ],
+        "summary": "Get Commercial Terms Module",
+        "parameters": [
+          {
+            "name": "commercialTermsId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Commercial terms module detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommercialTermsModuleResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Commercial terms not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "CommercialTerms"
+        ],
+        "summary": "Update Commercial Terms Module",
+        "parameters": [
+          {
+            "name": "commercialTermsId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommercialTermsUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Commercial terms module updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommercialTermsModuleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Commercial terms not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/commercial-terms:validate": {
+      "post": {
+        "tags": [
+          "CommercialTerms"
+        ],
+        "summary": "Validate Commercial Terms Module",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommercialTermsValidateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Commercial terms validated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommercialTermsValidateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid commercial terms",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/control-policies": {
+      "post": {
+        "tags": [
+          "ControlPolicy"
+        ],
+        "summary": "Create Control Policy Module",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ControlPolicyCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Control policy module created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlPolicyModuleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/control-policies/{controlPolicyId}": {
+      "get": {
+        "tags": [
+          "ControlPolicy"
+        ],
+        "summary": "Get Control Policy Module",
+        "parameters": [
+          {
+            "name": "controlPolicyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Control policy module detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlPolicyModuleResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Control policy not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "ControlPolicy"
+        ],
+        "summary": "Update Control Policy Module",
+        "parameters": [
+          {
+            "name": "controlPolicyId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ControlPolicyUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Control policy module updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlPolicyModuleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Control policy not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/control-policies:validate": {
+      "post": {
+        "tags": [
+          "ControlPolicy"
+        ],
+        "summary": "Validate Control Policy Module",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ControlPolicyValidateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Control policy validated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlPolicyValidateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid control policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/carrier-services": {
+      "get": {
+        "tags": [
+          "CarrierService"
+        ],
+        "operationId": "listCarrierServicesByProfileRefs",
+        "summary": "Reverse Lookup Carrier Services",
+        "description": "Reverse lookup carrier services by APN profile or roaming profile id.",
+        "parameters": [
+          {
+            "name": "apnProfileId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Reverse lookup by APN profile id."
+          },
+          {
+            "name": "roamingProfileId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Reverse lookup by roaming profile id."
+          },
+          {
+            "name": "enterpriseId",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Enterprise scope filter, required for reseller role."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Filter by carrier service status."
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reverse lookup carrier services",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CarrierServiceListResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "CarrierService"
+        ],
+        "summary": "Create Carrier Service Module",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CarrierServiceCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Carrier service module created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CarrierServiceModuleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/carrier-services/{carrierServiceId}": {
+      "get": {
+        "tags": [
+          "CarrierService"
+        ],
+        "summary": "Get Carrier Service Module",
+        "parameters": [
+          {
+            "name": "carrierServiceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Carrier service module detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CarrierServiceModuleResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Carrier service not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "CarrierService"
+        ],
+        "summary": "Update Carrier Service Module",
+        "parameters": [
+          {
+            "name": "carrierServiceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CarrierServiceUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Carrier service module updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CarrierServiceModuleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Carrier service not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/carrier-services:validate": {
+      "post": {
+        "tags": [
+          "CarrierService"
+        ],
+        "summary": "Validate Carrier Service Module",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CarrierServiceValidateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Carrier service validated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CarrierServiceValidateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid carrier service module",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -11108,13 +14832,15 @@
           {
             "name": "supplierId",
             "in": "query",
+            "description": "supplierId 和 operatorId 至少提供一个",
             "schema": {
               "type": "string"
             }
           },
           {
-            "name": "carrierId",
+            "name": "operatorId",
             "in": "query",
+            "description": "supplierId 和 operatorId 至少提供一个",
             "schema": {
               "type": "string"
             }
@@ -11153,6 +14879,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "supplierId 和 operatorId 不能同时为空"
           }
         }
       }
@@ -11163,6 +14892,7 @@
           "NetworkProfiles"
         ],
         "summary": "Create Roaming Profile",
+        "description": "mccmncList 支持 mcc+mnc 精确匹配与 mcc-* 通配；不校验拜访地运营商是否在 business_operators/operators。",
         "requestBody": {
           "required": true,
           "content": {
@@ -11183,6 +14913,34 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "请求参数错误（如 mcc 为空、mnc 格式非法、ratePerKb 非法）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "BAD_REQUEST",
+                  "message": "Invalid mcc/mnc value: -00"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "mccmncList 冲突（同一版本内重复 mcc+mnc 或重复 mcc-*）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "CONFLICT",
+                  "message": "Duplicate mcc/mnc combination: 460-00"
+                }
+              }
+            }
           }
         }
       },
@@ -11195,13 +14953,15 @@
           {
             "name": "supplierId",
             "in": "query",
+            "description": "supplierId 和 operatorId 至少提供一个",
             "schema": {
               "type": "string"
             }
           },
           {
-            "name": "carrierId",
+            "name": "operatorId",
             "in": "query",
+            "description": "supplierId 和 operatorId 至少提供一个",
             "schema": {
               "type": "string"
             }
@@ -11240,6 +15000,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "supplierId 和 operatorId 不能同时为空"
           }
         }
       }
@@ -11304,86 +15067,6 @@
         }
       }
     },
-    "/apn-profiles/{apnProfileId}/versions": {
-      "post": {
-        "tags": [
-          "NetworkProfiles"
-        ],
-        "summary": "Create APN Profile Version",
-        "parameters": [
-          {
-            "name": "apnProfileId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ApnProfileVersionCreateRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "APN profile version created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProfileVersionCreateResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/roaming-profiles/{roamingProfileId}/versions": {
-      "post": {
-        "tags": [
-          "NetworkProfiles"
-        ],
-        "summary": "Create Roaming Profile Version",
-        "parameters": [
-          {
-            "name": "roamingProfileId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RoamingProfileVersionCreateRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Roaming profile version created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProfileVersionCreateResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/apn-profiles/{apnProfileId}:publish": {
       "post": {
         "tags": [
@@ -11440,33 +15123,17 @@
                 }
               }
             }
-          }
-        }
-      }
-    },
-    "/profile-versions/{profileVersionId}:rollback": {
-      "post": {
-        "tags": [
-          "NetworkProfiles"
-        ],
-        "summary": "Rollback Scheduled Profile Version",
-        "parameters": [
-          {
-            "name": "profileVersionId",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Profile version rollback completed",
+          },
+          "409": {
+            "description": "版本状态冲突（仅 DRAFT 版本可发布）",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProfileRollbackResponse"
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "code": "INVALID_STATUS",
+                  "message": "Only DRAFT version can be published."
                 }
               }
             }

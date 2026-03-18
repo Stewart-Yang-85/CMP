@@ -60,14 +60,14 @@
 ### 4. Pricing & Billing (§3)
 - [x] 权威源（SIM 状态/用量/话单以上游 CMP 为准）
 - [x] 仅实现资费_企业，不实现资费_运营商
-- [x] 4 种资费计划类型（One-time / SIM Dependent Bundle / Fixed Bundle / Tiered Volume Pricing）
+- [x] 4 种资费计划类型（One-time / SIM Dependent Bundle / Fixed Bundle / Tiered Pricing）
 - [x] 通用规则（金额精度/流量单位KB/生效时间/业务类型/计费周期）
 - [x] 通用字段（serviceType/currency/billingCycleType/firstCycleProration/prorationRounding）
 - [x] 分摊算法（DAILY_PRORATION: perDayFee/activeDays/chargedMonthlyFee）
 - [x] One-time 规则（oneTimeFee/quotaKb/validityDays/expiryBoundary）
 - [x] SIM Dependent Bundle 规则（monthlyFee/deactivatedMonthlyFee/perSimQuotaKb/overageRatePerKb）
 - [x] Fixed Bundle 规则（monthlyFee/deactivatedMonthlyFee/totalQuotaKb/overageRatePerKb）
-- [x] Tiered Volume Pricing 规则（monthlyFee/deactivatedMonthlyFee/tiers[]）
+- [x] Tiered Pricing 规则（monthlyFee/deactivatedMonthlyFee/tiers[]）
 - [x] 分段累进（Progressive）计费公式
 - [x] Zone-based PAYG Rates（paygRates[]/zoneCode/countries/ratePerKb）
 - [x] PAYG 匹配优先级（MCC+MNC > MCC 通配）

@@ -249,7 +249,7 @@ export async function runReconciliation({ supabase, runId, supplierId, date, sco
       filters.push(`upstream_status_updated_at=lt.${encodeURIComponent(range.endIso)}`)
     }
   }
-  const qs = `select=sim_id,iccid,status,activation_date,upstream_status,upstream_status_updated_at,enterprise_id,supplier_id,carrier_id&${filters.join('&')}&limit=100000`
+  const qs = `select=sim_id,iccid,status,activation_date,upstream_status,upstream_status_updated_at,enterprise_id,supplier_id,operator_id&${filters.join('&')}&limit=100000`
   const sims = await supabase.select('sims', qs)
   const list = Array.isArray(sims) ? sims : []
   totalChecked = list.length
@@ -282,7 +282,8 @@ export async function runReconciliation({ supabase, runId, supplierId, date, sco
       simId: sim.sim_id ?? null,
       enterpriseId: sim.enterprise_id ?? null,
       supplierId: sim.supplier_id ?? null,
-      carrierId: sim.carrier_id ?? null,
+      operatorId: sim.operator_id ?? null,
+      carrierId: sim.operator_id ?? null,
       field: 'status',
       localValue: localStatus,
       upstreamValue: upstreamStatus,
@@ -423,7 +424,7 @@ export async function getReconciliationMismatchTrace({ supabase, runId, iccid })
   const mismatch = mismatchDetails.find((it) => String((it || {}).iccid || '') === iccidValue) ?? null
   const simRows = await supabase.select(
     'sims',
-    `select=sim_id,iccid,status,upstream_status,upstream_status_updated_at,enterprise_id,department_id,supplier_id,carrier_id&iccid=eq.${encodeURIComponent(iccidValue)}&limit=1`
+    `select=sim_id,iccid,status,upstream_status,upstream_status_updated_at,enterprise_id,department_id,supplier_id,operator_id&iccid=eq.${encodeURIComponent(iccidValue)}&limit=1`
   )
   const sim = Array.isArray(simRows) ? simRows[0] : null
   const simId = sim?.sim_id ? String(sim.sim_id) : null
@@ -500,7 +501,8 @@ export async function getReconciliationMismatchTrace({ supabase, runId, iccid })
             enterpriseId: sim.enterprise_id ?? null,
             departmentId: sim.department_id ?? null,
             supplierId: sim.supplier_id ?? null,
-            carrierId: sim.carrier_id ?? null,
+            operatorId: sim.operator_id ?? null,
+            carrierId: sim.operator_id ?? null,
           }
         : null,
       simStateHistory,

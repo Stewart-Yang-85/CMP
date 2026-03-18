@@ -107,6 +107,17 @@ CREATE TABLE IF NOT EXISTS user_roles (
   PRIMARY KEY (user_id, role_name)
 );
 
+CREATE TABLE IF NOT EXISTS enterprise_user_departments (
+  user_id UUID NOT NULL REFERENCES users(user_id),
+  enterprise_id UUID NOT NULL REFERENCES tenants(tenant_id),
+  department_id UUID NOT NULL REFERENCES tenants(tenant_id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, department_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_enterprise_user_departments_enterprise ON enterprise_user_departments(enterprise_id);
+CREATE INDEX IF NOT EXISTS idx_enterprise_user_departments_department ON enterprise_user_departments(department_id);
+
 CREATE TABLE IF NOT EXISTS audit_logs (
   audit_id BIGSERIAL PRIMARY KEY,
   actor_user_id UUID,

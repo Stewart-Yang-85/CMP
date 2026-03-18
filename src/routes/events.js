@@ -84,7 +84,7 @@ async function resolveTenantIds({ req, res, deps, supabase, scope }) {
       }
       return await loadEnterpriseIdsForReseller(supabase, resellerId)
     }
-    return null
+    return []
   }
   if (scope.scope === 'reseller') {
     if (enterpriseId) {
@@ -117,7 +117,7 @@ export function registerEventRoutes({ app, prefix, deps }) {
     if (!scope) return
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const tenantIds = await resolveTenantIds({ req, res, deps, supabase, scope })
-    if (tenantIds === null && scope.scope !== 'platform') return
+    if (tenantIds === null) return
     const query = req.query ?? {}
     const eventType = query.eventType ? String(query.eventType).trim().toUpperCase() : null
     const fromIso = toIsoDateTime(query.from)

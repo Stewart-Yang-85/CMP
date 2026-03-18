@@ -137,15 +137,22 @@ POST /v1/sims
 ### 3.1 查询 SIM 列表
 
 ```
-GET /v1/sims?enterpriseId={}&status={}&supplierId={}&operatorId={}&iccid={}&page={}&pageSize={}
+GET /v1/sims?enterpriseId={}&resellerId={}&status={}&supplierId={}&operatorId={}&iccid={}&page={}&pageSize={}
 ```
 
-**权限**: 按租户范围隔离
+**权限**: 系统管理员 | 代理商（企业用户不使用该接口）
+
+**说明**:
+- 对系统管理员与代理商而言，enterpriseId 为可选参数。未提供时返回其权限范围内所有 SIM（包含未分配企业的库存）。
+- 系统管理员可使用 resellerId 过滤指定代理商范围；代理商用户忽略 resellerId 参数。
+- departmentId 仅在指定 enterpriseId 时生效。
+- 返回结果包含 eSIM Profile 信息（activationCode）。
 
 **Query Parameters**:
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | enterpriseId | uuid | 否 | 企业筛选 |
+| resellerId | uuid | 否 | 代理商筛选（仅系统管理员） |
 | departmentId | uuid | 否 | 部门筛选 |
 | status | string | 否 | SIM 状态筛选 |
 | supplierId | uuid | 否 | 供应商筛选 |
@@ -168,12 +175,14 @@ GET /v1/sims?enterpriseId={}&status={}&supplierId={}&operatorId={}&iccid={}&page
       "upstreamStatus": "string",
       "upstreamStatusUpdatedAt": "2026-02-08T10:00:00Z",
       "formFactor": "consumer_removable",
+      "activationCode": "LPA:1$sm.example.com$1234567890",
       "supplierId": "uuid",
       "supplierName": "string",
       "operatorId": "uuid",
       "operatorName": "string",
       "mcc": "460",
       "mnc": "00",
+      "resellerId": "uuid",
       "enterpriseId": "uuid",
       "enterpriseName": "string",
       "departmentId": "uuid",
@@ -188,6 +197,48 @@ GET /v1/sims?enterpriseId={}&status={}&supplierId={}&operatorId={}&iccid={}&page
   "pageSize": 20
 }
 ```
+
+### 3.1.1 企业范围 SIM 列表
+
+```
+GET /v1/enterprises/{enterpriseId}/sims?departmentId={}&status={}&supplierId={}&operatorId={}&iccid={}&page={}&pageSize={}
+```
+
+**权限**: 企业用户 | 代理商 | 系统管理员
+
+**说明**:
+- 企业用户仅可访问自身 enterpriseId。
+- departmentId 在企业范围内生效。
+- 返回结果不包含 resellerId。
+
+**Query Parameters**: 同 3.1
+
+### 3.1.2 SIM 列表 CSV 导出（代理商/管理员）
+
+```
+GET /v1/sims:csv?enterpriseId={}&resellerId={}&departmentId={}&status={}&iccid={}&msisdn={}&page={}&limit={}
+```
+
+**权限**: 系统管理员 | 代理商（企业用户不使用该接口）
+
+**说明**:
+- enterpriseId 为可选参数。未提供时导出其权限范围内所有 SIM（包含未分配企业的库存）。
+- departmentId 仅在指定 enterpriseId 时生效。
+- 系统管理员可使用 resellerId 过滤指定代理商范围；代理商用户忽略 resellerId 参数。
+- 导出字段包含 activationCode（eSIM Profile），且在 enterpriseId 前增加 resellerId 字段。
+
+### 3.1.3 企业范围 SIM CSV 导出
+
+```
+GET /v1/enterprises/{enterpriseId}/sims:csv?departmentId={}&status={}&iccid={}&msisdn={}&page={}&limit={}
+```
+
+**权限**: 企业用户 | 代理商 | 系统管理员
+
+**说明**:
+- 企业用户仅可访问自身 enterpriseId。
+- departmentId 在企业范围内生效。
+- 导出字段包含 activationCode（eSIM Profile），不包含 resellerId。
 
 ### 3.2 查询 SIM 详情
 
@@ -344,6 +395,66 @@ POST /v1/sims:batch-deactivate
   "enterpriseId": "uuid",
   "affectedSimCount": 1500,
   "status": "QUEUED"
+}
+```
+
+### 5.2 批量状态变更（按 SIM 清单）
+
+```
+POST /v1/sims:batch-status-change
+```
+
+**权限**: 平台管理员 | 代理商 | 企业用户 | 部门用户（仅本企业范围）
+
+**Request Body**:
+```json
+{
+  "action": "ACTIVATE | DEACTIVATE | REACTIVATE | RETIRE",
+  "simIds": ["iccid-or-simId"],
+  "enterpriseId": "uuid (optional)",
+  "reason": "string (optional, RETIRE/DEACTIVATE required)",
+  "confirm": true,
+  "commitmentExempt": false
+}
+```
+
+**Response 200/207**:
+```json
+{
+  "action": "RETIRE",
+  "targetStatus": "RETIRED",
+  "total": 4,
+  "succeeded": 1,
+  "failed": 3,
+  "idempotent": 0,
+  "items": [
+    {
+      "simId": "uuid",
+      "iccid": "8986...",
+      "ok": true,
+      "beforeStatus": "DEACTIVATED",
+      "afterStatus": "RETIRED"
+    },
+    {
+      "input": "8986...",
+      "ok": false,
+      "errorCode": "COMMITMENT_NOT_MET",
+      "errorMessage": "Retire blocked until 2026-08-01T00:00:00.000Z."
+    },
+    {
+      "input": "bad-id",
+      "ok": false,
+      "errorCode": "INVALID_SIM_ID",
+      "errorMessage": "simId must be a valid uuid or 18-20 digit iccid."
+    },
+    {
+      "simId": "uuid",
+      "iccid": "8986...",
+      "ok": false,
+      "errorCode": "INVALID_STATE",
+      "errorMessage": "sim status ACTIVATED cannot transition to RETIRED."
+    }
+  ]
 }
 ```
 

@@ -157,10 +157,23 @@ async function main() {
       })
       const accessToken = String(tokenResp?.accessToken || '')
       const c = createSupabaseRestClient({ useServiceRole: true })
-      const simRows = await c.select('sims', `select=sim_id,enterprise_id,supplier_id,carrier_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
+      const simRows = await c.select('sims', `select=sim_id,enterprise_id,supplier_id,carrier_id,operator_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
       const sim = Array.isArray(simRows) ? simRows[0] : null
       if (sim) {
         const entId = sim.enterprise_id || getEnv('AUTH_ENTERPRISE_ID')
+        let operatorId = sim.operator_id
+        if (!operatorId && sim.supplier_id && sim.carrier_id) {
+          const opRows = await c.select(
+            'operators',
+            `select=operator_id&supplier_id=eq.${encodeURIComponent(sim.supplier_id)}&carrier_id=eq.${encodeURIComponent(sim.carrier_id)}&limit=1`
+          )
+          if (Array.isArray(opRows) && opRows[0]?.operator_id) {
+            operatorId = opRows[0].operator_id
+          } else {
+            const createdOps = await c.insert('operators', { supplier_id: sim.supplier_id, carrier_id: sim.carrier_id })
+            operatorId = Array.isArray(createdOps) ? createdOps[0]?.operator_id : null
+          }
+        }
         const planRows = await c.insert('price_plans', {
           enterprise_id: entId,
           name: `wx-${Date.now()}`,
@@ -190,6 +203,7 @@ async function main() {
           status: 'PUBLISHED',
           supplier_id: sim.supplier_id,
           carrier_id: sim.carrier_id,
+          operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: terms1,
           price_plan_version_id: ppvId,
@@ -202,6 +216,7 @@ async function main() {
           status: 'PUBLISHED',
           supplier_id: sim.supplier_id,
           carrier_id: sim.carrier_id,
+          operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: terms2,
           price_plan_version_id: ppvId,

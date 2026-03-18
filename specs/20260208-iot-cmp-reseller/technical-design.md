@@ -32,7 +32,7 @@ graph LR
 
 1. **多租户转售体系**: 构建供应商→代理商→企业→部门四级组织层级，RBAC 权限隔离，白标能力
 2. **SIM 全生命周期**: 5 状态机管理（INVENTORY→TEST_READY→ACTIVATED→DEACTIVATED→RETIRED），批量导入、上游同步
-3. **产品包与资费**: 4 种资费计划类型（One-time/SIM Dependent Bundle/Fixed Bundle/Tiered Volume），Zone-based PAYG
+3. **产品包与资费**: 产品包四模块（Price Plan / Carrier Service / Commercial Terms / Control Policy），其中 Price Plan 支持 4 种类型（One-time/SIM Dependent Bundle/Fixed Bundle/Tiered Volume）
 4. **计费闭环**: 高水位月租费、Waterfall 用量匹配、分段累进、三级账单、自动出账、调账
 5. **信控催收**: Dunning 时间轴（逾期→宽限→暂停→阻断），不自动变更企业状态，复机为手工操作
 6. **集成可观测**: 多供应商虚拟化层（SPI）、上游对账、告警去重、Webhook（HMAC-SHA256）、统一事件架构
@@ -51,6 +51,7 @@ graph LR
 | | SIM 上游同步双向对齐 | 增强 | vendor adapter |
 | 产品包与资费（US3） | 资费计划 CRUD + 版本化 | 新增 | price_plans, price_plan_versions |
 | | 产品包 CRUD + 发布流程 | 新增 | packages, package_versions |
+| | 产品包四模块编排（资费/运营商业务/商业条款/控制策略） | 新增 | package_versions, profile_versions |
 | | PAYG 冲突校验 | 新增 | 发布阶段校验逻辑 |
 | 订阅管理（US4） | 订阅创建/切换/退订 | 新增 | subscriptions |
 | | 主套餐互斥校验 | 新增 | 业务规则层 |

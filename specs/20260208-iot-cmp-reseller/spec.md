@@ -34,7 +34,9 @@
 - `resellers` 表：id（系统生成，唯一）、name（非空且全局唯一）、status（ACTIVE/DEACTIVATED/SUSPENDED，默认 ACTIVE）、contact_email、contact_phone、created_by、created_at、updated_at。created_by 保留审计引用（用户被删除不影响记录）。
 - `customers` 表：id、reseller_id (FK)、name、status (active/overdue/terminated)、api_key (UNIQUE)、api_secret_hash (BYTEA)、webhook_url、created_by、created_at、updated_at。UNIQUE(reseller_id, name)。terminated 为终态。
 - `suppliers` 表：id（系统生成，唯一）、name（非空且全局唯一）、status（ACTIVE/SUSPENDED，默认 ACTIVE）、created_by、created_at、updated_at。created_by 保留审计引用（用户被删除不影响记录）。
-- `operators` 表：id、name、mcc (CHAR(3))、mnc (VARCHAR(3))、apn_default、roaming_profile_id、status (active/deprecated/error)、replaced_by_id、deprecation_reason、created_by、created_at、updated_at。UNIQUE(mcc, mnc)。引用中的运营商不可直接删除/修改 MCC/MNC，需 deprecate + 创建新纪录。
+- `public_infos` 表：公共信息目录（E.212 MCC+MNC + 国家/频段），用于公共参考与兜底，不参与业务逻辑。
+- `business_operators` 表：业务运营商字典（operator_id、mcc、mnc、name），业务侧查询与过滤使用，不与公共目录强绑定。
+- `operators` 表：供应商-运营商关联（supplier_id + operator_id 唯一），承载供应商可用运营商范围，业务逻辑使用 operator_id。
 
 **RBAC 三表模型**（CMP.xlsx 对齐）：
 - `permissions` 表：id、code (UNIQUE)、name、description、category。38+ 权限码覆盖 8 个模块（商业实体、用户管理、SIM 库存、SIM 生命周期、产品包、订阅、使用量、监控告警）。
@@ -74,7 +76,9 @@
 
 **上游主数据**：
 - 供应商：UUID ID、名称、关联运营商（多对多）、禁止创建未关联运营商的供应商、加密存储、变更留痕
-- 运营商：E.212 标准（MCC+MNC），GSMA 分配表校验（允许管理员紧急覆写+审计）
+- 业务运营商：`business_operators`（E.212 MCC+MNC + name），业务侧主数据，不依赖公共目录
+- 公共信息目录（public infos）：`public_infos`，系统管理员维护，字段包含国家（英文）、运营商名称（英文）、MCC、MNC、4G/LTE 频段；用于 SIM 归属兜底与能力校验
+- 查询能力：支持按国家精确查询、按 MCC 查询、按 MCC+MNC 组合查询、按运营商名称模糊匹配查询
 
 **供应商商业模式与业务规则**：
 - 商业模式 a：当供应商即运营商 CMP 时，体系仍显式创建供应商（该运营商）与运营商实体，关系保持一致（UNIQUE(mcc, mnc) 与多对多）
@@ -263,7 +267,23 @@
 
 ### User Story 3 - 产品包与资费计划配置 (Priority: P1)
 
-系统支持 4 种资费计划类型，由代理商管理员为企业定制产品包。
+系统由代理商管理员为企业定制产品包；每个产品包版本由 4 个模块组成：资费计划（Price Plan）、运营商业务、商业条款、控制策略。
+
+**产品包模块组成**：
+1. **资费计划（Price Plan）**：四选一（One-time / SIM Dependent Bundle / Fixed Bundle / Tiered Pricing）
+2. **运营商业务（Carrier Service）**：供应商/运营商、RAT、APN/APN Profile、Roaming Profile
+3. **商业条款（Commercial Terms）**：测试期、测试配额、测试到期条件、测试到期动作、承诺期
+4. **控制策略（Control Policy）**：开关、达量断网、达量限速
+
+**模块管理域归类（MVP）**：
+- **Network Profiles 域**：APN Profile、Roaming Profile、Carrier Service、Control Policy
+- **Price Plans 域**：Price Plan、Commercial Terms
+- Carrier Service、Control Policy、Commercial Terms 均提供独立管理能力（至少包含创建、更新、查询）
+- 快照机制适配结论：
+  - APN Profile、Roaming Profile、Control Policy、Price Plan 均可采用“不可变快照 + 新 ID”机制
+  - 对已存在对象的编辑不做原地覆盖，统一创建新快照 ID；原对象保持不变
+  - 仅 `PUBLISHED` 快照可被产品包引用；`DRAFT` 快照用于编辑
+  - 快照列表统一支持按“名称 + 发布时间 + 状态”展示，其中名称允许重复
 
 **资费计划类型**：
 1. **One-time（一次性）**：购买即收，含额度与有效时长，到期边界支持 CALENDAR_DAY_END / DURATION_EXCLUSIVE_END，取消不退款
@@ -298,25 +318,39 @@
 - 匹配优先级：MCC+MNC 精确 > MCC 通配
 - 冲突处理：同级冲突视为配置错误，发布校验阶段阻断
 - 缺省行为：未配置则默认阻断（直接停机/断网，不产生费用）
+- Price Plan 快照规则：
+  - 对 Price Plan 的编辑始终生成新的 `pricePlanId`（快照 ID），来源链路通过 `sourcePricePlanId` 追溯
+  - 新快照状态默认 `DRAFT`，发布后转 `PUBLISHED`
+  - 产品包引用 `pricePlanId`（快照 ID），不再使用内部 `version`
 
 **运营商业务（Carrier Service）**：
 - RAT：3G/4G/5G/NB-IoT（缺省 4G）
 - 业务类型：Data/Voice/SMS（缺省 Data）
-- Roaming Profile：MCC+MNC 列表
-- APN：运营商 APN 目录，需验证供应商支持
+- Roaming Profile：按 `roamingProfileId`（快照 ID）索引；用于计费兜底，当产品包的 Price Plan 未覆盖 SIM 拜访地时按该 Profile 定价
+- Roaming Profile 最小字段：mcc、mnc、ratePerKb（如 0.000004 USD/KB）
+- APN：运营商 APN 
 - MVP：每个 Data 产品包绑定 1 个默认 APN + 1 个 Roaming Profile
 - APN/Roaming Profile 变更次月生效
 - 数据模型：
-  - `apn_profiles`：id, name, apn, auth_type, username, password_ref, supplier_id, operator_id, status(active/deprecated)
-  - `roaming_profiles`：id, name, mccmnc_list, supplier_id, operator_id, status(active/deprecated)
+  - `apn_profiles`：id, name, apn, auth_type, username, password_ref, reseller_id, supplier_id, operator_id, status(draft/published/deprecated), published_at, source_apn_profile_id
+  - `roaming_profiles`：id, name, reseller_id, supplier_id, operator_id, status(draft/published/deprecated), published_at, source_roaming_profile_id
+  - `roaming_profile_entries`：id, roaming_profile_id, mcc, mnc, rate_per_kb
   - `package_network_policies`：package_id, apn_profile_id, roaming_profile_id, effective_from, effective_to, status(active/scheduled/expired)
 - 校验来源：
   - APN 必须存在于上游供应商的可用目录或能力声明中
-  - Roaming Profile 的 MCC/MNC 必须在 operators 表中存在且与 supplier_id 关联
+  - Roaming Profile 的 `mccmncList` 仅做格式与冲突校验，不要求出现在 `business_operators/operators` 中
+  - `supplierId/operatorId` 仅用于 Profile 所有权归属校验，不用于限制漫游拜访地运营商列表
 - 变更与回滚：
-  - 变更创建新记录并设置 `effective_from` 为次月 1 日 00:00（系统时区）
-  - 若上游下发失败，保持当前生效版本不变并生成告警
-  - 支持在生效前撤销已排期变更，撤销后恢复上一个 active 版本
+  - 对已存在 APN Profile 的修改始终生成新的 `apnProfileId`（新快照），原 Profile 保持不变
+  - APN 快照发布后才可被产品包引用；历史已发布快照可继续被已有产品包使用
+  - 对已存在 Profile 的修改始终生成新的 `roamingProfileId`（新快照），原 Profile 保持不变
+  - 新快照发布后才可被产品包引用；历史已发布快照可继续被已有产品包使用
+  - 若上游下发失败，保持当前生效绑定不变并生成告警
+  - 支持在生效前撤销已排期绑定，撤销后恢复上一个 active 绑定
+- 反向关联查询（Web Portal 连接能力）：
+  - 允许以 `roamingProfileId` 反查已绑定该 Profile 的 Carrier Service 列表（用于从 Id1 迁移到 Id2 前的影响面识别）
+  - 允许以 `apnProfileId` 反查已绑定该 Profile 的 Carrier Service 列表
+  - 查询结果需返回 `carrierServiceId`、`supplierId`、`operatorId`、`status`、`effectiveFrom`，用于页面联动修改
 
 **商业条款（Commercial Terms）**：
 - Test Period（测试期）
@@ -327,10 +361,11 @@
 
 **控制策略（Control Policy）**：
 - on/off 开关
-- 达量断网策略表（Cutoff Policy）：ID、name、time_window（DAILY/MONTHLY）、thresholdMb、action=DEACTIVATED
-- 达量限速策略表（Throttling Policy）：ID、name、time_window（DAILY/MONTHLY）、tiers[thresholdMb, downlinkKbps, uplinkKbps]
+- 达量断网规则（Cutoff Rules）：time_window（DAILY/MONTHLY）、thresholdMb、action=DEACTIVATED
+- 达量限速规则（Throttling Rules）：time_window（DAILY/MONTHLY）、tiers[thresholdMb, downlinkKbps, uplinkKbps]
 - time_window 到期自动恢复至初始速度：DAILY 次日 00:00，MONTHLY 下月 1 日 00:00
-- 产品包引用 cutoffPolicyId 与 throttlingPolicyId
+- 控制策略编辑创建新 `controlPolicyId`（快照 ID），历史快照不变
+- 产品包引用 `controlPolicyId`（快照 ID）
 - 未引用任何 ID 表示无控制（不停机，不限速）
 - 删除保护：若被产品包引用，禁止物理删除（ON DELETE RESTRICT 或软删除）
 - 优先级：DEACTIVATED/RETIRED 时不下发限速；Cutoff 以状态迁移为准
@@ -348,10 +383,21 @@
 
 **Technical Implementation**:
 
-- 产品包必须绑定且仅绑定一个 Price Plan
+- 产品包版本由四个模块共同组成：Price Plan + Carrier Service + Commercial Terms + Control Policy
+- 产品包以 ID 索引四个模块：`pricePlanId`、`carrierServiceId`、`controlPolicyId`、`commercialTermsId`
 - 产品包变更次月生效
 - APN 来源：运营商 APN 目录，供应商支持验证
 - 停机保号费与月租费互斥
+- 反向引用查询能力：
+  - Network Profiles 域支持通过 `apnProfileId` / `roamingProfileId` 查询 Carrier Service
+  - Price Plans 域支持通过 `pricePlanId` / `commercialTermsId` / `controlPolicyId` 查询 Package
+  - 反查结果默认仅返回当前操作者租户可见范围，且可按 `status`（DRAFT/PUBLISHED）过滤
+
+- 模块创建依赖顺序：
+  1. 先创建 APN Profile、Roaming Profile
+  2. 再创建 Carrier Service（引用 APN Profile / Roaming Profile）
+  3. 再创建 Control Policy、Commercial Terms、Price Plan
+  4. 最后创建 Package（引用 Carrier Service / Control Policy / Commercial Terms / Price Plan）
 
 - 各类型字段表（仅列出差异字段）：
 
@@ -374,9 +420,82 @@
 | Tiered Pricing | `tiers[]` | 阶梯费率 | 按阈值升序；阈值单位 KB；费率单位 `currency/Kb` |
 
 - API 接口：
+  - `POST /v1/apn-profiles` 创建 APN Profile 草稿快照
+  - `POST /v1/apn-profiles:clone` 基于已有 APN Profile 快照创建新草稿快照（返回新 `apnProfileId`）
+  - `PUT /v1/apn-profiles/{id}` 仅允许更新 DRAFT 快照
+  - `POST /v1/apn-profiles/{id}:publish` 发布快照
+  - `GET /v1/apn-profiles` 列表查询（展示字段：名称 + 发布时间 + 状态；名称允许重复）
+  - `GET /v1/apn-profiles/{id}` 查询快照详情
+  - `POST /v1/roaming-profiles` 创建 Roaming Profile 草稿快照
+  - `POST /v1/roaming-profiles:clone` 基于已有 Profile 快照创建新草稿快照（返回新 `roamingProfileId`）
+  - `PUT /v1/roaming-profiles/{id}` 仅允许更新 DRAFT 快照（名称与 entries）
+  - `POST /v1/roaming-profiles/{id}:publish` 发布快照
+  - `GET /v1/roaming-profiles` 列表查询（展示字段：名称 + 发布时间 + 状态；名称允许重复）
+  - `GET /v1/roaming-profiles/{id}` 查询快照详情（含 entries）
+  - `POST /v1/carrier-services`、`PUT /v1/carrier-services/{id}` 管理 Carrier Service
+  - `GET /v1/carrier-services?roamingProfileId={id}` 按 Roaming Profile 快照反查 Carrier Service 列表
+  - `GET /v1/carrier-services?apnProfileId={id}` 按 APN Profile 快照反查 Carrier Service 列表
+  - `POST /v1/control-policies` 创建 Control Policy 草稿快照
+  - `POST /v1/control-policies:clone` 基于已有 Control Policy 快照创建新草稿快照（返回新 `controlPolicyId`）
+  - `PUT /v1/control-policies/{id}` 仅允许更新 DRAFT 快照
+  - `POST /v1/control-policies/{id}:publish` 发布快照
+  - `GET /v1/control-policies` 列表查询（展示字段：名称 + 发布时间 + 状态；名称允许重复）
+  - `GET /v1/control-policies/{id}` 查询快照详情
+  - `POST /v1/commercial-terms`、`PUT /v1/commercial-terms/{id}` 管理 Commercial Terms
+  - `POST /v1/price-plans` 创建 Price Plan 草稿快照
+  - `POST /v1/price-plans:clone` 基于已有 Price Plan 快照创建新草稿快照（返回新 `pricePlanId`）
+  - `PUT /v1/price-plans/{id}` 仅允许更新 DRAFT 快照
+  - `POST /v1/price-plans/{id}:publish` 发布快照
+  - `GET /v1/price-plans` 列表查询（展示字段：名称 + 发布时间 + 状态；名称允许重复）
+  - `GET /v1/price-plans/{id}` 查询快照详情
   - `POST /v1/enterprises/{enterpriseId}/packages` 创建产品包
+  - `GET /v1/packages?pricePlanId={id}` 按 Price Plan 快照反查产品包列表
+  - `GET /v1/packages?commercialTermsId={id}` 按 Commercial Terms 反查产品包列表
+  - `GET /v1/packages?controlPolicyId={id}` 按 Control Policy 快照反查产品包列表
   - `PUT /v1/packages/{packageId}` 修改产品包
   - `POST /v1/packages/{packageId}:publish` 发布
+
+- Roaming Profile 条文补充（speckit）：
+  - 字段规则：
+    - `name`：可重复，作为展示字段，不作为唯一键
+    - 列表展示固定包含：`name`、`publishedAt`、`status`
+    - `mcc`：3 位数字，必填
+    - `mnc`：2~3 位数字，或 `*`（表示该 MCC 下全部运营商）
+    - `ratePerKb`：必填，非负数
+    - `mcc` 为空时必须报错
+  - 冲突规则：
+    - 同一快照内，`mcc+mnc` 组合唯一；重复组合返回 `409 CONFLICT`
+    - 同一快照内，`mcc-*` 只能配置一条；重复配置返回 `409 CONFLICT`
+  - 不可变规则：
+    - `PUBLISHED` 快照不可修改（只读锁定）
+    - 对已存在 Profile 的编辑必须创建新 `roamingProfileId`（来源快照通过 `sourceRoamingProfileId` 追溯）
+    - 新快照默认 `DRAFT`，仅发布后可被产品包引用
+  - 操作流程（Web Portal）：
+    - 步骤1：用户在列表中选择已存在 Profile（可按名称、发布时间、状态识别）
+    - 步骤2：提交编辑内容后，后端创建新的 DRAFT 快照 ID，并复制来源快照 entries 后应用差异
+    - 步骤3：用户发布新快照，后续产品包可切换绑定到新 ID；旧快照保持不变
+  - 错误码：
+    - `BAD_REQUEST`：字段格式错误、必填缺失、`mcc` 为空
+    - `CONFLICT`：同一快照内出现重复 `mcc+mnc` 组合或重复 `mcc-*`
+    - `INVALID_STATUS`：对非 DRAFT 快照执行更新，或对非 DRAFT/非合法状态执行发布
+    - `RESOURCE_LOCKED`：目标快照已发布或已进入不可写状态，不允许修改 entries
+  - 示例请求（创建 Roaming Profile 草稿）：
+    - `{"name":"SEA roaming","resellerId":"<uuid>","supplierId":"<uuid>","operatorId":"<uuid>","mccmncList":[{"mcc":"460","mnc":"00","ratePerKb":0.0008},{"mcc":"460","mnc":"*","ratePerKb":0.0012}]}`
+  - 示例请求（克隆并编辑为新快照）：
+    - `{"sourceRoamingProfileId":"<uuid>","name":"SEA roaming","operations":[{"op":"UPSERT","mcc":"454","mnc":"12","ratePerKb":0.0015},{"op":"DELETE","mcc":"460","mnc":"00"}]}`
+
+- APN / Control Policy / Price Plan 快照条文补充（speckit）：
+  - APN Profile：
+    - `name` 可重复，列表展示 `name + publishedAt + status`
+    - `PUBLISHED` 快照不可修改；编辑必须创建新 `apnProfileId`
+  - Control Policy：
+    - `name` 可重复，列表展示 `name + publishedAt + status`
+    - `PUBLISHED` 快照不可修改；编辑必须创建新 `controlPolicyId`
+    - cutoff 与 throttling 规则作为快照内容一并固化
+  - Price Plan：
+    - `name` 可重复，列表展示 `name + publishedAt + status`
+    - `PUBLISHED` 快照不可修改；编辑必须创建新 `pricePlanId`
+    - 快照内固定 `type`（ONE_TIME/SIM_DEPENDENT_BUNDLE/FIXED_BUNDLE/TIERED_PRICING）与对应计费字段
 
 **Independent Test**: 可通过创建不同类型的产品包并验证字段校验规则来独立测试。
 
@@ -494,7 +613,7 @@
 **Fixed Bundle 计费**：
 - 固定总池额度，费用 = (activatedSimCount × monthlyFee) + (deactivatedSimCount × deactivatedMonthlyFee) + 套外费用
 
-**Tiered Volume Pricing 计费**（分段累进）：
+**Tiered Pricing 计费**（分段累进）：
 - 0≤U≤T1: U×R1
 - T1<U≤T2: T1×R1 + (U-T1)×R2
 - 以此类推
@@ -716,7 +835,7 @@
 - 配额耗尽监控：实时监听计费累计表，remaining ≤ 0 触发 P1 告警并停机，停机接口幂等，告警到停机延迟 < 30 秒
 - 超额使用量监控：按自然日累计单 SIM 用量；用量 > `sim.daily.usage`(默认 10GB) 触发 P2 告警并限速至 128kbps；支持全局或单卡白名单
 - Out of Profile 占比监控：实时流计算 SIM 漫游用量；占比 > `oop.ratio.threshold`(默认 10%) 触发 P3 告警，附 Top3 异常国家码；支持按产品/区域/漫游伙伴下钻并导出 CSV
-- 漫游异常监控：对比在线会话 MCC/MNC 与 Roaming Profile；拜访地不在 Profile 内触发 P2 告警并发送位置更新短信；支持 Profile 版本回溯
+- 漫游异常监控：对比在线会话 MCC/MNC 与 Roaming Profile；拜访地不在 Profile 内触发 P2 告警并发送位置更新短信；支持 Profile 快照回溯
 - 测试期到期监控：每日 08:00 触发到期告警(P1)并自动切换正式套餐；支持批量延期 API（最多 90 天）
 - 测试期配额耗尽监控：实时检测测试期累计用量耗尽，触发 P1 告警并停机，复用配额耗尽停机接口
 
@@ -935,7 +1054,7 @@
 
 **产品包与资费**：
 - **FR-015**: 系统 MUST 支持 4 种资费计划类型（One-time/SIM Dependent Bundle/Fixed Bundle/Tiered Pricing）
-- **FR-016**: 系统 MUST 产品包绑定且仅绑定一个 Price Plan
+- **FR-016**: 系统 MUST 产品包以 ID 绑定四模块（Price Plan、Carrier Service、Control Policy、Commercial Terms）
 - **FR-017**: 系统 MUST 产品包变更次月生效
 - **FR-018**: 系统 MUST 支持 Zone-based PAYG Rates 作为兜底费率
 - **FR-019**: 系统 MUST 支持控制策略（限速/达量断网）
@@ -973,8 +1092,8 @@
 - **FR-039**: 系统 MUST 实现统一事件目录（SIM_STATUS_CHANGED/SUBSCRIPTION_CHANGED/BILL_PUBLISHED/PAYMENT_CONFIRMED/ALERT_TRIGGERED/ENTERPRISE_STATUS_CHANGED）
 
 **实体建模（CMP.xlsx 对齐）**：
-- **FR-040**: 系统 MUST 使用独立表建模（resellers、customers、suppliers、operators），废弃通用 tenants 表
-- **FR-041**: 系统 MUST 维护 operators 表含 MCC/MNC 唯一约束，支持 deprecation 工作流（active/deprecated/error），引用中的运营商不可直接删除或修改 MCC/MNC
+- **FR-040**: 系统 MUST 使用独立表建模（resellers、customers、suppliers、business_operators、operators），废弃通用 tenants 表
+- **FR-041**: 系统 MUST 维护 business_operators 表用于业务运营商主数据；operators 维护 supplier_id + operator_id 关联与 operator_id 业务索引
 - **FR-042**: 系统 MUST 维护 upstream_integrations 表（supplier_id + operator_id 唯一约束），含 API 端点和加密凭证、CDR 配置
 
 **RBAC 权限（CMP.xlsx 对齐）**：
@@ -991,11 +1110,15 @@
 - **FR-049**: 系统 MUST 支持企业 API Key 认证（api_key + api_secret_hash），与 JWT 认证并行，用于 M2M 集成场景
 - **FR-050**: 系统 MUST 支持 SM-DP+ 系统配置（含 host_fqdn、oid、environment、status 与 eSIM 安全分发所需字段）
 - **FR-051**: 系统 MUST 支持 eSIM Profile 独立建模与状态管理（含 matching_id + eid 成对校验与 SM-DP+ 远程状态跟踪）
+- **FR-052**: 系统 MUST 在 Network Profiles 域提供 Carrier Service 与 Control Policy 的创建、更新、查询能力
+- **FR-053**: 系统 MUST 在 Price Plans 域提供 Commercial Terms 的创建、更新、查询能力
 
 ### Key Entities
 
 - **Supplier（供应商）**: 独立表 `suppliers`，上游 CMP 对接对象，UUID ID，name UNIQUE，status (active/suspended)
-- **Operator（运营商）**: 独立表 `operators`，E.212 标识（MCC+MNC UNIQUE），支持 deprecation 工作流（active/deprecated/error + replaced_by_id）
+- **Public Info（公共信息）**: 独立表 `public_infos`，公共信息目录，含 MCC/MNC、国家、频段  
+- **Business Operator（业务运营商）**: 独立表 `business_operators`，业务运营商字典（operator_id + mcc/mnc + name）
+- **Operator（供应商运营商关联）**: 独立表 `operators`，供应商-运营商关联与业务 operator_id 索引
 - **Upstream Integration（上游集成）**: 独立表 `upstream_integrations`，(supplier_id, operator_id) UNIQUE，含 API 端点/密钥/CDR 配置
 - **SM-DP+ System**: 独立表 `smdp_systems`，eSIM Profile 生成/分发系统，status (active/deactivated/suspended)，environment (test/production)
 - **Reseller（代理商）**: 独立表 `resellers`，运营平台主体，status (active/deactivated/suspended)，含 contact_email/contact_phone
@@ -1169,7 +1292,7 @@ MVP 目标：8 周内交付最小闭环。
 - [x] 租户层级：供应商 -> 代理商 -> 企业；企业支持部门/项目
 - [x] 白标能力：代理商自定义品牌/域名/Logo
 - [x] 计费主体最小粒度：企业/部门（两级）
-- [x] 计费模式：支持 one-time, SIM Dependent Bundle, Fixed Bundle, Tiered Volume Pricing
+- [x] 计费模式：支持 one-time, SIM Dependent Bundle, Fixed Bundle, Tiered Pricing
 - [x] 资费分层：取消两层资费；本期仅实现资费_企业，不实现资费_运营商
 - [x] 阶梯计费口径：分段累进（Progressive），非全量按档
 - [x] 共享池口径：按产品包计费规则定义
@@ -1188,6 +1311,14 @@ MVP 目标：8 周内交付最小闭环。
 - [x] SLA：可用性 99.9%，P95 < 300ms
 - [x] 批量处理：单次 10 万级
 - [x] MVP 周期：8 周
+- [x] D-23 计费时区：GMT+0。月初 = 每月 1 日 00:00:00 GMT+0，月末 = 月末最后一天 23:59:59 GMT+0
+- [x] D-24 高水位采样粒度：按状态变更事件（sim_state_history）。当月出现过 ACTIVATED 状态（哪怕 1 秒）即按全额月租费计
+- [x] D-25 Fixed Bundle 共享池超额：totalQuotaKb 为共享池，超额后走套外计费（Out-of-Profile PAYG），有专门资费定义（overageRatePerKb / paygRates），不存在并发扣减问题
+- [x] D-26 零用量出账：月租费按 SIM 高水位状态决定（活跃→全额月租费、停机→停机保号费、不满足条件→不收）；流量费 = 0
+- [x] D-27 跨月用量归属：CDR 跨月数据会话的用量归属到会话开始所在月份（算上个月）
+- [x] D-28 MVP 范围裁剪：MVP 仅实现 3 个角色（platform_admin / reseller_admin / customer_admin）、2 种资费类型（Fixed Bundle / One-time）、L1+L3 账单结构；白标/Dunning/多供应商 SPI/告警去重 推迟至 V1.1
+- [x] D-29 MVP 不做前端 Portal：8 周全部投入后端 API + 计费引擎，前端用 Swagger UI + Postman Collection 代替
+- [x] D-30 ENUM 命名规范：所有 ENUM 值统一使用大写（与 sim_status 一致）；reseller_status = ACTIVE/DEACTIVATED/SUSPENDED
 
 ## Success Criteria *(mandatory)*
 

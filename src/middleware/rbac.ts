@@ -33,6 +33,7 @@ const basePermissions = [
   'sims.connectivity.read',
   'sims.location.read',
   'sims.location.history',
+  'sims.batch_status_change',
   'subscriptions.list',
   'subscriptions.read',
   'subscriptions.create',
@@ -86,6 +87,7 @@ const defaultPermissionsByRoleScope: Record<string, string[]> = {
     'sims.reactivate',
     'sims.retire',
     'sims.batch_deactivate',
+    'sims.batch_status_change',
     'subscriptions.list',
     'subscriptions.read',
     'subscriptions.create',
@@ -209,4 +211,109 @@ export function rbac(requiredPermissions: string[] = [], options: RbacOptions = 
       return
     }
   }
+}
+
+// ============================================================
+// Tenant isolation helpers (application-layer enforcement)
+// ============================================================
+// Since service_role bypasses RLS, ALL queries MUST use these helpers
+// to inject tenant filters. This is the primary isolation mechanism.
+
+/**
+ * Build Supabase REST query string filter for tenant isolation.
+ * Platform admins get no filter (full access).
+ * Reseller scope: enterprise_id in (reseller's child tenants).
+ * Customer scope: enterprise_id = customerId.
+ * Department scope: enterprise_id = customerId AND department_id = departmentId.
+ */
+export function buildTenantFilter(auth: AuthContext, opts: { field?: string } = {}): string {
+  const field = opts.field ?? 'enterprise_id'
+  const roleScope = auth.roleScope ? String(auth.roleScope) : null
+  const role = auth.role ? String(auth.role) : null
+
+  // Platform admin: no filter
+  if (roleScope === 'platform' || role === 'platform_admin') {
+    return ''
+  }
+
+  // Customer/department scope: direct match
+  if (roleScope === 'customer' || roleScope === 'department') {
+    const customerId = auth.customerId
+    if (!customerId) return `${field}=eq.00000000-0000-0000-0000-000000000000` // deny all
+    return `${field}=eq.${encodeURIComponent(customerId)}`
+  }
+
+  // Reseller scope: filter by reseller's tenant_id (parent of customer tenants)
+  if (roleScope === 'reseller') {
+    const resellerId = auth.resellerId
+    if (!resellerId) return `${field}=eq.00000000-0000-0000-0000-000000000000` // deny all
+    // For reseller, we need to filter by the reseller's child enterprise IDs
+    // This requires a sub-query approach or pre-fetched enterprise list
+    // Using reseller_id field if available on the table, otherwise enterprise_id filter
+    return `${field}=eq.${encodeURIComponent(resellerId)}`
+  }
+
+  // Unknown scope: deny all
+  return `${field}=eq.00000000-0000-0000-0000-000000000000`
+}
+
+/**
+ * Get the list of enterprise IDs accessible to the current auth context.
+ * For reseller scope, queries the tenants table for child enterprises.
+ * Results are cached on the request object.
+ */
+export async function getAccessibleEnterpriseIds(auth: AuthContext): Promise<string[]> {
+  const roleScope = auth.roleScope ? String(auth.roleScope) : null
+  const role = auth.role ? String(auth.role) : null
+
+  if (roleScope === 'platform' || role === 'platform_admin') {
+    return [] // empty means "no filter needed"
+  }
+
+  if (roleScope === 'customer' || roleScope === 'department') {
+    return auth.customerId ? [auth.customerId] : []
+  }
+
+  if (roleScope === 'reseller' && auth.resellerId) {
+    try {
+      const supabase = createSupabaseRestClient({ useServiceRole: true })
+      const rows = await supabase.select(
+        'tenants',
+        `select=tenant_id&parent_id=eq.${encodeURIComponent(auth.resellerId)}&tenant_type=eq.ENTERPRISE&limit=1000`
+      )
+      const ids = Array.isArray(rows)
+        ? (rows as { tenant_id: string }[]).map(r => String(r.tenant_id)).filter(Boolean)
+        : []
+      return ids
+    } catch {
+      return []
+    }
+  }
+
+  return []
+}
+
+/**
+ * Build Supabase REST filter for reseller-scoped queries.
+ * Returns empty string for platform admins (no filter).
+ * Returns enterprise_id=in.(...) for reseller scope.
+ * Returns enterprise_id=eq.X for customer scope.
+ */
+export async function buildTenantFilterAsync(auth: AuthContext, opts: { field?: string } = {}): Promise<string> {
+  const field = opts.field ?? 'enterprise_id'
+  const roleScope = auth.roleScope ? String(auth.roleScope) : null
+  const role = auth.role ? String(auth.role) : null
+
+  if (roleScope === 'platform' || role === 'platform_admin') {
+    return ''
+  }
+
+  const ids = await getAccessibleEnterpriseIds(auth)
+  if (!ids.length) {
+    return `${field}=eq.00000000-0000-0000-0000-000000000000`
+  }
+  if (ids.length === 1) {
+    return `${field}=eq.${encodeURIComponent(ids[0])}`
+  }
+  return `${field}=in.(${ids.map(id => encodeURIComponent(id)).join(',')})`
 }

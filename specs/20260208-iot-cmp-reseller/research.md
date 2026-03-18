@@ -41,7 +41,7 @@
 
 | ENUM | 值 |
 |------|-----|
-| `reseller_status` | active, inactive, suspended |
+| `reseller_status` | ACTIVE, DEACTIVATED, SUSPENDED |
 | `customer_status` | active, overdue, terminated |
 | `operator_status` | active, deprecated, error |
 | `permission_category` | tenant, sim, subscription, billing, reporting, integration, system, webhook |
@@ -54,7 +54,7 @@
 | `service_type` | DATA, VOICE, SMS |
 | `billing_cycle_type` | CALENDAR_MONTH, CUSTOM_RANGE |
 | `first_cycle_proration` | NONE, DAILY_PRORATION |
-| `price_plan_type` | ONE_TIME, SIM_DEPENDENT_BUNDLE, FIXED_BUNDLE, TIERED_VOLUME_PRICING |
+| `price_plan_type` | ONE_TIME, SIM_DEPENDENT_BUNDLE, FIXED_BUNDLE, TIERED_PRICING |
 | `note_type` | CREDIT, DEBIT |
 | `note_status` | DRAFT, APPROVED, APPLIED, CANCELLED |
 | `subscription_kind` | MAIN, ADD_ON |
@@ -198,29 +198,41 @@ spec.md 中无 `[NEEDS CLARIFICATION]` 标记 — 所有决策已在 `/adk:clari
 | 风险 | 影响 | 概率 | 缓解措施 |
 |------|------|------|----------|
 | Serverless 超时（批量操作） | 高 | 中 | 使用异步 Job + 队列处理，拆分批次 |
-| 单体 app.ts 维护困难 | 中 | 高 | MVP 后按域拆分模块（路由分文件） |
+| 单体 app.js 维护困难 | 中 | 高 | MVP 后按域拆分模块（路由分文件） |
 | LISTEN/NOTIFY 8KB 限制 | 低 | 低 | 事件表引用模式，payload 仅含 ID |
-| 计费精度（浮点） | 高 | 低 | 使用 PostgreSQL `numeric(12,2)` / `numeric(18,8)` |
+| 计费精度（浮点） | 高 | 低（已缓解） | roundAmount() 统一 ROUND_HALF_UP + PostgreSQL `numeric(12,2)` / `numeric(18,8)` |
 | 多供应商适配器并行开发 | 中 | 中 | MVP 仅需 wxzhonggeng，SPI 接口先行定义 |
 | CDR 数据量（500 万/日） | 高 | 中 | PostgreSQL 分区表 + 批量 INSERT + 冷归档 |
+| 计费 N+1 查询性能 | 高 | 高（已缓解） | 批量 sim_id=in.() 查询替代 per-SIM 查询，10万 SIM 从 30万次 HTTP 降至 ~600 次 |
+| 租户模型 split-brain | 高 | 高（已缓解） | V008 触发器 sync_customer_status_to_tenant + 事务函数 create_reseller/create_customer |
+| RLS 策略失效 | 高 | 高（已缓解） | V009 tenant-scoped RLS + 应用层 buildTenantFilterAsync() 双层隔离 |
 
-## 6. MVP 优先级与实施顺序
+## 6. MVP 优先级与实施顺序（D-31 修正）
 
-基于 spec.md User Story 优先级和依赖关系：
+基于专家工程评审修正后的优先级：
 
 ```
-Phase 1 (Week 1-2): 基础设施
-  ├── US1: 多租户 RBAC 完善
-  └── US2: SIM 状态机约束补齐
+Phase 1 (Week 1-2): 地基修正
+  ├── 确认 TS/JS 双栈运行状态
+  ├── 运行 V001-V009 迁移验证 schema 完整性
+  ├── 租户模型验证（create_reseller/create_customer + 触发器同步）
+  ├── SIM CRUD + 5 状态机验证
+  └── Fixed Bundle 资费创建
 
-Phase 2 (Week 3-4): 核心计费
-  ├── US3: 产品包资费配置
-  ├── US4: 订阅关系管理
-  └── US5: 计费引擎增强（Waterfall + Progressive）
+Phase 2 (Week 3-4): 计费核心
+  ├── 计费引擎 Golden Test Case 验证
+  ├── 手动触发出账 API
+  ├── 端到端冒烟测试
+  └── 部署 Vercel staging
 
-Phase 3 (Week 5-6): 账务闭环
-  ├── US6: 出账与账单管理
-  └── US7: 信控催收流程
+Phase 3 (Week 5-6): 扩展能力
+  ├── RBAC + 多租户隔离集成
+  ├── One-time 资费 + 自动出账
+  └── SIM 批量导入 + WX 上游同步
+
+Phase 4 (Week 7-8): 增强与回归
+  ├── Dunning 基础版
+  └── 全量回归测试
 
 Phase 4 (Week 7-8): 集成与验收
   ├── US8: 上游对账

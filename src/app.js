@@ -13,6 +13,7 @@ import { parsePagination } from './utils/pagination.js'
 import { registerSimPhase4Routes } from './routes/simPhase4.js'
 import { registerPricePlanRoutes } from './routes/pricePlans.js'
 import { registerPackageRoutes } from './routes/packages.js'
+import { registerPackageModuleRoutes } from './routes/packageModules.js'
 import { registerNetworkProfileRoutes } from './routes/networkProfiles.js'
 import { registerReconciliationRoutes } from './routes/reconciliation.js'
 import { registerWebhookRoutes } from './routes/webhooks.js'
@@ -63,6 +64,14 @@ function sendError(res, status, code, message) {
     message,
     traceId: getTraceId(res),
   })
+}
+
+function safeHeaderValue(value) {
+  return encodeURIComponent(String(value ?? '')).replace(/%0D|%0A|%00/gi, '')
+}
+
+function setXFilters(res, value) {
+  res.setHeader('X-Filters', safeHeaderValue(value))
 }
 
 function getEnvTrim(name) {
@@ -170,6 +179,13 @@ async function verifyOidcAccessToken(token) {
 function isValidUuid(value) {
   const s = String(value || '').trim().toLowerCase()
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s)
+}
+
+function isMissingTableError(err, tableName) {
+  const code = String(err?.code ?? err?.body?.code ?? '')
+  const message = String(err?.body?.message ?? err?.message ?? err?.body ?? '')
+  const marker = `public.${tableName}`
+  return (code === 'PGRST205' || message.includes('Could not find the table')) && message.includes(marker)
 }
 
 function normalizeIccid(value) {
@@ -980,10 +996,18 @@ function authGuard(req, res, next) {
   if (req.path === '/metrics') return next()
   if (req.path === '/v1/auth/token') return next()
   if (req.path === '/auth/token') return next()
+  if (req.path === '/v1/auth/login') return next()
+  if (req.path === '/auth/login') return next()
+  if (req.path === '/v1/auth/refresh') return next()
+  if (req.path === '/auth/refresh') return next()
   if (req.path === '/openapi.yaml') return next()
   if (req.path === '/v1/openapi.yaml') return next()
   if (req.path === '/docs') return next()
   if (req.path === '/v1/docs') return next()
+  if (req.path === '/docs/assets/swagger-ui-bundle.js') return next()
+  if (req.path === '/docs/assets/swagger-ui.css') return next()
+  if (req.path === '/v1/docs/assets/swagger-ui-bundle.js') return next()
+  if (req.path === '/v1/docs/assets/swagger-ui.css') return next()
   if (req.path === '/favicon.ico') return next()
   if (req.path === '/auth/token') return next()
   if (req.path === '/v1/auth/token') return next()
@@ -1107,15 +1131,46 @@ function authGuard(req, res, next) {
   res.locals.auth = result.payload
   if (result.payload?.enterpriseId) {
     const customerId = String(result.payload.enterpriseId)
+    const userIdCandidate = result.payload?.sub ? String(result.payload.sub) : null
+    const userId = userIdCandidate && isValidUuid(userIdCandidate) ? userIdCandidate : null
     req.cmpAuth = {
       enterpriseId: customerId,
       clientId: result.payload.sub ? String(result.payload.sub) : null,
       customerId,
       roleScope: 'customer',
       role: result.payload?.role ? String(result.payload.role) : null,
-      userId: result.payload?.sub ? String(result.payload.sub) : null,
+      userId,
     }
     req.tenantScope = { customerId }
+  } else {
+    const roleScope = result.payload?.roleScope ? String(result.payload.roleScope) : null
+    const role = result.payload?.role ? String(result.payload.role) : null
+    const customerId = result.payload?.customerId ? String(result.payload.customerId) : null
+    const resellerId = result.payload?.resellerId ? String(result.payload.resellerId) : null
+    const departmentId = result.payload?.departmentId ? String(result.payload.departmentId) : null
+    if (roleScope || role) {
+      const userIdCandidate = result.payload?.userId ? String(result.payload.userId) : result.payload?.sub ? String(result.payload.sub) : null
+      const userId = userIdCandidate && isValidUuid(userIdCandidate) ? userIdCandidate : null
+      req.cmpAuth = {
+        enterpriseId: customerId,
+        clientId: result.payload?.sub ? String(result.payload.sub) : null,
+        userId,
+        resellerId,
+        customerId,
+        departmentId,
+        roleScope,
+        role,
+      }
+      if (roleScope === 'customer' && customerId) {
+        req.tenantScope = { customerId }
+      } else if (roleScope === 'department' && customerId && departmentId) {
+        req.tenantScope = { customerId, departmentId }
+      } else if (roleScope === 'reseller' && resellerId) {
+        req.tenantScope = { resellerId }
+      } else {
+        req.tenantScope = {}
+      }
+    }
   }
   return next()
 }
@@ -1134,12 +1189,12 @@ function buildBaseUrl(req) {
   const headerProto = req.headers['x-forwarded-proto'] ? String(req.headers['x-forwarded-proto']).split(',')[0].trim() : req.protocol
   const publicIp = getEnvTrim('PUBLIC_IP')
   const port = getEnvTrim('PORT') || '3000'
-  const proto = getEnvTrim('PUBLIC_PROTO') || headerProto
+  const proto = getEnvTrim('PUBLIC_PROTO') || headerProto || 'http'
   const isLocalHost = host && (host.startsWith('localhost') || host.startsWith('127.0.0.1'))
   if (publicIp && host && host.endsWith(`:${port}`) && !isLocalHost) {
     return `${proto}://${publicIp}:${port}`
   }
-  return `${headerProto}://${host}`
+  return `${proto}://${host}`
 }
 
 function toIsoDateTime(value) {
@@ -1242,11 +1297,21 @@ function computeOneTimeExpiry(effectiveAtIso, validityDays, expiryBoundary) {
 export function createApp() {
   const app = express()
 
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, Idempotency-Key')
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(200)
+    }
+    next()
+  })
+
   const corsAllowOrigins = parseCsvEnv('CORS_ALLOW_ORIGINS')
   const corsAllowHeaders = parseCsvEnv('CORS_ALLOW_HEADERS')
   const allowHeaders = corsAllowHeaders.length
     ? corsAllowHeaders.join(', ')
-    : 'Authorization, Content-Type, X-API-Key, X-API-Secret, X-Request-Id'
+    : 'Authorization, Content-Type, X-API-Key, X-API-Secret, X-Request-Id, Idempotency-Key'
 
   if (corsAllowOrigins.length) {
     app.use((req, res, next) => {
@@ -1587,11 +1652,15 @@ export function createApp() {
           enterpriseId = '00000000-0000-0000-0000-000000000000'
         }
       }
+      const roleScope = enterpriseId ? 'customer' : 'platform'
+      const role = enterpriseId ? 'customer_m2m' : 'platform_admin'
       const payload = {
         iss: 'iot-cmp-api',
         sub: String(clientId),
         iat: now,
         exp: now + ttlSeconds,
+        roleScope,
+        role,
         ...(enterpriseId ? { enterpriseId } : {}),
       }
 
@@ -1623,12 +1692,17 @@ export function createApp() {
         const ttlConfig = getEnvNumber('AUTH_TOKEN_TTL_SECONDS', 3600)
         const ttlSeconds = Math.min(86400, Math.max(60, ttlConfig))
         const now = Math.floor(Date.now() / 1000)
+        const enterpriseId = String(row.enterprise_id)
+        const roleScope = enterpriseId ? 'customer' : 'platform'
+        const role = enterpriseId ? 'customer_m2m' : 'platform_admin'
         const payload = {
           iss: 'iot-cmp-api',
           sub: String(clientId),
           iat: now,
           exp: now + ttlSeconds,
-          enterpriseId: String(row.enterprise_id),
+          roleScope,
+          role,
+          ...(enterpriseId ? { enterpriseId } : {}),
         }
 
         const token = signJwtHs256(payload, getEnvTrim('AUTH_TOKEN_SECRET'))
@@ -1645,11 +1719,15 @@ export function createApp() {
           const ttlSeconds = Math.min(86400, Math.max(60, ttlConfig))
           const now = Math.floor(Date.now() / 1000)
           const enterpriseId = getEnvTrim('AUTH_ENTERPRISE_ID')
+          const roleScope = enterpriseId ? 'customer' : 'platform'
+          const role = enterpriseId ? 'customer_m2m' : 'platform_admin'
           const payload = {
             iss: 'iot-cmp-api',
             sub: String(clientId),
             iat: now,
             exp: now + ttlSeconds,
+            roleScope,
+            role,
             ...(enterpriseId ? { enterpriseId } : {}),
           }
           const token = signJwtHs256(payload, getEnvTrim('AUTH_TOKEN_SECRET'))
@@ -1664,6 +1742,169 @@ export function createApp() {
     }
 
     return sendError(res, 500, 'INTERNAL_ERROR', 'Auth is misconfigured.')
+  }
+
+  async function handleAuthLogin(req, res) {
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim() : ''
+    const password = typeof req.body?.password === 'string' ? req.body.password : ''
+    if (!email || !password) {
+      return sendError(res, 400, 'BAD_REQUEST', 'email and password are required.')
+    }
+
+    const ttlConfig = getEnvNumber('AUTH_TOKEN_TTL_SECONDS', 3600)
+    const ttlSeconds = Math.min(86400, Math.max(60, ttlConfig))
+    const now = Math.floor(Date.now() / 1000)
+
+    if (!isAuthConfigured() && !isDbAuthConfigured()) {
+      const token = Buffer.from(`${email}:${password}:${Date.now()}`).toString('base64url')
+      return res.json({
+        accessToken: token,
+        expiresIn: ttlSeconds,
+        tokenType: 'Bearer',
+        user: {
+          userId: email,
+          email,
+          role: 'customer_m2m',
+          roleScope: 'customer',
+          resellerId: null,
+          customerId: null,
+        },
+      })
+    }
+
+    if (isAuthConfigured()) {
+      const expectedClientId = getEnvTrim('AUTH_CLIENT_ID')
+      const expectedClientSecret = getEnvTrim('AUTH_CLIENT_SECRET')
+      if (email !== expectedClientId || password !== expectedClientSecret) {
+        return sendError(res, 401, 'UNAUTHORIZED', 'Invalid credentials.')
+      }
+      let enterpriseId = getEnvTrim('AUTH_ENTERPRISE_ID')
+      if (enterpriseId && !isValidUuid(enterpriseId) && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+        try {
+          const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+          const rows = await supabase.select('packages', 'select=enterprise_id&limit=1')
+          const row = Array.isArray(rows) ? rows[0] : null
+          if (row && row.enterprise_id && isValidUuid(row.enterprise_id)) {
+            enterpriseId = String(row.enterprise_id)
+          }
+        } catch {}
+        if (!isValidUuid(enterpriseId)) {
+          enterpriseId = '00000000-0000-0000-0000-000000000000'
+        }
+      }
+      const roleScope = enterpriseId ? 'customer' : 'platform'
+      const role = enterpriseId ? 'customer_m2m' : 'platform_admin'
+      const payload = {
+        iss: 'iot-cmp-api',
+        sub: String(email),
+        iat: now,
+        exp: now + ttlSeconds,
+        email,
+        roleScope,
+        role,
+        ...(enterpriseId ? { enterpriseId, customerId: enterpriseId } : {}),
+      }
+      const token = signJwtHs256(payload, getEnvTrim('AUTH_TOKEN_SECRET'))
+      return res.json({
+        accessToken: token,
+        expiresIn: ttlSeconds,
+        tokenType: 'Bearer',
+        user: {
+          userId: email,
+          email,
+          role,
+          roleScope,
+          resellerId: null,
+          customerId: enterpriseId,
+        },
+      })
+    }
+
+    if (isDbAuthConfigured()) {
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      const rows = await supabase.select(
+        'api_clients',
+        `select=client_id,secret_hash,enterprise_id,status&client_id=eq.${encodeURIComponent(String(email))}&limit=1`
+      )
+      const row = Array.isArray(rows) ? rows[0] : null
+      if (!row || row.status !== 'ACTIVE') {
+        return sendError(res, 401, 'UNAUTHORIZED', 'Invalid credentials.')
+      }
+      const ok = verifySecretScrypt(String(password), row.secret_hash)
+      if (!ok) {
+        return sendError(res, 401, 'UNAUTHORIZED', 'Invalid credentials.')
+      }
+      const enterpriseId = row.enterprise_id ? String(row.enterprise_id) : null
+      const payload = {
+        iss: 'iot-cmp-api',
+        sub: String(email),
+        iat: now,
+        exp: now + ttlSeconds,
+        email,
+        roleScope: 'customer',
+        role: 'customer_m2m',
+        ...(enterpriseId ? { enterpriseId, customerId: enterpriseId } : {}),
+      }
+      const token = signJwtHs256(payload, getEnvTrim('AUTH_TOKEN_SECRET'))
+      return res.json({
+        accessToken: token,
+        expiresIn: ttlSeconds,
+        tokenType: 'Bearer',
+        user: {
+          userId: email,
+          email,
+          role: 'customer_m2m',
+          roleScope: 'customer',
+          resellerId: null,
+          customerId: enterpriseId,
+        },
+      })
+    }
+
+    return sendError(res, 500, 'INTERNAL_ERROR', 'Auth is misconfigured.')
+  }
+
+  async function handleAuthRefresh(req, res) {
+    const tokenFromBody = req.body?.refreshToken ? String(req.body.refreshToken) : null
+    const authHeader = req.headers?.authorization ? String(req.headers.authorization) : ''
+    const headerToken = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : null
+    const refreshToken = tokenFromBody || headerToken
+    if (!refreshToken) {
+      return sendError(res, 400, 'BAD_REQUEST', 'refreshToken is required.')
+    }
+    const secret = getEnvTrim('AUTH_TOKEN_SECRET')
+    if (!secret) {
+      return sendError(res, 500, 'INTERNAL_ERROR', 'Auth is misconfigured.')
+    }
+    const verified = verifyJwtHs256(refreshToken, secret)
+    if (!verified.ok || !verified.payload) {
+      return sendError(res, 401, 'UNAUTHORIZED', 'Invalid refresh token.')
+    }
+    const payload = verified.payload
+    const ttlConfig = getEnvNumber('AUTH_TOKEN_TTL_SECONDS', 3600)
+    const ttlSeconds = Math.min(86400, Math.max(60, ttlConfig))
+    const now = Math.floor(Date.now() / 1000)
+    const nextPayload = { ...payload, iat: now, exp: now + ttlSeconds }
+    const accessToken = signJwtHs256(nextPayload, secret)
+    const userId = payload?.userId ? String(payload.userId) : payload?.sub ? String(payload.sub) : ''
+    const email = payload?.email ? String(payload.email) : payload?.sub ? String(payload.sub) : ''
+    const roleScope = payload?.roleScope ? String(payload.roleScope) : (payload && payload.enterpriseId ? 'customer' : 'platform')
+    const role = payload?.role ? String(payload.role) : (payload && payload.enterpriseId ? 'customer_m2m' : 'platform_admin')
+    const resellerId = payload?.resellerId ? String(payload.resellerId) : null
+    const customerId = payload?.customerId ? String(payload.customerId) : payload?.enterpriseId ? String(payload.enterpriseId) : null
+    res.json({
+      accessToken,
+      expiresIn: ttlSeconds,
+      tokenType: 'Bearer',
+      user: {
+        userId,
+        email,
+        role,
+        roleScope,
+        resellerId,
+        customerId,
+      },
+    })
   }
 
   const getAuthContext = (req) => ({
@@ -1928,7 +2169,7 @@ export function createApp() {
           if (sortOrderRaw) filterPairs.push(`sortOrder=${sortOrderRaw}`)
           filterPairs.push(`limit=${limit}`)
           filterPairs.push(`page=${page}`)
-          res.setHeader('X-Filters', filterPairs.join(';'))
+          setXFilters(res, filterPairs.join(';'))
         }
         return res.json({
           items,
@@ -2005,7 +2246,7 @@ export function createApp() {
         if (sortOrderRaw) filterPairs.push(`sortOrder=${sortOrderRaw}`)
         filterPairs.push(`limit=${limit}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.json({
         items,
@@ -2065,7 +2306,7 @@ export function createApp() {
           if (sortOrderRaw) filterPairs.push(`sortOrder=${sortOrderRaw}`)
           filterPairs.push(`limit=${limit}`)
           filterPairs.push(`page=${page}`)
-          res.setHeader('X-Filters', filterPairs.join(';'))
+          setXFilters(res, filterPairs.join(';'))
         }
         return res.send(`${csvRows.join('\n')}\n`)
       }
@@ -2108,7 +2349,7 @@ export function createApp() {
         if (sortOrder) filterPairs.push(`sortOrder=${sortOrder}`)
         filterPairs.push(`limit=${limit}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       return res.send(`${csvRows.join('\n')}\n`)
     })
@@ -2291,7 +2532,7 @@ export function createApp() {
       const csv = `${rows.map((row) => row.map(escapeCsv).join(',')).join('\n')}\n`
       res.setHeader('Content-Type', 'text/csv; charset=utf-8')
       res.setHeader('Content-Disposition', `attachment; filename="bill-${summary.billId}-reconciliation.csv"`)
-      res.setHeader('X-Filters', `billId=${summary.billId}`)
+      setXFilters(res, `billId=${summary.billId}`)
       res.send(csv)
     })
 
@@ -2390,166 +2631,204 @@ export function createApp() {
     })
 
     app.get(`${prefix}/sims/:simId/usage`, async (req, res) => {
-      const simId = String(req.params.simId)
-      if (!isValidUuid(simId)) {
-        return sendError(res, 400, 'BAD_REQUEST', 'simId must be a valid uuid.')
-      }
       const period = req.query.period ? String(req.query.period) : null
-      if (!period || !/^\d{4}-\d{2}$/.test(period)) {
-        return sendError(res, 400, 'BAD_REQUEST', 'period must be YYYY-MM.')
-      }
-      const zone = req.query.zone ? String(req.query.zone) : null
-      const [yearStr, monthStr] = period.split('-')
-      const year = Number(yearStr)
-      const month = Number(monthStr)
-      const start = new Date(Date.UTC(year, month - 1, 1))
-      const end = new Date(Date.UTC(year, month, 0))
+      const startDateRaw = req.query.startDate ? String(req.query.startDate) : null
+      const endDateRaw = req.query.endDate ? String(req.query.endDate) : null
+      const parsed = parseSimIdentifier(req.params.simId)
+      if (!parsed.ok) return sendError(res, parsed.status, parsed.code, parsed.message)
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-      const simRows = await supabase.select('sims', `select=sim_id,iccid,enterprise_id&sim_id=eq.${encodeURIComponent(simId)}&limit=1`)
+      const simRows = await supabase.select(
+        'sims',
+        `select=sim_id,iccid,enterprise_id&${parsed.field}=eq.${encodeURIComponent(parsed.value)}&limit=1`
+      )
       const sim = Array.isArray(simRows) ? simRows[0] : null
       if (!sim) {
-        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Sim ${simId} not found.`)
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Sim ${parsed.value} not found.`)
       }
-      const roleScope = getRoleScope(req)
-      const auth = getAuthContext(req)
-      if (roleScope === 'customer' || roleScope === 'department') {
-        const enterpriseId = req?.tenantScope?.customerId ?? req?.cmpAuth?.customerId ?? req?.cmpAuth?.enterpriseId
-        if (!enterpriseId || String(sim.enterprise_id || '') !== String(enterpriseId)) {
-          return sendError(res, 403, 'FORBIDDEN', 'Sim is out of tenant scope.')
+
+      if (period || (!startDateRaw && !endDateRaw)) {
+        if (!period || !/^\d{4}-\d{2}$/.test(period)) {
+          return sendError(res, 400, 'BAD_REQUEST', 'period must be YYYY-MM.')
         }
-      } else if (roleScope === 'reseller') {
-        const resellerId = auth.resellerId
-        if (!resellerId) {
-          return sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
+        const zone = req.query.zone ? String(req.query.zone) : null
+        const [yearStr, monthStr] = period.split('-')
+        const year = Number(yearStr)
+        const month = Number(monthStr)
+        const start = new Date(Date.UTC(year, month - 1, 1))
+        const end = new Date(Date.UTC(year, month, 0))
+        const roleScope = getRoleScope(req)
+        const auth = getAuthContext(req)
+        if (roleScope === 'customer' || roleScope === 'department') {
+          const enterpriseId = req?.tenantScope?.customerId ?? req?.cmpAuth?.customerId ?? req?.cmpAuth?.enterpriseId
+          if (!enterpriseId || String(sim.enterprise_id || '') !== String(enterpriseId)) {
+            return sendError(res, 403, 'FORBIDDEN', 'Sim is out of tenant scope.')
+          }
+        } else if (roleScope === 'reseller') {
+          const resellerId = auth.resellerId
+          if (!resellerId) {
+            return sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
+          }
+          const entRows = await supabase.select('tenants', `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(sim.enterprise_id)}&limit=1`)
+          const ent = Array.isArray(entRows) ? entRows[0] : null
+          if (!ent || String(ent.parent_id || '') !== String(resellerId)) {
+            return sendError(res, 403, 'FORBIDDEN', 'Sim is out of reseller scope.')
+          }
+        } else if (roleScope !== 'platform') {
+          return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
         }
-        const entRows = await supabase.select('tenants', `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(sim.enterprise_id)}&limit=1`)
-        const ent = Array.isArray(entRows) ? entRows[0] : null
-        if (!ent || String(ent.parent_id || '') !== String(resellerId)) {
-          return sendError(res, 403, 'FORBIDDEN', 'Sim is out of reseller scope.')
+        const zoneFilter = zone ? `&visited_mccmnc=eq.${encodeURIComponent(zone)}` : ''
+        const usageRows = await supabase.select(
+          'usage_daily_summary',
+          `select=visited_mccmnc,total_kb&sim_id=eq.${encodeURIComponent(sim.sim_id)}&usage_day=gte.${encodeURIComponent(start.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(end.toISOString().slice(0, 10))}${zoneFilter}`
+        )
+        const usageList = Array.isArray(usageRows) ? usageRows : []
+        const usageByZone = new Map()
+        for (const row of usageList) {
+          const key = String(row.visited_mccmnc || '')
+          if (!key) continue
+          const current = usageByZone.get(key) || { visitedMccMnc: key, usageKb: 0 }
+          current.usageKb += Number(row.total_kb ?? 0)
+          usageByZone.set(key, current)
         }
-      } else if (roleScope !== 'platform') {
-        return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
-      }
-      const zoneFilter = zone ? `&visited_mccmnc=eq.${encodeURIComponent(zone)}` : ''
-      const usageRows = await supabase.select(
-        'usage_daily_summary',
-        `select=visited_mccmnc,total_kb&sim_id=eq.${encodeURIComponent(simId)}&usage_day=gte.${encodeURIComponent(start.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(end.toISOString().slice(0, 10))}${zoneFilter}`
-      )
-      const usageList = Array.isArray(usageRows) ? usageRows : []
-      const usageByZone = new Map()
-      for (const row of usageList) {
-        const key = String(row.visited_mccmnc || '')
-        if (!key) continue
-        const current = usageByZone.get(key) || { visitedMccMnc: key, usageKb: 0 }
-        current.usageKb += Number(row.total_kb ?? 0)
-        usageByZone.set(key, current)
-      }
-      const ratingRows = await supabase.select(
-        'rating_results',
-        `select=visited_mccmnc,matched_subscription_id,matched_package_version_id,classification,charged_kb&sim_id=eq.${encodeURIComponent(simId)}&usage_day=gte.${encodeURIComponent(start.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(end.toISOString().slice(0, 10))}`
-      )
-      const ratingList = Array.isArray(ratingRows) ? ratingRows : []
-      const subIds = Array.from(new Set(ratingList.map((r) => r.matched_subscription_id).filter(Boolean).map(String)))
-      const pkgVersionIds = Array.from(new Set(ratingList.map((r) => r.matched_package_version_id).filter(Boolean).map(String)))
-      const subKinds = new Map()
-      if (subIds.length) {
-        const idFilter = subIds.map((id) => encodeURIComponent(id)).join(',')
-        const subs = await supabase.select('subscriptions', `select=subscription_id,subscription_kind&subscription_id=in.(${idFilter})`)
-        const list = Array.isArray(subs) ? subs : []
-        for (const sub of list) {
-          if (sub?.subscription_id) subKinds.set(String(sub.subscription_id), String(sub.subscription_kind || 'MAIN'))
+        const ratingRows = await supabase.select(
+          'rating_results',
+          `select=visited_mccmnc,matched_subscription_id,matched_package_version_id,classification,charged_kb&sim_id=eq.${encodeURIComponent(sim.sim_id)}&usage_day=gte.${encodeURIComponent(start.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(end.toISOString().slice(0, 10))}`
+        )
+        const ratingList = Array.isArray(ratingRows) ? ratingRows : []
+        const subIds = Array.from(new Set(ratingList.map((r) => r.matched_subscription_id).filter(Boolean).map(String)))
+        const pkgVersionIds = Array.from(new Set(ratingList.map((r) => r.matched_package_version_id).filter(Boolean).map(String)))
+        const subKinds = new Map()
+        if (subIds.length) {
+          const idFilter = subIds.map((id) => encodeURIComponent(id)).join(',')
+          const subs = await supabase.select('subscriptions', `select=subscription_id,subscription_kind&subscription_id=in.(${idFilter})`)
+          const list = Array.isArray(subs) ? subs : []
+          for (const sub of list) {
+            if (sub?.subscription_id) subKinds.set(String(sub.subscription_id), String(sub.subscription_kind || 'MAIN'))
+          }
         }
-      }
-      const pkgNames = new Map()
-      if (pkgVersionIds.length) {
-        const idFilter = pkgVersionIds.map((id) => encodeURIComponent(id)).join(',')
-        const pkgs = await supabase.select('package_versions', `select=package_version_id,packages(name)&package_version_id=in.(${idFilter})`)
-        const list = Array.isArray(pkgs) ? pkgs : []
-        for (const pkg of list) {
-          if (pkg?.package_version_id) pkgNames.set(String(pkg.package_version_id), pkg?.packages?.name ?? null)
+        const pkgNames = new Map()
+        if (pkgVersionIds.length) {
+          const idFilter = pkgVersionIds.map((id) => encodeURIComponent(id)).join(',')
+          const pkgs = await supabase.select('package_versions', `select=package_version_id,packages(name)&package_version_id=in.(${idFilter})`)
+          const list = Array.isArray(pkgs) ? pkgs : []
+          for (const pkg of list) {
+            if (pkg?.package_version_id) pkgNames.set(String(pkg.package_version_id), pkg?.packages?.name ?? null)
+          }
         }
-      }
-      const zoneMatchStats = new Map()
-      for (const row of ratingList) {
-        const zoneKey = String(row.visited_mccmnc || '')
-        if (!zoneKey) continue
-        const pkgId = row.matched_package_version_id ? String(row.matched_package_version_id) : null
-        const subKind = row.matched_subscription_id ? subKinds.get(String(row.matched_subscription_id)) : null
-        const classification = String(row.classification || '')
-        const chargedKb = Number(row.charged_kb ?? 0)
-        const current = zoneMatchStats.get(zoneKey) || new Map()
-        const key = pkgId || 'NO_PACKAGE'
-        const entry = current.get(key) || { chargedKb: 0, subKind, classification }
-        entry.chargedKb += chargedKb
-        entry.subKind = subKind ?? entry.subKind
-        entry.classification = classification || entry.classification
-        current.set(key, entry)
-        zoneMatchStats.set(zoneKey, current)
-      }
-      const byZone = Array.from(usageByZone.values()).map((entry) => {
-        const stats = zoneMatchStats.get(entry.visitedMccMnc)
-        let matchedPackage = null
-        let matchType = 'OUT_OF_PROFILE'
-        if (stats && stats.size) {
-          let bestKey = null
-          let bestCharged = -1
-          let best = null
-          for (const [key, value] of stats.entries()) {
-            if (value.chargedKb > bestCharged) {
-              bestCharged = value.chargedKb
-              bestKey = key
-              best = value
+        const zoneMatchStats = new Map()
+        for (const row of ratingList) {
+          const zoneKey = String(row.visited_mccmnc || '')
+          if (!zoneKey) continue
+          const pkgId = row.matched_package_version_id ? String(row.matched_package_version_id) : null
+          const subKind = row.matched_subscription_id ? subKinds.get(String(row.matched_subscription_id)) : null
+          const classification = String(row.classification || '')
+          const chargedKb = Number(row.charged_kb ?? 0)
+          const current = zoneMatchStats.get(zoneKey) || new Map()
+          const key = pkgId || 'NO_PACKAGE'
+          const entry = current.get(key) || { chargedKb: 0, subKind, classification }
+          entry.chargedKb += chargedKb
+          entry.subKind = subKind ?? entry.subKind
+          entry.classification = classification || entry.classification
+          current.set(key, entry)
+          zoneMatchStats.set(zoneKey, current)
+        }
+        const byZone = Array.from(usageByZone.values()).map((entry) => {
+          const stats = zoneMatchStats.get(entry.visitedMccMnc)
+          let matchedPackage = null
+          let matchType = 'OUT_OF_PROFILE'
+          if (stats && stats.size) {
+            let bestKey = null
+            let bestCharged = -1
+            let best = null
+            for (const [key, value] of stats.entries()) {
+              if (value.chargedKb > bestCharged) {
+                bestCharged = value.chargedKb
+                bestKey = key
+                best = value
+              }
+            }
+            if (bestKey && bestKey !== 'NO_PACKAGE') {
+              matchedPackage = pkgNames.get(bestKey) ?? null
+            }
+            const classification = String(best?.classification || '')
+            if (classification.startsWith('PAYG')) {
+              matchType = 'OUT_OF_PROFILE'
+            } else if (best?.subKind && String(best.subKind).toUpperCase() === 'ADD_ON') {
+              matchType = 'ADD_ON'
+            } else if (bestKey && bestKey !== 'NO_PACKAGE') {
+              matchType = 'MAIN'
             }
           }
-          if (bestKey && bestKey !== 'NO_PACKAGE') {
-            matchedPackage = pkgNames.get(bestKey) ?? null
+          return {
+            visitedMccMnc: entry.visitedMccMnc,
+            countryName: matchedPackage ? null : null,
+            usageKb: Number(entry.usageKb ?? 0),
+            matchedPackage,
+            matchType,
           }
-          const classification = String(best?.classification || '')
-          if (classification.startsWith('PAYG')) {
-            matchType = 'OUT_OF_PROFILE'
-          } else if (best?.subKind && String(best.subKind).toUpperCase() === 'ADD_ON') {
-            matchType = 'ADD_ON'
-          } else if (bestKey && bestKey !== 'NO_PACKAGE') {
-            matchType = 'MAIN'
-          }
-        }
-        return {
-          visitedMccMnc: entry.visitedMccMnc,
-          countryName: matchedPackage ? null : null,
-          usageKb: Number(entry.usageKb ?? 0),
-          matchedPackage,
-          matchType,
-        }
-      })
-      const totalUsageKb = Array.from(usageByZone.values()).reduce((sum, entry) => sum + Number(entry.usageKb ?? 0), 0)
-      const mccmncPairs = Array.from(new Set(byZone.map((z) => String(z.visitedMccMnc || '')).filter(Boolean)))
-      if (mccmncPairs.length) {
-        const pairs = mccmncPairs.map((pair) => pair.split('-')).filter((p) => p.length === 2)
-        const mccList = Array.from(new Set(pairs.map((p) => p[0])))
-        const mncList = Array.from(new Set(pairs.map((p) => p[1])))
-        if (mccList.length && mncList.length) {
-          const mccFilter = mccList.map((v) => encodeURIComponent(v)).join(',')
-          const mncFilter = mncList.map((v) => encodeURIComponent(v)).join(',')
-          const carriers = await supabase.select('carriers', `select=mcc,mnc,name&mcc=in.(${mccFilter})&mnc=in.(${mncFilter})`)
-          const carrierList = Array.isArray(carriers) ? carriers : []
-          const carrierMap = new Map()
-          for (const c of carrierList) {
-            const key = `${String(c.mcc).trim()}-${String(c.mnc).trim()}`
-            carrierMap.set(key, c.name ?? null)
-          }
-          for (const zoneRow of byZone) {
-            const name = carrierMap.get(String(zoneRow.visitedMccMnc || ''))
-            if (name) zoneRow.countryName = name
+        })
+        const totalUsageKb = Array.from(usageByZone.values()).reduce((sum, entry) => sum + Number(entry.usageKb ?? 0), 0)
+        const mccmncPairs = Array.from(new Set(byZone.map((z) => String(z.visitedMccMnc || '')).filter(Boolean)))
+        if (mccmncPairs.length) {
+          const pairs = mccmncPairs.map((pair) => pair.split('-')).filter((p) => p.length === 2)
+          const mccList = Array.from(new Set(pairs.map((p) => p[0])))
+          const mncList = Array.from(new Set(pairs.map((p) => p[1])))
+          if (mccList.length && mncList.length) {
+            const mccFilter = mccList.map((v) => encodeURIComponent(v)).join(',')
+            const mncFilter = mncList.map((v) => encodeURIComponent(v)).join(',')
+            const carriers = await supabase.select('business_operators', `select=mcc,mnc,name&mcc=in.(${mccFilter})&mnc=in.(${mncFilter})`)
+            const carrierList = Array.isArray(carriers) ? carriers : []
+            const carrierMap = new Map()
+            for (const c of carrierList) {
+              const key = `${String(c.mcc).trim()}-${String(c.mnc).trim()}`
+              carrierMap.set(key, c.name ?? null)
+            }
+            for (const zoneRow of byZone) {
+              const name = carrierMap.get(String(zoneRow.visitedMccMnc || ''))
+              if (name) zoneRow.countryName = name
+            }
           }
         }
+        res.json({
+          simId: sim.sim_id,
+          iccid: sim.iccid,
+          period,
+          totalUsageKb: Math.floor(totalUsageKb),
+          byZone,
+        })
+        return
       }
-      res.json({
-        simId: simId,
-        iccid: sim.iccid,
-        period,
-        totalUsageKb: Math.floor(totalUsageKb),
-        byZone,
+
+      const startDate = startDateRaw ? new Date(startDateRaw) : null
+      const endDate = endDateRaw ? new Date(endDateRaw) : null
+      if (!startDate || !endDate || Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+        return sendError(res, 400, 'BAD_REQUEST', 'startDate and endDate are required and must be valid date-time.')
+      }
+      const enterpriseId = getEnterpriseIdFromReq(req)
+      if (!(await ensureDepartmentSimAccess(req, res, supabase, sim.iccid, enterpriseId))) return
+      const startDay = startOfDayUtc(startDate)
+      const endDay = startOfDayUtc(endDate)
+      const tenantFilter = enterpriseId ? `&enterprise_id=eq.${encodeURIComponent(enterpriseId)}` : ''
+      const rows = await supabase.select(
+        'usage_daily_summary',
+        `select=usage_day,uplink_kb,downlink_kb,total_kb,created_at&iccid=eq.${encodeURIComponent(sim.iccid)}${tenantFilter}&usage_day=gte.${encodeURIComponent(startDay.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(endDay.toISOString().slice(0, 10))}&order=usage_day.asc`
+      )
+
+      const data = Array.isArray(rows) ? rows : []
+      const out = data.map((r) => {
+        const day = new Date(`${r.usage_day}T00:00:00.000Z`)
+        const next = addDaysUtc(day, 1)
+        return {
+          periodStart: day.toISOString(),
+          periodEnd: next.toISOString(),
+          uplinkBytes: Number(r.uplink_kb ?? 0) * 1024,
+          downlinkBytes: Number(r.downlink_kb ?? 0) * 1024,
+          totalBytes: Number(r.total_kb ?? 0) * 1024,
+          sessionCount: 0,
+        }
       })
+
+      res.json(out)
     })
 
     app.get(`${prefix}/enterprises/:enterpriseId/usage`, async (req, res) => {
@@ -2680,12 +2959,12 @@ export function createApp() {
 
     app.get(`${prefix}/bills/:billId/files/csv`, async (req, res) => {
       const enterpriseId = getEnterpriseIdFromReq(req)
-      const supabase = enterpriseId ? createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) }) : createSupabaseRestClient({ traceId: getTraceId(res) })
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const billId = String(req.params.billId)
       const limitParam = req.query?.limit ?? req.query?.pageSize
-      const { limit, page, offset } = parsePagination(
-        { limit: limitParam, page: req.query?.page },
-        { limitDefault: 2000, limitMax: 10000, pageDefault: 1 }
+      const { page, pageSize, offset } = parsePagination(
+        { pageSize: limitParam, page: req.query?.page },
+        { defaultPage: 1, defaultPageSize: 2000, maxPageSize: 10000 }
       )
 
       if (enterpriseId) {
@@ -2697,7 +2976,7 @@ export function createApp() {
 
       const rows = await supabase.select(
         'bill_line_items',
-        `select=line_item_id,item_type,amount,metadata,created_at&bill_id=eq.${encodeURIComponent(billId)}&order=line_item_id.asc&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`
+        `select=line_item_id,item_type,amount,metadata,created_at&bill_id=eq.${encodeURIComponent(billId)}&order=line_item_id.asc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
       )
 
       const items = Array.isArray(rows) ? rows : []
@@ -2742,9 +3021,9 @@ export function createApp() {
       {
         const filterPairs = []
         filterPairs.push(`billId=${billId}`)
-        filterPairs.push(`limit=${limit}`)
+        filterPairs.push(`limit=${pageSize}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.send(csv)
     })
@@ -3063,6 +3342,19 @@ export function createApp() {
         isValidUuid,
       },
     })
+    registerPackageModuleRoutes({
+      app,
+      prefix,
+      deps: {
+        createSupabaseRestClient,
+        getTraceId,
+        sendError,
+        ensureResellerAdmin,
+        ensureResellerSales,
+        resolveEnterpriseForReseller,
+        isValidUuid,
+      },
+    })
     registerNetworkProfileRoutes({
       app,
       prefix,
@@ -3123,44 +3415,188 @@ export function createApp() {
         isValidUuid,
       },
     })
-    app.get(`${prefix}/sims:csv`, async (req, res) => {
-      const enterpriseId = getEnterpriseIdFromReq(req)
-      const supabase = enterpriseId ? createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) }) : createSupabaseRestClient({ traceId: getTraceId(res) })
-      const departmentId = getRoleScope(req) === 'department' ? getDepartmentIdFromReq(req) : null
+    const simCsvHandler = async (req, res) => {
+      console.log('[DEBUG] simCsvHandler entered for path:', req.path)
+      const auth = ensureSubscriptionAccess(req, res)
+      if (!auth) return
+
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+
+      const resellerIdQuery = req.query.resellerId ? String(req.query.resellerId) : null
+      const pathEnterpriseId = req.params.enterpriseId ? String(req.params.enterpriseId) : null
+      const enterpriseIdQuery = pathEnterpriseId || (req.query.enterpriseId ? String(req.query.enterpriseId) : null)
+      const departmentIdQuery = req.query.departmentId ? String(req.query.departmentId) : null
+
+      let enterpriseId = null
+      let departmentId = null
+      let resellerId = null
+
+      if (auth.scope === 'platform') {
+        if (resellerIdQuery && !isValidUuid(resellerIdQuery)) {
+          return sendError(res, 400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
+        }
+        if (enterpriseIdQuery && !isValidUuid(enterpriseIdQuery)) {
+          return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+        }
+        resellerId = resellerIdQuery
+        enterpriseId = enterpriseIdQuery
+      } else if (auth.scope === 'reseller') {
+        resellerId = auth.resellerId ? String(auth.resellerId) : null
+        if (enterpriseIdQuery) {
+          if (!isValidUuid(enterpriseIdQuery)) {
+            return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+          }
+          enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, enterpriseIdQuery)
+          if (!enterpriseId) return
+        }
+      } else if (auth.scope === 'customer') {
+        enterpriseId = auth.customerId ? String(auth.customerId) : null
+        if (pathEnterpriseId && pathEnterpriseId !== enterpriseId) {
+          return sendError(res, 403, 'FORBIDDEN', 'Access denied to this enterprise.')
+        }
+        // If query param mismatch, we ignore it and enforce auth context
+      } else if (auth.scope === 'department') {
+        enterpriseId = auth.customerId ? String(auth.customerId) : null
+        departmentId = auth.departmentId ? String(auth.departmentId) : null
+        if (pathEnterpriseId && pathEnterpriseId !== enterpriseId) {
+          return sendError(res, 403, 'FORBIDDEN', 'Access denied to this enterprise.')
+        }
+      }
+
+      if (departmentIdQuery && !departmentId) {
+        if (enterpriseId) {
+          departmentId = await resolveDepartmentForEnterprise(req, res, supabase, enterpriseId, departmentIdQuery)
+          if (!departmentId) return
+        } else if (auth.scope === 'platform' || auth.scope === 'reseller') {
+          return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required when filtering by departmentId.')
+        }
+      }
+
+      const includeSensitive = (auth.scope === 'platform' || auth.scope === 'reseller') && !pathEnterpriseId
+
       const iccid = req.query.iccid ? normalizeIccid(req.query.iccid) : null
       const msisdn = req.query.msisdn ? String(req.query.msisdn) : null
       const status = req.query.status ? String(req.query.status) : null
+      const supplierId = includeSensitive && req.query.supplierId ? String(req.query.supplierId).trim() : null
+      const operatorId = includeSensitive && req.query.operatorId ? String(req.query.operatorId).trim() : null
       const limit = req.query.limit ? Number(req.query.limit) : 1000
       const page = req.query.page ? Number(req.query.page) : 1
       const offset = Math.max(0, (Math.max(1, page) - 1) * Math.max(0, limit))
+
       if (iccid && !isValidIccid(iccid)) {
         return sendError(res, 400, 'BAD_REQUEST', 'iccid must be 18-20 digits.')
       }
+
+      let resellerEnterpriseIds = null
+      if (!enterpriseId && resellerId && (auth.scope === 'platform' || auth.scope === 'reseller')) {
+        const resellerRows = await supabase.select('tenants', `select=tenant_id&parent_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.ENTERPRISE`)
+        resellerEnterpriseIds = (Array.isArray(resellerRows) ? resellerRows : []).map((t) => String(t.tenant_id))
+        if (resellerEnterpriseIds.length === 0) {
+          res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+          res.setHeader('Content-Disposition', 'attachment; filename="sims.csv"')
+          res.send('simId,iccid,imsi,msisdn,status,lifecycleSubStatus,upstreamStatus,upstreamStatusUpdatedAt,formFactor,activationCode,apn,activationDate,totalUsageBytes,imei\n')
+          return
+        }
+      }
+
       const filters = []
       if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
+      if (!enterpriseId && resellerEnterpriseIds) {
+        filters.push(`enterprise_id=in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`)
+      }
       if (departmentId) filters.push(`department_id=eq.${encodeURIComponent(departmentId)}`)
       if (iccid) filters.push(`iccid=eq.${encodeURIComponent(iccid)}`)
       if (msisdn) filters.push(`msisdn=eq.${encodeURIComponent(msisdn)}`)
       if (status) filters.push(`status=eq.${encodeURIComponent(status)}`)
+      if (supplierId) filters.push(`supplier_id=eq.${encodeURIComponent(supplierId)}`)
+      if (operatorId) filters.push(`operator_id=eq.${encodeURIComponent(operatorId)}`)
+
       const filterQs = filters.length ? `&${filters.join('&')}` : ''
       const { data } = await supabase.selectWithCount(
         'sims',
-        `select=iccid,primary_imsi,msisdn,status,apn,activation_date,bound_imei&order=iccid.asc&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
+        `select=sim_id,iccid,primary_imsi,msisdn,status,apn,activation_date,bound_imei,activation_code,supplier_id,operator_id,enterprise_id,department_id,form_factor,upstream_status,upstream_status_updated_at,created_at,suppliers(name),operators(name,business_operators(name,mcc,mnc))&order=iccid.asc&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
       )
       const rows = Array.isArray(data) ? data : []
-      const headers = ['iccid', 'imsi', 'msisdn', 'status', 'apn', 'activationDate', 'imeiLocked']
+
+      const enterpriseIds = Array.from(new Set(rows.map((r) => r.enterprise_id).filter(Boolean).map((v) => String(v))))
+      const departmentIds = Array.from(new Set(rows.map((r) => r.department_id).filter(Boolean).map((v) => String(v))))
+      const tenantIds = Array.from(new Set([...enterpriseIds, ...departmentIds]))
+      let tenantNameMap = new Map()
+      let tenantParentMap = new Map()
+      let resellerNameMap = new Map()
+
+      if (tenantIds.length) {
+        const tRows = await supabase.select('tenants', `select=tenant_id,name,parent_id&tenant_id=in.(${tenantIds.map((id) => encodeURIComponent(id)).join(',')})`)
+        const tRowsArr = Array.isArray(tRows) ? tRows : []
+        tenantNameMap = new Map(tRowsArr.map((t) => [String(t.tenant_id), t.name ?? null]))
+        tenantParentMap = new Map(tRowsArr.map((t) => [String(t.tenant_id), t.parent_id ? String(t.parent_id) : null]))
+        
+        const resellerIds = Array.from(new Set(tRowsArr.map((t) => t.parent_id).filter(Boolean).map((v) => String(v))))
+        if (resellerIds.length) {
+          const rRows = await supabase.select('tenants', `select=tenant_id,name&tenant_id=in.(${resellerIds.map((id) => encodeURIComponent(id)).join(',')})`)
+          resellerNameMap = new Map((Array.isArray(rRows) ? rRows : []).map((t) => [String(t.tenant_id), t.name ?? null]))
+        }
+      }
+
+      const headers = [
+        'simId',
+        'iccid',
+        'imsi',
+        'msisdn',
+        'status',
+        'lifecycleSubStatus',
+        'upstreamStatus',
+        'upstreamStatusUpdatedAt',
+        'formFactor',
+        'activationCode',
+        ...(includeSensitive ? ['supplierId', 'supplierName', 'operatorId', 'operatorName', 'mcc', 'mnc'] : []),
+        'apn',
+        ...(includeSensitive ? ['resellerId', 'resellerName'] : []),
+        'enterpriseId',
+        'enterpriseName',
+        'departmentId',
+        'departmentName',
+        'activationDate',
+        'totalUsageBytes',
+        'imei',
+      ]
+
       const csvRows = [headers.map(escapeCsv).join(',')]
       for (const r of rows) {
         csvRows.push([
-          escapeCsv(r.iccid),
+          escapeCsv(r.sim_id ?? ''),
+          escapeCsv(r.iccid ?? ''),
           escapeCsv(r.primary_imsi ?? ''),
           escapeCsv(r.msisdn ?? ''),
           escapeCsv(r.status ?? ''),
+          escapeCsv(''),
+          escapeCsv(r.upstream_status ?? ''),
+          escapeCsv(toIsoDateTime(r.upstream_status_updated_at) ?? ''),
+          escapeCsv(r.form_factor ?? ''),
+          escapeCsv(r.activation_code ?? ''),
+          ...(includeSensitive ? [
+            escapeCsv(r.supplier_id ?? ''),
+            escapeCsv(r.suppliers?.name ?? ''),
+            escapeCsv(r.operator_id ?? ''),
+            escapeCsv(r.operators?.business_operators?.name ?? r.operators?.name ?? ''),
+            escapeCsv(r.operators?.business_operators?.mcc ?? ''),
+            escapeCsv(r.operators?.business_operators?.mnc ?? ''),
+          ] : []),
           escapeCsv(r.apn ?? ''),
+          ...(includeSensitive ? [
+            escapeCsv(r.enterprise_id ? tenantParentMap.get(String(r.enterprise_id)) ?? '' : ''),
+            escapeCsv((r.enterprise_id && tenantParentMap.get(String(r.enterprise_id))) ? resellerNameMap.get(tenantParentMap.get(String(r.enterprise_id))) ?? '' : ''),
+          ] : []),
+          escapeCsv(r.enterprise_id ?? ''),
+          escapeCsv(r.enterprise_id ? tenantNameMap.get(String(r.enterprise_id)) ?? '' : ''),
+          escapeCsv(r.department_id ?? ''),
+          escapeCsv(r.department_id ? tenantNameMap.get(String(r.department_id)) ?? '' : ''),
           escapeCsv(toIsoDateTime(r.activation_date) ?? ''),
-          escapeCsv(Boolean(r.bound_imei).toString()),
+          escapeCsv(''),
+          escapeCsv(r.bound_imei ?? ''),
         ].join(','))
       }
+
       res.setHeader('Content-Type', 'text/csv; charset=utf-8')
       res.setHeader('Content-Disposition', 'attachment; filename="sims.csv"')
       {
@@ -3168,16 +3604,24 @@ export function createApp() {
         if (iccid) filterPairs.push(`iccid=${iccid}`)
         if (msisdn) filterPairs.push(`msisdn=${msisdn}`)
         if (status) filterPairs.push(`status=${status}`)
+        if (supplierId) filterPairs.push(`supplierId=${supplierId}`)
+        if (operatorId) filterPairs.push(`operatorId=${operatorId}`)
+        if (enterpriseId) filterPairs.push(`enterpriseId=${enterpriseId}`)
+        if (departmentId) filterPairs.push(`departmentId=${departmentId}`)
+        if (resellerId) filterPairs.push(`resellerId=${resellerId}`)
         filterPairs.push(`limit=${limit}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.send(`${csvRows.join('\n')}\n`)
-    })
+    }
+
+    app.get(`${prefix}/sims:csv`, simCsvHandler)
+    app.get(`${prefix}/enterprises/:enterpriseId/sims:csv`, simCsvHandler)
 
     app.get(`${prefix}/sims/:iccid`, async (req, res) => {
       const enterpriseId = getEnterpriseIdFromReq(req)
-      const supabase = enterpriseId ? createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) }) : createSupabaseRestClient({ traceId: getTraceId(res) })
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const iccid = requireIccid(res, req.params.iccid)
       if (!iccid) return
 
@@ -3497,12 +3941,53 @@ export function createApp() {
       if (!iccid) return
       const enterpriseId = getEnterpriseIdFromReq(req)
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-      if (!(await ensureDepartmentSimAccess(req, res, supabase, iccid, enterpriseId))) return
+      const simRows = await supabase.select(
+        'sims',
+        `select=sim_id,iccid,enterprise_id,department_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`
+      )
+      const sim = Array.isArray(simRows) ? simRows[0] : null
+      if (!sim) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `sim ${iccid} not found.`)
+      }
+      const roleScope = getRoleScope(req)
+      const auth = getAuthContext(req)
+      if (roleScope === 'customer' || roleScope === 'department') {
+        if (!enterpriseId || String(sim.enterprise_id || '') !== String(enterpriseId)) {
+          return sendError(res, 403, 'FORBIDDEN', 'Sim is out of tenant scope.')
+        }
+        if (roleScope === 'department') {
+          const departmentId = getDepartmentIdFromReq(req)
+          if (sim.department_id && String(sim.department_id) !== String(departmentId)) {
+            return sendError(res, 403, 'FORBIDDEN', 'Sim is out of tenant scope.')
+          }
+        }
+      } else if (roleScope === 'reseller') {
+        const resellerId = auth.resellerId
+        if (!resellerId) {
+          return sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
+        }
+        const entRows = await supabase.select(
+          'tenants',
+          `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(sim.enterprise_id)}&limit=1`
+        )
+        const ent = Array.isArray(entRows) ? entRows[0] : null
+        if (!ent || String(ent.parent_id || '') !== String(resellerId)) {
+          return sendError(res, 403, 'FORBIDDEN', 'Sim is out of reseller scope.')
+        }
+      } else if (roleScope !== 'platform') {
+        return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
+      }
+      const balanceRows = await supabase.select(
+        'sim_balance_snapshots',
+        `select=currency,account_balance,data_balance_bytes,sms_balance_count,updated_at&iccid=eq.${encodeURIComponent(iccid)}&order=updated_at.desc&limit=1`
+      )
+      const balance = Array.isArray(balanceRows) ? balanceRows[0] : null
       res.json({
-        currency: 'USD',
-        accountBalance: 0,
-        dataBalanceBytes: 0,
-        smsBalanceCount: 0,
+        currency: balance?.currency ?? 'USD',
+        accountBalance: Number(balance?.account_balance ?? 0),
+        dataBalanceBytes: Number(balance?.data_balance_bytes ?? 0),
+        smsBalanceCount: Number(balance?.sms_balance_count ?? 0),
+        updatedAt: balance?.updated_at ?? null,
       })
     })
 
@@ -3524,8 +4009,20 @@ export function createApp() {
       } else if (roleScope === 'platform') {
         const fromReq = getEnterpriseIdFromReq(req)
         enterpriseId = enterpriseId || (fromReq ? String(fromReq) : null)
-        if (!enterpriseId || !isValidUuid(enterpriseId)) {
+        if (enterpriseId && !isValidUuid(enterpriseId)) {
           return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+        }
+        if (!enterpriseId) {
+          const idField = parsed.field === 'sim_id' ? 'sim_id' : 'iccid'
+          const simRows = await supabase.select(
+            'sims',
+            `select=enterprise_id&${idField}=eq.${encodeURIComponent(parsed.value)}&limit=1`
+          )
+          const sim = Array.isArray(simRows) ? simRows[0] : null
+          if (!sim || !sim.enterprise_id) {
+            return sendError(res, 404, 'RESOURCE_NOT_FOUND', `sim ${parsed.value} not found.`)
+          }
+          enterpriseId = String(sim.enterprise_id)
         }
       } else {
         const fromReq = getEnterpriseIdFromReq(req)
@@ -3552,7 +4049,7 @@ export function createApp() {
         if (enterpriseId) filterPairs.push(`enterpriseId=${enterpriseId}`)
         filterPairs.push(`page=${result.value.page}`)
         filterPairs.push(`pageSize=${result.value.pageSize}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.json(result.value)
     })
@@ -3849,7 +4346,7 @@ export function createApp() {
       if (!fromDate || !toDate || Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
         return sendError(res, 400, 'BAD_REQUEST', 'from and to are required and must be valid date-time.')
       }
-      const { limit, page, offset } = parsePagination(req.query, { limitDefault: 50, limitMax: 1000, pageDefault: 1 })
+      const { page, pageSize, offset } = parsePagination(req.query, { defaultPage: 1, defaultPageSize: 50, maxPageSize: 1000 })
       const result = await getLocationHistory({
         supabase,
         wxClient: null,
@@ -3857,7 +4354,7 @@ export function createApp() {
         enterpriseId,
         from: fromDate.toISOString(),
         to: toDate.toISOString(),
-        limit,
+        limit: pageSize,
         offset,
       })
       if (!result.ok) return sendError(res, result.status, result.code, result.message)
@@ -3865,15 +4362,15 @@ export function createApp() {
         const filterPairs = []
         filterPairs.push(`from=${fromDate.toISOString()}`)
         filterPairs.push(`to=${toDate.toISOString()}`)
-        filterPairs.push(`pageSize=${limit}`)
+        filterPairs.push(`pageSize=${pageSize}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.json({
         items: result.value.items,
         total: result.value.total,
         page,
-        pageSize: limit,
+        pageSize,
       })
     })
 
@@ -3890,7 +4387,7 @@ export function createApp() {
         else if (v === 'false' || v === '0' || v === 'no') acknowledged = false
         else return sendError(res, 400, 'BAD_REQUEST', 'acknowledged must be true or false.')
       }
-      const { limit, page, offset } = parsePagination(req.query, { limitDefault: 50, limitMax: 1000, pageDefault: 1 })
+      const { page, pageSize, offset } = parsePagination(req.query, { defaultPage: 1, defaultPageSize: 50, maxPageSize: 1000 })
       const result = await listAlerts({
         supabase,
         resellerId: scope.resellerId ?? null,
@@ -3899,7 +4396,7 @@ export function createApp() {
         from: query.from ? String(query.from) : null,
         to: query.to ? String(query.to) : null,
         acknowledged,
-        limit,
+        limit: pageSize,
         offset,
       })
       if (!result.ok) return sendError(res, result.status, result.code, result.message)
@@ -3910,15 +4407,15 @@ export function createApp() {
         if (query.from) filterPairs.push(`from=${String(query.from)}`)
         if (query.to) filterPairs.push(`to=${String(query.to)}`)
         if (query.acknowledged !== undefined) filterPairs.push(`acknowledged=${String(query.acknowledged)}`)
-        filterPairs.push(`pageSize=${limit}`)
+        filterPairs.push(`pageSize=${pageSize}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.json({
         items: result.value.items,
         total: result.value.total,
         page,
-        pageSize: limit,
+        pageSize,
       })
     })
 
@@ -4179,7 +4676,7 @@ export function createApp() {
       const status = req.query.status ? String(req.query.status) : null
       const sortBy = req.query.sortBy ? String(req.query.sortBy) : null
       const sortOrder = req.query.sortOrder ? String(req.query.sortOrder) : null
-      const { limit, page, offset } = parsePagination(req.query, { limitDefault: 50, limitMax: 1000, pageDefault: 1 })
+      const { page, pageSize, offset } = parsePagination(req.query, { defaultPage: 1, defaultPageSize: 50, maxPageSize: 1000 })
 
       const filters = []
       if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
@@ -4197,7 +4694,7 @@ export function createApp() {
 
       const { data, total } = await supabase.selectWithCount(
         'api_clients',
-        `select=client_id,enterprise_id,status,created_at,rotated_at${orderQs}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
+        `select=client_id,enterprise_id,status,created_at,rotated_at${orderQs}&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
       )
 
       const rows = Array.isArray(data) ? data : []
@@ -4207,9 +4704,9 @@ export function createApp() {
         if (status) filterPairs.push(`status=${status}`)
         if (sortBy) filterPairs.push(`sortBy=${sortBy}`)
         if (sortOrder) filterPairs.push(`sortOrder=${sortOrder}`)
-        filterPairs.push(`limit=${limit}`)
+        filterPairs.push(`pageSize=${pageSize}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.json({
         items: rows.map((r) => ({
@@ -4274,7 +4771,7 @@ export function createApp() {
         if (sortOrder) filterPairs.push(`sortOrder=${sortOrder}`)
         filterPairs.push(`limit=${limit}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.send(`${csvRows.join('\n')}\n`)
     })
@@ -5216,7 +5713,7 @@ export function createApp() {
       const sortOrder = req.query.sortOrder ? String(req.query.sortOrder) : null
       const start = req.query.start ? new Date(String(req.query.start)) : null
       const end = req.query.end ? new Date(String(req.query.end)) : null
-      const { limit, page, offset } = parsePagination(req.query, { limitDefault: 50, limitMax: 1000, pageDefault: 1 })
+      const { page, pageSize, offset } = parsePagination(req.query, { defaultPage: 1, defaultPageSize: 50, maxPageSize: 1000 })
       const filters = []
       if (tenantId) filters.push(`tenant_id=eq.${encodeURIComponent(tenantId)}`)
       if (action) filters.push(`action=eq.${encodeURIComponent(action)}`)
@@ -5231,7 +5728,7 @@ export function createApp() {
       const filterQs = filters.length ? `&${filters.join('&')}` : ''
       const { data, total } = await supabase.selectWithCount(
         'audit_logs',
-        `select=audit_id,actor_user_id,actor_role,tenant_id,action,target_type,target_id,request_id,created_at,before_data,after_data${orderQs}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
+        `select=audit_id,actor_user_id,actor_role,tenant_id,action,target_type,target_id,request_id,created_at,before_data,after_data${orderQs}&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
       )
       const rows = Array.isArray(data) ? data : []
       {
@@ -5245,9 +5742,9 @@ export function createApp() {
         if (end && !Number.isNaN(end.getTime())) filterPairs.push(`end=${end.toISOString()}`)
         if (sortBy) filterPairs.push(`sortBy=${sortBy}`)
         if (sortOrder) filterPairs.push(`sortOrder=${sortOrder}`)
-        filterPairs.push(`limit=${limit}`)
+        filterPairs.push(`pageSize=${pageSize}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.json({
         items: rows.map((r) => ({
@@ -5331,7 +5828,7 @@ export function createApp() {
         if (sortOrder) filterPairs.push(`sortOrder=${sortOrder}`)
         filterPairs.push(`limit=${limit}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.send(`${csvRows.join('\n')}\n`)
     })
@@ -5429,7 +5926,7 @@ export function createApp() {
         if (sortOrder) filterPairs.push(`sortOrder=${sortOrder}`)
         filterPairs.push(`limit=${limit}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.json({
         items: rows.map((r) => ({
@@ -5510,7 +6007,7 @@ export function createApp() {
         if (sortOrder) filterPairs.push(`sortOrder=${sortOrder}`)
         filterPairs.push(`limit=${limit}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.send(`${csvRows.join('\n')}\n`)
     })
@@ -5569,7 +6066,7 @@ export function createApp() {
         if (sortOrder) filterPairs.push(`sortOrder=${sortOrder}`)
         filterPairs.push(`limit=${limit}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.json({
         items: rows.map((r) => ({
@@ -5654,7 +6151,7 @@ export function createApp() {
         if (sortOrder) filterPairs.push(`sortOrder=${sortOrder}`)
         filterPairs.push(`limit=${limit}`)
         filterPairs.push(`page=${page}`)
-        res.setHeader('X-Filters', filterPairs.join(';'))
+        setXFilters(res, filterPairs.join(';'))
       }
       res.send(`${csvRows.join('\n')}\n`)
     })
@@ -5786,7 +6283,7 @@ export function createApp() {
       addFilter('limit', String(limit))
       addFilter('page', String(page))
       const filtersSummary = filterPairs.join(', ')
-      if (filtersSummary) res.setHeader('X-Filters', filtersSummary)
+      if (filtersSummary) setXFilters(res, filtersSummary)
       res.json({
         items: rows.map((r) => ({
           code: r.code,
@@ -5914,7 +6411,7 @@ export function createApp() {
       const filtersSummary = filterPairs.join(', ')
       res.setHeader('Content-Type', 'text/csv; charset=utf-8')
       res.setHeader('Content-Disposition', 'attachment; filename="share_links.csv"')
-      if (filtersSummary) res.setHeader('X-Filters', filtersSummary)
+      if (filtersSummary) setXFilters(res, filtersSummary)
       res.send(`${csvRows.join('\n')}\n`)
     })
     app.post(`${prefix}/admin/share-links/:code\\:invalidate`, async (req, res) => {
@@ -7065,6 +7562,9 @@ export function createApp() {
               url: ${JSON.stringify(openapiUrl)},
               dom_id: '#swagger-ui',
               deepLinking: true,
+              docExpansion: 'none',
+              tagsSorter: 'alpha',
+              operationsSorter: 'alpha',
               presets: [SwaggerUIBundle.presets.apis],
               layout: 'BaseLayout',
               onComplete: function() {
@@ -9419,7 +9919,8 @@ export function createApp() {
   }
   app.post('/v1/share-links', async (req, res) => {
     const enterpriseId = getEnterpriseIdFromReq(req)
-    if (!enterpriseId) {
+    const isPlatform = getRoleScope(req) === 'platform'
+    if (!enterpriseId && !isPlatform) {
       return sendError(res, 401, 'UNAUTHORIZED', 'Enterprise token required.')
     }
     const baseUrl = buildBaseUrl(req)
@@ -9487,10 +9988,10 @@ export function createApp() {
     }
     const vis = String(entry.visibility || 'tenant')
     if (vis === 'tenant') {
-      if (!enterpriseId) {
+      if (!enterpriseId && getRoleScope(req) !== 'platform') {
         return sendError(res, 401, 'UNAUTHORIZED', 'Enterprise token required to open this link.')
       }
-      if (String(entry.tenantId || '') !== String(enterpriseId)) {
+      if (enterpriseId && String(entry.tenantId || '') !== String(enterpriseId)) {
         return sendError(res, 403, 'FORBIDDEN', 'This link belongs to a different tenant.')
       }
     }
@@ -9592,6 +10093,10 @@ export function createApp() {
   })
   app.post('/v1/auth/token', handleAuthToken)
   app.post('/auth/token', handleAuthToken)
+  app.post('/v1/auth/login', handleAuthLogin)
+  app.post('/auth/login', handleAuthLogin)
+  app.post('/v1/auth/refresh', handleAuthRefresh)
+  app.post('/auth/refresh', handleAuthRefresh)
 
   function mountResellerRoutes(prefix) {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -9665,6 +10170,17 @@ export function createApp() {
       if (!reseller) {
         return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create reseller.')
       }
+      const tenantRows = await supabase.select(
+        'tenants',
+        `select=tenant_id&tenant_id=eq.${encodeURIComponent(reseller.id)}&tenant_type=eq.RESELLER&limit=1`
+      )
+      if (!Array.isArray(tenantRows) || tenantRows.length === 0) {
+        await supabase.insert('tenants', {
+          tenant_id: reseller.id,
+          tenant_type: 'RESELLER',
+          name,
+        })
+      }
       await supabase.insert('reseller_branding', {
         reseller_id: reseller.id,
         brand_name: name,
@@ -9692,13 +10208,45 @@ export function createApp() {
       if (!requirePlatform(req, res)) return
       const statusInput = req.query.status ? String(req.query.status) : null
       const storageStatus = statusInput ? mapStatusToStorage(statusInput) : null
+      const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
       if (statusInput && !storageStatus) {
         return sendError(res, 400, 'VALIDATION_ERROR', 'status must be ACTIVE, DEACTIVATED, or SUSPENDED.')
+      }
+      if (operatorId && !isValidUuid(operatorId)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
       }
       const { page, pageSize, offset } = parsePagination(req.query, { defaultPage: 1, defaultPageSize: 20, maxPageSize: 100 })
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const filters = []
       if (storageStatus) filters.push(`status=eq.${encodeURIComponent(storageStatus)}`)
+      if (operatorId) {
+        const simRows = await supabase.select(
+          'sims',
+          `select=enterprise_id&operator_id=eq.${encodeURIComponent(operatorId)}`
+        )
+        const enterpriseIds = Array.from(
+          new Set((Array.isArray(simRows) ? simRows : []).map((row) => row.enterprise_id).filter(Boolean).map((id) => String(id)))
+        )
+        if (enterpriseIds.length === 0) {
+          return res.json({ items: [], total: 0, page, pageSize })
+        }
+        const enterpriseRows = await supabase.select(
+          'tenants',
+          `select=tenant_id,parent_id&tenant_type=eq.ENTERPRISE&tenant_id=in.(${enterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`
+        )
+        const resellerIds = Array.from(
+          new Set(
+            (Array.isArray(enterpriseRows) ? enterpriseRows : [])
+              .map((row) => row.parent_id)
+              .filter(Boolean)
+              .map((id) => String(id))
+          )
+        )
+        if (resellerIds.length === 0) {
+          return res.json({ items: [], total: 0, page, pageSize })
+        }
+        filters.push(`id=in.(${resellerIds.map((id) => encodeURIComponent(id)).join(',')})`)
+      }
       const filterQs = filters.length ? `&${filters.join('&')}` : ''
       const { data, total } = await supabase.selectWithCount(
         'resellers',
@@ -9747,6 +10295,10 @@ export function createApp() {
       if (!resellerId) {
         return sendError(res, 400, 'BAD_REQUEST', 'resellerId is required.')
       }
+      const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
+      if (operatorId && !isValidUuid(operatorId)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+      }
       const isPlatform = roleScope === 'platform' || role === 'platform_admin'
       if (!isPlatform) {
         if (roleScope !== 'reseller') {
@@ -9765,6 +10317,25 @@ export function createApp() {
       const row = Array.isArray(rows) ? rows[0] : null
       if (!row) {
         return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+      }
+      if (operatorId) {
+        const enterpriseRows = await supabase.select(
+          'tenants',
+          `select=tenant_id&tenant_type=eq.ENTERPRISE&parent_id=eq.${encodeURIComponent(resellerId)}`
+        )
+        const enterpriseIds = Array.from(
+          new Set((Array.isArray(enterpriseRows) ? enterpriseRows : []).map((r) => String(r.tenant_id)))
+        )
+        if (enterpriseIds.length === 0) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+        }
+        const simRows = await supabase.select(
+          'sims',
+          `select=sim_id&operator_id=eq.${encodeURIComponent(operatorId)}&enterprise_id=in.(${enterpriseIds.map((id) => encodeURIComponent(id)).join(',')})&limit=1`
+        )
+        if (!Array.isArray(simRows) || simRows.length === 0) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+        }
       }
       const brandingRows = await supabase.select(
         'reseller_branding',
@@ -9875,6 +10446,7 @@ export function createApp() {
       if (!resellerId) {
         return sendError(res, 400, 'BAD_REQUEST', 'resellerId is required.')
       }
+      const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
       const statusInput = req.body?.status ? String(req.body.status) : null
       const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : ''
       const storageStatus = statusInput ? mapStatusToStorage(statusInput) : null
@@ -9884,6 +10456,9 @@ export function createApp() {
       if (!reason) {
         return sendError(res, 400, 'VALIDATION_ERROR', 'reason is required.')
       }
+      if (operatorId && !isValidUuid(operatorId)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+      }
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const rows = await supabase.select(
         'resellers',
@@ -9892,6 +10467,25 @@ export function createApp() {
       const reseller = Array.isArray(rows) ? rows[0] : null
       if (!reseller) {
         return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+      }
+      if (operatorId) {
+        const enterpriseRows = await supabase.select(
+          'tenants',
+          `select=tenant_id&tenant_type=eq.ENTERPRISE&parent_id=eq.${encodeURIComponent(resellerId)}`
+        )
+        const enterpriseIds = Array.from(
+          new Set((Array.isArray(enterpriseRows) ? enterpriseRows : []).map((r) => String(r.tenant_id)))
+        )
+        if (enterpriseIds.length === 0) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+        }
+        const simRows = await supabase.select(
+          'sims',
+          `select=sim_id&operator_id=eq.${encodeURIComponent(operatorId)}&enterprise_id=in.(${enterpriseIds.map((id) => encodeURIComponent(id)).join(',')})&limit=1`
+        )
+        if (!Array.isArray(simRows) || simRows.length === 0) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+        }
       }
       const previousStatus = mapStatusFromStorage(reseller.status)
       const nowIso = new Date().toISOString()
@@ -9927,6 +10521,57 @@ export function createApp() {
       return false
     }
 
+    const requireAuthenticated = (req, res) => {
+      const roleScope = getRoleScope(req)
+      const role = req?.cmpAuth?.role ? String(req.cmpAuth.role) : null
+      if (!roleScope && !role) {
+        sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
+        return false
+      }
+      return true
+    }
+
+    app.get(`${prefix}/operators`, async (req, res) => {
+      if (!requireAuthenticated(req, res)) return
+      const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
+      const mcc = req.query?.mcc ? String(req.query.mcc).trim() : ''
+      const mnc = req.query?.mnc ? String(req.query.mnc).trim() : ''
+      const name = req.query?.name ? String(req.query.name).trim() : ''
+      if (operatorId && !isValidUuid(operatorId)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+      }
+      if (mcc && !/^\d{3}$/.test(mcc)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'mcc must be 3 digits.')
+      }
+      if (mnc && !/^\d{2,3}$/.test(mnc)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'mnc must be 2-3 digits.')
+      }
+      const { page, pageSize, offset } = parsePagination(req.query ?? {}, { defaultPage: 1, defaultPageSize: 20, maxPageSize: 1000 })
+      const filters = []
+      if (operatorId) filters.push(`operator_id=eq.${encodeURIComponent(operatorId)}`)
+      if (mcc) filters.push(`mcc=eq.${encodeURIComponent(mcc)}`)
+      if (mnc) filters.push(`mnc=eq.${encodeURIComponent(mnc)}`)
+      if (name) filters.push(`name=ilike.*${encodeURIComponent(name)}*`)
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      const filterQs = filters.length ? `&${filters.join('&')}` : ''
+      const { data, total } = await supabase.selectWithCount(
+        'business_operators',
+        `select=operator_id,mcc,mnc,name&order=name.asc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
+      )
+      const rows = Array.isArray(data) ? data : []
+      res.json({
+        items: rows.map((row) => ({
+          operatorId: row.operator_id,
+          mcc: row.mcc,
+          mnc: row.mnc,
+          name: row.name,
+        })),
+        total: total ?? rows.length,
+        page,
+        pageSize,
+      })
+    })
+
     app.post(`${prefix}/operators`, async (req, res) => {
       if (!requirePlatform(req, res)) return
       const mcc = typeof req.body?.mcc === 'string' ? req.body.mcc.trim() : ''
@@ -9944,13 +10589,13 @@ export function createApp() {
       }
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const dup = await supabase.select(
-        'carriers',
-        `select=carrier_id&mcc=eq.${encodeURIComponent(mcc)}&mnc=eq.${encodeURIComponent(mnc)}&limit=1`
+        'business_operators',
+        `select=operator_id&mcc=eq.${encodeURIComponent(mcc)}&mnc=eq.${encodeURIComponent(mnc)}&limit=1`
       )
       if (Array.isArray(dup) && dup.length > 0) {
         return sendError(res, 409, 'DUPLICATE_OPERATOR', 'Operator already exists.')
       }
-      const inserted = await supabase.insert('carriers', {
+      const inserted = await supabase.insert('business_operators', {
         mcc,
         mnc,
         name,
@@ -9964,18 +10609,177 @@ export function createApp() {
           actor_role: 'PLATFORM',
           action: 'OPERATOR_GSMA_OVERRIDE',
           target_type: 'OPERATOR',
-          target_id: row.carrier_id,
+          target_id: row.operator_id,
           request_id: getTraceId(res),
           source_ip: req.ip,
           after_data: { mcc, mnc, name, gsmaOverride: true },
         }, { returning: 'minimal' })
       }
       res.status(201).json({
-        operatorId: row.carrier_id,
+        operatorId: row.operator_id,
         mcc: row.mcc,
         mnc: row.mnc,
         name: row.name,
       })
+    })
+
+    app.patch(`${prefix}/operators/:operatorId`, async (req, res) => {
+      if (!requirePlatform(req, res)) return
+      const operatorId = String(req.params.operatorId || '').trim()
+      if (!isValidUuid(operatorId)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+      }
+      const patch = {}
+      if (typeof req.body?.name === 'string') {
+        const name = req.body.name.trim()
+        if (!name) {
+          return sendError(res, 400, 'VALIDATION_ERROR', 'name is required.')
+        }
+        patch.name = name
+      }
+      if (!Object.keys(patch).length) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'No fields to update.')
+      }
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      const updated = await supabase.update(
+        'business_operators',
+        `operator_id=eq.${encodeURIComponent(operatorId)}`,
+        patch
+      )
+      const row = Array.isArray(updated) ? updated[0] : null
+      if (!row) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', 'Operator not found.')
+      }
+      res.json({
+        operatorId: row.operator_id,
+        mcc: row.mcc,
+        mnc: row.mnc,
+        name: row.name,
+      })
+    })
+
+    app.post(`${prefix}/resellers/:resellerId/suppliers`, async (req, res) => {
+      const auth = ensureResellerAdmin(req, res)
+      if (!auth) return
+      const resellerId = String(req.params.resellerId || '').trim()
+      const supplierId = typeof req.body?.supplierId === 'string' ? req.body.supplierId.trim() : ''
+      if (!isValidUuid(resellerId)) {
+        return sendError(res, 400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
+      }
+      if (!isValidUuid(supplierId)) {
+        return sendError(res, 400, 'BAD_REQUEST', 'supplierId must be a valid uuid.')
+      }
+      if (auth.scope === 'reseller' && auth.resellerId !== resellerId) {
+        return sendError(res, 403, 'FORBIDDEN', 'resellerId is out of scope.')
+      }
+      try {
+        const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+        const resellerRows = await supabase.select('resellers', `select=id&id=eq.${encodeURIComponent(resellerId)}&limit=1`)
+        if (!Array.isArray(resellerRows) || resellerRows.length === 0) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+        }
+        const supplierRows = await supabase.select(
+          'suppliers',
+          `select=supplier_id&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+        )
+        if (!Array.isArray(supplierRows) || supplierRows.length === 0) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `supplier ${supplierId} not found.`)
+        }
+        const existingRows = await supabase.select(
+          'reseller_suppliers',
+          `select=reseller_id,supplier_id,created_at&reseller_id=eq.${encodeURIComponent(resellerId)}&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+        )
+        const existing = Array.isArray(existingRows) ? existingRows[0] : null
+        if (existing?.reseller_id) {
+          return sendError(res, 409, 'ALREADY_BOUND', 'supplierId is already bound to resellerId.')
+        }
+        const insertedRows = await supabase.insert(
+          'reseller_suppliers',
+          { reseller_id: resellerId, supplier_id: supplierId },
+          { returning: 'representation' }
+        )
+        const row = Array.isArray(insertedRows) ? insertedRows[0] : null
+        if (!row) {
+          return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to bind supplier.')
+        }
+        res.status(201).json({
+          resellerId: row.reseller_id,
+          supplierId: row.supplier_id,
+          boundAt: row.created_at ?? null,
+        })
+      } catch (error) {
+        const message = String(error?.message ?? '')
+        if (message.includes("Could not find the table 'public.reseller_suppliers'")) {
+          return sendError(res, 503, 'SCHEMA_NOT_READY', 'reseller_suppliers table is not available yet.')
+        }
+        const status = Number(error?.status) || 500
+        const code = error?.code ? String(error.code) : 'INTERNAL_ERROR'
+        const errorMessage = message || 'Failed to bind supplier.'
+        return sendError(res, status, code, errorMessage)
+      }
+    })
+
+    app.get(`${prefix}/resellers/:resellerId/suppliers`, async (req, res) => {
+      const auth = ensureResellerAdmin(req, res)
+      if (!auth) return
+      const resellerId = String(req.params.resellerId || '').trim()
+      if (!isValidUuid(resellerId)) {
+        return sendError(res, 400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
+      }
+      if (auth.scope === 'reseller' && auth.resellerId !== resellerId) {
+        return sendError(res, 403, 'FORBIDDEN', 'resellerId is out of scope.')
+      }
+      try {
+        const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+        const resellerRows = await supabase.select('resellers', `select=id&id=eq.${encodeURIComponent(resellerId)}&limit=1`)
+        if (!Array.isArray(resellerRows) || resellerRows.length === 0) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+        }
+        const linksRows = await supabase.select(
+          'reseller_suppliers',
+          `select=supplier_id,created_at&reseller_id=eq.${encodeURIComponent(resellerId)}&order=created_at.desc`
+        )
+        const links = Array.isArray(linksRows) ? linksRows : []
+        const supplierIds = Array.from(new Set(links.map((r) => (r?.supplier_id ? String(r.supplier_id) : '')).filter(Boolean)))
+        const supplierMap = new Map()
+        if (supplierIds.length) {
+          const supplierFilter = supplierIds.map((id) => encodeURIComponent(id)).join(',')
+          const supplierRows = await supabase.select(
+            'suppliers',
+            `select=supplier_id,name,status,created_at&supplier_id=in.(${supplierFilter})`
+          )
+          for (const row of Array.isArray(supplierRows) ? supplierRows : []) {
+            const id = row?.supplier_id ? String(row.supplier_id) : ''
+            if (id) supplierMap.set(id, row)
+          }
+        }
+        const items = links.map((link) => {
+          const id = link?.supplier_id ? String(link.supplier_id) : null
+          const supplier = id ? supplierMap.get(id) : null
+          return {
+            supplierId: id,
+            name: supplier?.name ?? null,
+            status: supplier?.status ?? null,
+            createdAt: supplier?.created_at ?? null,
+            boundAt: link?.created_at ?? null,
+          }
+        }).filter((item) => item.supplierId)
+        res.header('Cache-Control', 'no-store')
+        res.json({
+          resellerId,
+          items,
+          total: items.length,
+        })
+      } catch (error) {
+        const message = String(error?.message ?? '')
+        if (message.includes("Could not find the table 'public.reseller_suppliers'")) {
+          return sendError(res, 503, 'SCHEMA_NOT_READY', 'reseller_suppliers table is not available yet.')
+        }
+        const status = Number(error?.status) || 500
+        const code = error?.code ? String(error.code) : 'INTERNAL_ERROR'
+        const errorMessage = message || 'Failed to list reseller suppliers.'
+        return sendError(res, status, code, errorMessage)
+      }
     })
 
     app.post(`${prefix}/suppliers`, async (req, res) => {
@@ -10002,10 +10806,7 @@ export function createApp() {
         return sendError(res, 409, 'DUPLICATE_NAME', 'Supplier name already exists.')
       }
       const operatorFilter = operatorIds.map((id) => encodeURIComponent(id)).join(',')
-      const operatorRows = await supabase.select(
-        'carriers',
-        `select=carrier_id&carrier_id=in.(${operatorFilter})`
-      )
+      const operatorRows = await supabase.select('business_operators', `select=operator_id,name&operator_id=in.(${operatorFilter})`)
       const operators = Array.isArray(operatorRows) ? operatorRows : []
       if (operators.length !== operatorIds.length) {
         return sendError(res, 400, 'VALIDATION_ERROR', 'operatorIds contains invalid operator id.')
@@ -10018,38 +10819,163 @@ export function createApp() {
       if (!row) {
         return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create supplier.')
       }
-      await supabase.insert('supplier_carriers', operatorIds.map((operatorId) => ({
+      const operatorMap = new Map(operators.map((operator) => [String(operator.operator_id), operator]))
+      const operatorPayloads = operatorIds.map((operatorId) => ({
+        business_operator_id: operatorId,
         supplier_id: row.supplier_id,
-        carrier_id: operatorId,
-      })), { returning: 'minimal' })
+        name: operatorMap.get(operatorId)?.name ?? null,
+      }))
+      const insertedOperators = await supabase.insert('operators', operatorPayloads, { returning: 'representation' })
+      const createdOperators = Array.isArray(insertedOperators) ? insertedOperators : []
       res.status(201).json({
         supplierId: row.supplier_id,
         name: row.name,
         status: row.status,
         createdAt: row.created_at,
-        operatorIds,
+        operatorIds: createdOperators.map((operator) => String(operator.operator_id)).filter(Boolean),
       })
+    })
+
+    app.post(`${prefix}/suppliers/:supplierId/operators`, async (req, res) => {
+      if (!requirePlatform(req, res)) return
+      try {
+        const supplierId = String(req.params.supplierId || '').trim()
+        const operatorId = typeof req.body?.operatorId === 'string' ? req.body.operatorId.trim() : ''
+        if (!supplierId) {
+          return sendError(res, 400, 'BAD_REQUEST', 'supplierId is required.')
+        }
+        if (!operatorId || !isValidUuid(operatorId)) {
+          return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+        }
+        const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+        const supplierRows = await supabase.select(
+          'suppliers',
+          `select=supplier_id&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+        )
+        const supplier = Array.isArray(supplierRows) ? supplierRows[0] : null
+        if (!supplier?.supplier_id) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `supplier ${supplierId} not found.`)
+        }
+        const businessRows = await supabase.select(
+          'business_operators',
+          `select=operator_id,name&operator_id=eq.${encodeURIComponent(operatorId)}&limit=1`
+        )
+        const businessOperator = Array.isArray(businessRows) ? businessRows[0] : null
+        if (!businessOperator?.operator_id) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `operator ${operatorId} not found.`)
+        }
+        const existingRows = await supabase.select(
+          'operators',
+          `select=operator_id&supplier_id=eq.${encodeURIComponent(supplierId)}&business_operator_id=eq.${encodeURIComponent(operatorId)}&limit=1`
+        )
+        const legacyExistingRows = await supabase.select(
+          'operators',
+          `select=operator_id&supplier_id=eq.${encodeURIComponent(supplierId)}&operator_id=eq.${encodeURIComponent(operatorId)}&limit=1`
+        )
+        const existing = Array.isArray(existingRows) ? existingRows[0] : null
+        const legacyExisting = Array.isArray(legacyExistingRows) ? legacyExistingRows[0] : null
+        if (existing?.operator_id || legacyExisting?.operator_id) {
+          return sendError(res, 409, 'ALREADY_BOUND', 'operatorId is already bound to supplierId.')
+        }
+        const inserted = await supabase.insert(
+          'operators',
+          {
+            business_operator_id: operatorId,
+            supplier_id: supplierId,
+            name: businessOperator?.name ?? null,
+          },
+          { returning: 'representation' }
+        )
+        const row = Array.isArray(inserted) ? inserted[0] : null
+        if (!row?.operator_id) {
+          return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to bind operator.')
+        }
+        res.status(201).json({
+          supplierId,
+          operatorId,
+          supplierOperatorId: row.operator_id,
+        })
+      } catch {
+        return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to bind operator.')
+      }
     })
 
     app.get(`${prefix}/suppliers`, async (req, res) => {
       if (!requirePlatform(req, res)) return
       const statusInput = req.query.status ? String(req.query.status) : null
       const status = statusInput ? normalizeStatus(statusInput) : null
+      const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
       if (statusInput && !status) {
         return sendError(res, 400, 'VALIDATION_ERROR', 'status must be ACTIVE or SUSPENDED.')
+      }
+      if (operatorId && !isValidUuid(operatorId)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
       }
       const { page, pageSize, offset } = parsePagination(req.query, { defaultPage: 1, defaultPageSize: 20, maxPageSize: 100 })
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const filters = []
       if (status) filters.push(`status=eq.${encodeURIComponent(status)}`)
+      if (operatorId) {
+        const operatorRows = await supabase.select(
+          'operators',
+          `select=operator_id,supplier_id,business_operator_id&or=(business_operator_id.eq.${encodeURIComponent(operatorId)},operator_id.eq.${encodeURIComponent(operatorId)})&limit=1`
+        )
+        const operator = Array.isArray(operatorRows) ? operatorRows[0] : null
+        if (!operator?.supplier_id) {
+          return res.json({ items: [], total: 0, page, pageSize })
+        }
+        filters.push(`supplier_id=eq.${encodeURIComponent(String(operator.supplier_id))}`)
+      }
       const filterQs = filters.length ? `&${filters.join('&')}` : ''
       const { data, total } = await supabase.selectWithCount(
         'suppliers',
         `select=supplier_id,name,status,created_at&order=created_at.desc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
       )
       const rows = Array.isArray(data) ? data : []
+      const supplierIds = rows.map((r) => r?.supplier_id).filter(Boolean).map((v) => String(v))
+      const operatorMap = new Map()
+      if (supplierIds.length) {
+        const idFilter = supplierIds.map((id) => encodeURIComponent(id)).join(',')
+        const linkRows = await supabase.select(
+          'operators',
+          `select=operator_id,supplier_id,business_operator_id,name&supplier_id=in.(${idFilter})`
+        )
+        const links = Array.isArray(linkRows) ? linkRows : []
+        const linkedOperatorIds = [...new Set(links.map((link) => String(link?.business_operator_id ?? link?.operator_id ?? '')).filter(Boolean))]
+        const operatorInfoMap = new Map()
+        if (linkedOperatorIds.length) {
+          const operatorFilter = linkedOperatorIds.map((id) => encodeURIComponent(id)).join(',')
+          const operatorRows = await supabase.select(
+            'business_operators',
+            `select=operator_id,name,mcc,mnc&operator_id=in.(${operatorFilter})`
+          )
+          const operatorInfos = Array.isArray(operatorRows) ? operatorRows : []
+          for (const info of operatorInfos) {
+            const infoId = info?.operator_id ? String(info.operator_id) : ''
+            if (infoId) operatorInfoMap.set(infoId, info)
+          }
+        }
+        for (const link of links) {
+          const supplierId = link?.supplier_id ? String(link.supplier_id) : null
+          if (!supplierId) continue
+          if (!operatorMap.has(supplierId)) operatorMap.set(supplierId, [])
+          const linkedOperatorId = link?.business_operator_id
+            ? String(link.business_operator_id)
+            : (link?.operator_id ? String(link.operator_id) : null)
+          if (!linkedOperatorId) continue
+          const operatorInfo = linkedOperatorId ? operatorInfoMap.get(linkedOperatorId) : null
+          operatorMap.get(supplierId).push({
+            operatorId: linkedOperatorId,
+            name: operatorInfo?.name ?? link?.name ?? null,
+            mcc: operatorInfo?.mcc ?? null,
+            mnc: operatorInfo?.mnc ?? null,
+          })
+        }
+      }
       res.json({
         items: rows.map((r) => ({
+          operators: operatorMap.get(String(r.supplier_id)) ?? [],
+          operatorIds: (operatorMap.get(String(r.supplier_id)) ?? []).map((o) => o.operatorId).filter(Boolean),
           supplierId: r.supplier_id,
           name: r.name,
           status: r.status,
@@ -10067,6 +10993,10 @@ export function createApp() {
       if (!supplierId) {
         return sendError(res, 400, 'BAD_REQUEST', 'supplierId is required.')
       }
+      const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
+      if (operatorId && !isValidUuid(operatorId)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+      }
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const rows = await supabase.select(
         'suppliers',
@@ -10076,11 +11006,54 @@ export function createApp() {
       if (!row) {
         return sendError(res, 404, 'RESOURCE_NOT_FOUND', `supplier ${supplierId} not found.`)
       }
+      if (operatorId) {
+        const operatorRows = await supabase.select(
+          'operators',
+          `select=operator_id&or=(business_operator_id.eq.${encodeURIComponent(operatorId)},operator_id.eq.${encodeURIComponent(operatorId)})&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+        )
+        if (!Array.isArray(operatorRows) || operatorRows.length === 0) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `supplier ${supplierId} not found.`)
+        }
+      }
+    const linkRows = await supabase.select(
+      'operators',
+      `select=operator_id,supplier_id,business_operator_id,name&supplier_id=eq.${encodeURIComponent(supplierId)}`
+    )
+      const links = Array.isArray(linkRows) ? linkRows : []
+    const linkedOperatorIds = [...new Set(links.map((link) => String(link?.business_operator_id ?? link?.operator_id ?? '')).filter(Boolean))]
+    const operatorInfoMap = new Map()
+    if (linkedOperatorIds.length) {
+      const operatorFilter = linkedOperatorIds.map((id) => encodeURIComponent(id)).join(',')
+      const operatorRows = await supabase.select(
+        'business_operators',
+        `select=operator_id,name,mcc,mnc&operator_id=in.(${operatorFilter})`
+      )
+      const operatorInfos = Array.isArray(operatorRows) ? operatorRows : []
+      for (const info of operatorInfos) {
+        const infoId = info?.operator_id ? String(info.operator_id) : ''
+        if (infoId) operatorInfoMap.set(infoId, info)
+      }
+    }
+      const operators = links.map((link) => {
+      const linkedOperatorId = link?.business_operator_id
+        ? String(link.business_operator_id)
+        : (link?.operator_id ? String(link.operator_id) : null)
+      if (!linkedOperatorId) return null
+      const operatorInfo = linkedOperatorId ? operatorInfoMap.get(linkedOperatorId) : null
+        return {
+        operatorId: linkedOperatorId,
+        name: operatorInfo?.name ?? link?.name ?? null,
+        mcc: operatorInfo?.mcc ?? null,
+        mnc: operatorInfo?.mnc ?? null,
+        }
+      }).filter(Boolean)
       res.json({
         supplierId: row.supplier_id,
         name: row.name,
         status: row.status,
         createdAt: row.created_at,
+        operators,
+        operatorIds: operators.map((operator) => operator.operatorId).filter(Boolean),
       })
     })
 
@@ -10158,6 +11131,7 @@ export function createApp() {
       if (!supplierId) {
         return sendError(res, 400, 'BAD_REQUEST', 'supplierId is required.')
       }
+      const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
       const statusInput = req.body?.status ? String(req.body.status) : null
       const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : ''
       const status = statusInput ? normalizeStatus(statusInput) : null
@@ -10167,6 +11141,9 @@ export function createApp() {
       if (!reason) {
         return sendError(res, 400, 'VALIDATION_ERROR', 'reason is required.')
       }
+      if (operatorId && !isValidUuid(operatorId)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+      }
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const rows = await supabase.select(
         'suppliers',
@@ -10175,6 +11152,15 @@ export function createApp() {
       const row = Array.isArray(rows) ? rows[0] : null
       if (!row) {
         return sendError(res, 404, 'RESOURCE_NOT_FOUND', `supplier ${supplierId} not found.`)
+      }
+      if (operatorId) {
+        const operatorRows = await supabase.select(
+          'operators',
+          `select=operator_id&operator_id=eq.${encodeURIComponent(operatorId)}&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+        )
+        if (!Array.isArray(operatorRows) || operatorRows.length === 0) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `supplier ${supplierId} not found.`)
+        }
       }
       const previousStatus = row.status
       const nowIso = new Date().toISOString()
@@ -10312,8 +11298,12 @@ export function createApp() {
       }
       const statusInput = req.query.status ? String(req.query.status) : null
       const status = statusInput ? normalizeStatus(statusInput) : null
+      const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
       if (statusInput && !status) {
         return sendError(res, 400, 'VALIDATION_ERROR', 'status must be ACTIVE, INACTIVE, or SUSPENDED.')
+      }
+      if (operatorId && !isValidUuid(operatorId)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
       }
       const queryResellerId = req.query.resellerId ? String(req.query.resellerId) : null
       const resellerId = isReseller ? auth.resellerId : queryResellerId
@@ -10325,6 +11315,33 @@ export function createApp() {
       if (status) filters.push(`enterprise_status=eq.${encodeURIComponent(status)}`)
       if (resellerId) filters.push(`parent_id=eq.${encodeURIComponent(resellerId)}`)
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      if (operatorId) {
+        const simRows = await supabase.select(
+          'sims',
+          `select=enterprise_id&operator_id=eq.${encodeURIComponent(operatorId)}`
+        )
+        const enterpriseIds = Array.from(
+          new Set((Array.isArray(simRows) ? simRows : []).map((row) => row.enterprise_id).filter(Boolean).map((id) => String(id)))
+        )
+        if (enterpriseIds.length === 0) {
+          return res.json({ items: [], total: 0, page, pageSize })
+        }
+        if (resellerId) {
+          const scopedRows = await supabase.select(
+            'tenants',
+            `select=tenant_id&tenant_type=eq.ENTERPRISE&parent_id=eq.${encodeURIComponent(resellerId)}&tenant_id=in.(${enterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`
+          )
+          const scopedIds = Array.from(
+            new Set((Array.isArray(scopedRows) ? scopedRows : []).map((row) => String(row.tenant_id)))
+          )
+          if (scopedIds.length === 0) {
+            return res.json({ items: [], total: 0, page, pageSize })
+          }
+          filters.push(`tenant_id=in.(${scopedIds.map((id) => encodeURIComponent(id)).join(',')})`)
+        } else {
+          filters.push(`tenant_id=in.(${enterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`)
+        }
+      }
       if (isReseller) {
         if (resellerAssignedRoles.has(auth.role || '')) {
           if (!auth.userId) {
@@ -10370,6 +11387,10 @@ export function createApp() {
       if (!enterpriseId) {
         return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required.')
       }
+      const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
+      if (operatorId && !isValidUuid(operatorId)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+      }
       if (!auth.roleScope && !auth.role) {
         return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
       }
@@ -10381,6 +11402,15 @@ export function createApp() {
       const row = Array.isArray(rows) ? rows[0] : null
       if (!row) {
         return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+      }
+      if (operatorId) {
+        const simRows = await supabase.select(
+          'sims',
+          `select=sim_id&operator_id=eq.${encodeURIComponent(operatorId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`
+        )
+        if (!Array.isArray(simRows) || simRows.length === 0) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+        }
       }
       if (auth.roleScope === 'platform' || auth.role === 'platform_admin') {
       } else if (auth.roleScope === 'reseller') {
@@ -10408,14 +11438,14 @@ export function createApp() {
       } else {
         return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
       }
-      res.json({
+      const response = {
         enterpriseId: row.tenant_id,
         name: row.name,
-        resellerId: row.parent_id,
         status: row.enterprise_status,
         autoSuspendEnabled: row.auto_suspend_enabled,
         createdAt: row.created_at,
-      })
+      }
+      res.json(response)
     })
 
     app.post(`${prefix}/enterprises/:enterpriseId\\:change-status`, async (req, res) => {
@@ -10425,6 +11455,7 @@ export function createApp() {
       if (!enterpriseId) {
         return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required.')
       }
+      const operatorId = req.query?.operatorId ? String(req.query.operatorId).trim() : ''
       const statusInput = req.body?.status ? String(req.body.status) : null
       const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : ''
       const status = statusInput ? normalizeStatus(statusInput) : null
@@ -10434,6 +11465,9 @@ export function createApp() {
       if (!reason) {
         return sendError(res, 400, 'VALIDATION_ERROR', 'reason is required.')
       }
+      if (operatorId && !isValidUuid(operatorId)) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'operatorId must be a valid uuid.')
+      }
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const rows = await supabase.select(
         'tenants',
@@ -10442,6 +11476,15 @@ export function createApp() {
       const row = Array.isArray(rows) ? rows[0] : null
       if (!row) {
         return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+      }
+      if (operatorId) {
+        const simRows = await supabase.select(
+          'sims',
+          `select=sim_id&operator_id=eq.${encodeURIComponent(operatorId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`
+        )
+        if (!Array.isArray(simRows) || simRows.length === 0) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+        }
       }
       if (auth.scope === 'reseller' && String(row.parent_id || '') !== auth.resellerId) {
         return sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
@@ -10684,7 +11727,7 @@ export function createApp() {
       const roleInput = typeof req.body?.role === 'string' ? req.body.role.trim() : ''
       const role = roleInput ? roleInput.toLowerCase() : ''
       const assignedEnterpriseIds = Array.isArray(req.body?.assignedEnterpriseIds)
-        ? req.body.assignedEnterpriseIds.map((id) => String(id))
+        ? req.body.assignedEnterpriseIds.map((id) => String(id)).filter((id) => id.trim() !== '')
         : []
       if (!emailRegex.test(email)) {
         return sendError(res, 400, 'VALIDATION_ERROR', 'email is invalid.')
@@ -10694,9 +11737,6 @@ export function createApp() {
       }
       if (!resellerRoles.has(role)) {
         return sendError(res, 400, 'VALIDATION_ERROR', 'role is invalid for reseller users.')
-      }
-      if ((role === 'reseller_sales' || role === 'reseller_sales_director') && assignedEnterpriseIds.length === 0) {
-        return sendError(res, 400, 'VALIDATION_ERROR', 'assignedEnterpriseIds is required for sales roles.')
       }
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const tenantRows = await supabase.select(
@@ -10769,6 +11809,103 @@ export function createApp() {
       })
     })
 
+    app.post(`${prefix}/resellers/:resellerId/users/:userId/assign-enterprises`, async (req, res) => {
+      const auth = getAuth(req)
+      const resellerId = String(req.params.resellerId || '')
+      const userId = String(req.params.userId || '')
+      if (!resellerId) {
+        return sendError(res, 400, 'BAD_REQUEST', 'resellerId is required.')
+      }
+      if (!userId) {
+        return sendError(res, 400, 'BAD_REQUEST', 'userId is required.')
+      }
+      if (!auth.roleScope && !auth.role) {
+        return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
+      }
+      if (auth.roleScope === 'reseller') {
+        if (auth.role !== 'reseller_admin' || !auth.resellerId || auth.resellerId !== resellerId) {
+          return sendError(res, 403, 'FORBIDDEN', 'Reseller admin required.')
+        }
+      } else if (!(auth.roleScope === 'platform' || auth.role === 'platform_admin')) {
+        return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
+      }
+      const assignedEnterpriseIds = Array.isArray(req.body?.assignedEnterpriseIds)
+        ? req.body.assignedEnterpriseIds.map((id) => String(id))
+        : null
+      if (!assignedEnterpriseIds) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'assignedEnterpriseIds is required.')
+      }
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      const tenantRows = await supabase.select(
+        'tenants',
+        `select=tenant_id&tenant_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.RESELLER&limit=1`
+      )
+      if (!Array.isArray(tenantRows) || tenantRows.length === 0) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
+      }
+      const userRows = await supabase.select(
+        'users',
+        `select=user_id,tenant_id&user_id=eq.${encodeURIComponent(userId)}&limit=1`
+      )
+      const userRow = Array.isArray(userRows) ? userRows[0] : null
+      if (!userRow || String(userRow.tenant_id || '') !== resellerId) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `user ${userId} not found.`)
+      }
+      const existingAssignments = await supabase.select(
+        'reseller_enterprise_assignments',
+        `select=enterprise_id&user_id=eq.${encodeURIComponent(userId)}&reseller_id=eq.${encodeURIComponent(resellerId)}`
+      )
+      const previousAssignedEnterpriseIds = Array.isArray(existingAssignments)
+        ? existingAssignments.map((row) => String(row.enterprise_id))
+        : []
+      if (assignedEnterpriseIds.length > 0) {
+        const enterpriseFilter = assignedEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')
+        const enterpriseRows = await supabase.select(
+          'tenants',
+          `select=tenant_id,parent_id&tenant_id=in.(${enterpriseFilter})&tenant_type=eq.ENTERPRISE`
+        )
+        const enterprises = Array.isArray(enterpriseRows) ? enterpriseRows : []
+        if (enterprises.length !== assignedEnterpriseIds.length) {
+          return sendError(res, 400, 'VALIDATION_ERROR', 'assignedEnterpriseIds contains invalid enterprise id.')
+        }
+        if (enterprises.some((e) => String(e.parent_id || '') !== resellerId)) {
+          return sendError(res, 403, 'FORBIDDEN', 'assignedEnterpriseIds must belong to reseller.')
+        }
+      }
+      await supabase.delete(
+        'reseller_enterprise_assignments',
+        `user_id=eq.${encodeURIComponent(userId)}&reseller_id=eq.${encodeURIComponent(resellerId)}`
+      )
+      if (assignedEnterpriseIds.length > 0) {
+        await supabase.insert('reseller_enterprise_assignments', assignedEnterpriseIds.map((enterpriseId) => ({
+          user_id: userId,
+          reseller_id: resellerId,
+          enterprise_id: enterpriseId,
+        })), { returning: 'minimal' })
+      }
+      await supabase.insert('audit_logs', {
+        actor_user_id: auth.userId,
+        actor_role: auth.role,
+        tenant_id: resellerId,
+        action: 'RESELLER_USER_ENTERPRISES_ASSIGNED',
+        target_type: 'USER',
+        target_id: userId,
+        request_id: getTraceId(res),
+        source_ip: req.ip,
+        before_data: {
+          assignedEnterpriseIds: previousAssignedEnterpriseIds,
+        },
+        after_data: {
+          assignedEnterpriseIds,
+        },
+      }, { returning: 'minimal' })
+      res.json({
+        userId,
+        resellerId,
+        assignedEnterpriseIds,
+      })
+    })
+
     app.get(`${prefix}/resellers/:resellerId/users`, async (req, res) => {
       const auth = getAuth(req)
       const resellerId = String(req.params.resellerId || '')
@@ -10816,6 +11953,69 @@ export function createApp() {
       })
     })
 
+    app.get(`${prefix}/enterprises/:enterpriseId/users`, async (req, res) => {
+      const auth = getAuth(req)
+      const enterpriseId = String(req.params.enterpriseId || '')
+      if (!enterpriseId) {
+        return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required.')
+      }
+      if (!auth.roleScope && !auth.role) {
+        return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
+      }
+      if (auth.roleScope === 'customer') {
+        if (auth.role !== 'customer_admin' || !auth.customerId || auth.customerId !== enterpriseId) {
+          return sendError(res, 403, 'FORBIDDEN', 'Enterprise admin required.')
+        }
+      } else if (auth.roleScope === 'reseller') {
+        if (auth.role !== 'reseller_admin') {
+          return sendError(res, 403, 'FORBIDDEN', 'Reseller admin required.')
+        }
+      } else if (!(auth.roleScope === 'platform' || auth.role === 'platform_admin')) {
+        return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
+      }
+      const { page, pageSize, offset } = parsePagination(req.query, { defaultPage: 1, defaultPageSize: 20, maxPageSize: 100 })
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      const enterpriseRows = await supabase.select(
+        'tenants',
+        `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(enterpriseId)}&tenant_type=eq.ENTERPRISE&limit=1`
+      )
+      const enterprise = Array.isArray(enterpriseRows) ? enterpriseRows[0] : null
+      if (!enterprise) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+      }
+      if (auth.roleScope === 'reseller' && (!auth.resellerId || String(enterprise.parent_id || '') !== auth.resellerId)) {
+        return sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
+      }
+      const { data, total } = await supabase.selectWithCount(
+        'users',
+        `select=user_id,email,display_name,status,created_at&tenant_id=eq.${encodeURIComponent(enterpriseId)}&order=created_at.desc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
+      )
+      const rows = Array.isArray(data) ? data : []
+      const userIds = rows.map((r) => String(r.user_id))
+      const roles = userIds.length > 0
+        ? await supabase.select('user_roles', `select=user_id,role_name&user_id=in.(${userIds.map((id) => encodeURIComponent(id)).join(',')})`)
+        : []
+      const roleMap = new Map()
+      for (const r of Array.isArray(roles) ? roles : []) {
+        if (!roleMap.has(r.user_id)) roleMap.set(r.user_id, r.role_name)
+      }
+      res.json({
+        items: rows.map((r) => ({
+          userId: r.user_id,
+          enterpriseId,
+          email: r.email,
+          displayName: r.display_name,
+          role: roleMap.get(r.user_id) ?? null,
+          status: r.status,
+          departmentId: null,
+          createdAt: r.created_at,
+        })),
+        total: typeof total === 'number' ? total : rows.length,
+        page,
+        pageSize,
+      })
+    })
+
     app.post(`${prefix}/enterprises/:enterpriseId/users`, async (req, res) => {
       const auth = getAuth(req)
       const enterpriseId = String(req.params.enterpriseId || '')
@@ -10849,9 +12049,6 @@ export function createApp() {
       }
       if (!enterpriseRoles.has(role)) {
         return sendError(res, 400, 'VALIDATION_ERROR', 'role is invalid for enterprise users.')
-      }
-      if (role === 'customer_ops' && !departmentId) {
-        return sendError(res, 400, 'VALIDATION_ERROR', 'departmentId is required for customer_ops.')
       }
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const enterpriseRows = await supabase.select(
@@ -10915,6 +12112,126 @@ export function createApp() {
         departmentId,
         createdAt: row.created_at,
       })
+    })
+
+    app.post(`${prefix}/enterprises/:enterpriseId/users/:userId/assign-departments`, async (req, res) => {
+      const auth = getAuth(req)
+      const enterpriseId = String(req.params.enterpriseId || '')
+      const userId = String(req.params.userId || '')
+      if (!enterpriseId) {
+        return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required.')
+      }
+      if (!userId) {
+        return sendError(res, 400, 'BAD_REQUEST', 'userId is required.')
+      }
+      if (!auth.roleScope && !auth.role) {
+        return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
+      }
+      if (auth.roleScope === 'customer') {
+        if (auth.role !== 'customer_admin' || !auth.customerId || auth.customerId !== enterpriseId) {
+          return sendError(res, 403, 'FORBIDDEN', 'Enterprise admin required.')
+        }
+      } else if (auth.roleScope === 'reseller') {
+        if (auth.role !== 'reseller_admin') {
+          return sendError(res, 403, 'FORBIDDEN', 'Reseller admin required.')
+        }
+      } else if (!(auth.roleScope === 'platform' || auth.role === 'platform_admin')) {
+        return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
+      }
+      const assignedDepartmentIds = Array.isArray(req.body?.assignedDepartmentIds)
+        ? req.body.assignedDepartmentIds.map((id) => String(id))
+        : null
+      if (!assignedDepartmentIds) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'assignedDepartmentIds is required.')
+      }
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      try {
+        const enterpriseRows = await supabase.select(
+          'tenants',
+          `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(enterpriseId)}&tenant_type=eq.ENTERPRISE&limit=1`
+        )
+        const enterprise = Array.isArray(enterpriseRows) ? enterpriseRows[0] : null
+        if (!enterprise) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+        }
+        if (auth.roleScope === 'reseller' && (!auth.resellerId || String(enterprise.parent_id || '') !== auth.resellerId)) {
+          return sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
+        }
+        const userRows = await supabase.select(
+          'users',
+          `select=user_id,tenant_id&user_id=eq.${encodeURIComponent(userId)}&limit=1`
+        )
+        const userRow = Array.isArray(userRows) ? userRows[0] : null
+        if (!userRow || String(userRow.tenant_id || '') !== enterpriseId) {
+          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `user ${userId} not found.`)
+        }
+        const existingAssignments = await supabase.select(
+          'enterprise_user_departments',
+          `select=department_id&user_id=eq.${encodeURIComponent(userId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}`
+        )
+        const previousAssignedDepartmentIds = Array.isArray(existingAssignments)
+          ? existingAssignments.map((row) => String(row.department_id))
+          : []
+        if (assignedDepartmentIds.length > 0) {
+          const departmentFilter = assignedDepartmentIds.map((id) => encodeURIComponent(id)).join(',')
+          const departmentRows = await supabase.select(
+            'tenants',
+            `select=tenant_id,parent_id&tenant_id=in.(${departmentFilter})&tenant_type=eq.DEPARTMENT`
+          )
+          const departments = Array.isArray(departmentRows) ? departmentRows : []
+          if (departments.length !== assignedDepartmentIds.length) {
+            return sendError(res, 400, 'VALIDATION_ERROR', 'assignedDepartmentIds contains invalid department id.')
+          }
+          if (departments.some((d) => String(d.parent_id || '') !== enterpriseId)) {
+            return sendError(res, 403, 'FORBIDDEN', 'assignedDepartmentIds must belong to enterprise.')
+          }
+        }
+        await supabase.delete(
+          'enterprise_user_departments',
+          `user_id=eq.${encodeURIComponent(userId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}`
+        )
+        if (assignedDepartmentIds.length > 0) {
+          await supabase.insert('enterprise_user_departments', assignedDepartmentIds.map((departmentId) => ({
+            user_id: userId,
+            enterprise_id: enterpriseId,
+            department_id: departmentId,
+          })), { returning: 'minimal' })
+        }
+        await supabase.insert('audit_logs', {
+          actor_user_id: auth.userId,
+          actor_role: auth.role,
+          tenant_id: enterpriseId,
+          action: 'ENTERPRISE_USER_DEPARTMENTS_ASSIGNED',
+          target_type: 'USER',
+          target_id: userId,
+          request_id: getTraceId(res),
+          source_ip: req.ip,
+          before_data: {
+            assignedDepartmentIds: previousAssignedDepartmentIds,
+          },
+          after_data: {
+            assignedDepartmentIds,
+          },
+        }, { returning: 'minimal' })
+        res.json({
+          userId,
+          enterpriseId,
+          assignedDepartmentIds,
+        })
+      } catch (err) {
+        if (isMissingTableError(err, 'enterprise_user_departments')) {
+          return sendError(
+            res,
+            503,
+            'SCHEMA_NOT_READY',
+            'enterprise_user_departments table is missing. Apply migration 0040_add_enterprise_user_departments.sql.'
+          )
+        }
+        if (typeof err?.status === 'number' && typeof err?.code === 'string' && typeof err?.message === 'string') {
+          return sendError(res, err.status, err.code, err.message)
+        }
+        throw err
+      }
     })
   }
 
@@ -11152,7 +12469,7 @@ export function createApp() {
       filterPairs.push(`limit=${limit}`)
       filterPairs.push(`page=${page}`)
       const filterStr = filterPairs.join(';')
-      res.setHeader('X-Filters', filterStr)
+      setXFilters(res, filterStr)
       res.json({ items, total: typeof total === 'number' ? total : items.length })
     })
     app.get(`${prefix}/packages:csv`, async (req, res) => {
@@ -11194,7 +12511,7 @@ export function createApp() {
         filterPairs.push(`limit=${limit}`)
         filterPairs.push(`page=${page}`)
         const filterStr = filterPairs.join(';')
-        res.setHeader('X-Filters', filterStr)
+        setXFilters(res, filterStr)
       }
       res.send(`${csvRows.join('\n')}\n`)
     })
@@ -11231,6 +12548,7 @@ export function createApp() {
       const effStart = req.query.effectiveFromStart ? toIsoDateTime(String(req.query.effectiveFromStart)) : null
       const effEnd = req.query.effectiveFromEnd ? toIsoDateTime(String(req.query.effectiveFromEnd)) : null
       const carrierId = req.query.carrierId ? String(req.query.carrierId) : null
+      const operatorId = req.query.operatorId ? String(req.query.operatorId) : carrierId
       const mcc = req.query.mcc ? String(req.query.mcc) : null
       const mnc = req.query.mnc ? String(req.query.mnc) : null
       const apnLike = req.query.apnLike ? String(req.query.apnLike) : null
@@ -11242,81 +12560,76 @@ export function createApp() {
       if (serviceType) filters.push(`service_type=eq.${encodeURIComponent(serviceType)}`)
       if (effStart) filters.push(`effective_from=gte.${encodeURIComponent(effStart)}`)
       if (effEnd) filters.push(`effective_from=lte.${encodeURIComponent(effEnd)}`)
-      let carrierFilteredIds = null
-      if (carrierId) carrierFilteredIds = [carrierId]
-      if (mcc || mnc) {
-        const carrierFilters = []
-        if (mcc) carrierFilters.push(`mcc=eq.${encodeURIComponent(mcc)}`)
-        if (mnc) carrierFilters.push(`mnc=eq.${encodeURIComponent(mnc)}`)
-        const cFilterQs = carrierFilters.length ? `&${carrierFilters.join('&')}` : ''
-        const cRows = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc${cFilterQs}`)
-        const cIds = Array.isArray(cRows) ? cRows.map((r) => String(r.carrier_id)) : []
-        carrierFilteredIds = carrierFilteredIds ? carrierFilteredIds.filter((id) => cIds.includes(String(id))) : cIds
-      }
-      if (mccmncRaw) {
-        const s = mccmncRaw.replace(/[^0-9]/g, '')
-        let cIds2 = []
-        if (s.length === 5 || s.length === 6) {
-          const mcc3 = s.slice(0, 3)
-          const mnc2 = s.slice(3, 5)
-          const mnc3 = s.length === 6 ? s.slice(3, 6) : null
-          const cRowsA = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc&mcc=eq.${encodeURIComponent(mcc3)}&mnc=eq.${encodeURIComponent(mnc2)}`)
-          const idsA = Array.isArray(cRowsA) ? cRowsA.map((r) => String(r.carrier_id)) : []
-          let idsB = []
-          if (mnc3) {
-            const cRowsB = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc&mcc=eq.${encodeURIComponent(mcc3)}&mnc=eq.${encodeURIComponent(mnc3)}`)
-            idsB = Array.isArray(cRowsB) ? cRowsB.map((r) => String(r.carrier_id)) : []
+      if (operatorId) filters.push(`operator_id=eq.${encodeURIComponent(operatorId)}`)
+      const resolveOperatorIdsByBusinessFilters = async () => {
+        const businessFilters = []
+        if (mcc) businessFilters.push(`mcc=eq.${encodeURIComponent(mcc)}`)
+        if (mnc) businessFilters.push(`mnc=eq.${encodeURIComponent(mnc)}`)
+        if (carrierNameLike) businessFilters.push(`name=ilike.${encodeURIComponent('%' + carrierNameLike + '%')}`)
+        if (carrierName) businessFilters.push(`name=eq.${encodeURIComponent(carrierName)}`)
+        if (!businessFilters.length && !mccmncRaw && !mccmncListRaw) return null
+        let businessIds = null
+        if (businessFilters.length) {
+          const rows = await supabase.select(
+            'business_operators',
+            `select=operator_id&order=operator_id.asc&${businessFilters.join('&')}`
+          )
+          businessIds = new Set((Array.isArray(rows) ? rows : []).map((r) => String(r.operator_id)))
+        }
+        const collectByMccMncToken = async (token) => {
+          const digits = String(token || '').replace(/[^0-9]/g, '')
+          if (!(digits.length === 5 || digits.length === 6)) return []
+          const mcc3 = digits.slice(0, 3)
+          const mnc2 = digits.slice(3, 5)
+          const rowsA = await supabase.select(
+            'business_operators',
+            `select=operator_id&order=operator_id.asc&mcc=eq.${encodeURIComponent(mcc3)}&mnc=eq.${encodeURIComponent(mnc2)}`
+          )
+          const ids = new Set((Array.isArray(rowsA) ? rowsA : []).map((r) => String(r.operator_id)))
+          if (digits.length === 6) {
+            const mnc3 = digits.slice(3, 6)
+            const rowsB = await supabase.select(
+              'business_operators',
+              `select=operator_id&order=operator_id.asc&mcc=eq.${encodeURIComponent(mcc3)}&mnc=eq.${encodeURIComponent(mnc3)}`
+            )
+            for (const row of (Array.isArray(rowsB) ? rowsB : [])) ids.add(String(row.operator_id))
           }
-          cIds2 = Array.from(new Set([...(idsA || []), ...(idsB || [])]))
+          return Array.from(ids)
         }
-        carrierFilteredIds = carrierFilteredIds ? carrierFilteredIds.filter((id) => cIds2.includes(String(id))) : cIds2
-      }
-      if (carrierNameLike) {
-        const cRows = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc&name=ilike.${encodeURIComponent('%' + carrierNameLike + '%')}`)
-        const cIds = Array.isArray(cRows) ? cRows.map((r) => String(r.carrier_id)) : []
-        carrierFilteredIds = carrierFilteredIds ? carrierFilteredIds.filter((id) => cIds.includes(String(id))) : cIds
-      }
-      if (carrierFilteredIds) {
-        if (!carrierFilteredIds.length) {
-          return res.json({ items: [], total: 0 })
+        if (mccmncRaw) {
+          const ids = await collectByMccMncToken(mccmncRaw)
+          const next = new Set(ids.map((id) => String(id)))
+          businessIds = businessIds
+            ? new Set(Array.from(businessIds).filter((id) => next.has(id)))
+            : next
         }
-        const inList = carrierFilteredIds.map((id) => encodeURIComponent(String(id))).join(',')
-        filters.push(`carrier_id=in.(${inList})`)
-      }
-      if (mccmncListRaw) {
-        const tokens = mccmncListRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
-        let acc = []
-        for (const t of tokens) {
-          const s = t.replace(/[^0-9]/g, '')
-          if (s.length === 5 || s.length === 6) {
-            const mcc3 = s.slice(0, 3)
-            const mnc2 = s.slice(3, 5)
-            const mnc3 = s.length === 6 ? s.slice(3, 6) : null
-            const cRowsA = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc&mcc=eq.${encodeURIComponent(mcc3)}&mnc=eq.${encodeURIComponent(mnc2)}`)
-            const idsA = Array.isArray(cRowsA) ? cRowsA.map((r) => String(r.carrier_id)) : []
-            acc.push(...idsA)
-            if (mnc3) {
-              const cRowsB = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc&mcc=eq.${encodeURIComponent(mcc3)}&mnc=eq.${encodeURIComponent(mnc3)}`)
-              const idsB = Array.isArray(cRowsB) ? cRowsB.map((r) => String(r.carrier_id)) : []
-              acc.push(...idsB)
-            }
+        if (mccmncListRaw) {
+          const tokens = mccmncListRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+          const next = new Set()
+          for (const token of tokens) {
+            const ids = await collectByMccMncToken(token)
+            for (const id of ids) next.add(String(id))
           }
+          businessIds = businessIds
+            ? new Set(Array.from(businessIds).filter((id) => next.has(id)))
+            : next
         }
-        const uniq = Array.from(new Set(acc.map((id) => String(id))))
-        if (!uniq.length) {
-          return res.json({ items: [], total: 0 })
-        }
-        const inList = uniq.map((id) => encodeURIComponent(String(id))).join(',')
-        filters.push(`carrier_id=in.(${inList})`)
+        const businessList = businessIds ? Array.from(businessIds) : []
+        if (!businessList.length) return []
+        const inList = businessList.map((id) => encodeURIComponent(id)).join(',')
+        const operatorRows = await supabase.select(
+          'operators',
+          `select=operator_id&business_operator_id=in.(${inList})`
+        )
+        return Array.from(new Set((Array.isArray(operatorRows) ? operatorRows : []).map((r) => String(r.operator_id))))
       }
-      if (carrierName) {
-        const cRows = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc&name=eq.${encodeURIComponent(carrierName)}`)
-        const cIds = Array.isArray(cRows) ? cRows.map((r) => String(r.carrier_id)) : []
-        if (!cIds.length) {
+      const businessFilteredOperatorIds = await resolveOperatorIdsByBusinessFilters()
+      if (businessFilteredOperatorIds) {
+        if (!businessFilteredOperatorIds.length) {
           return res.json({ items: [], total: 0 })
         }
-        const inList = cIds.map((id) => encodeURIComponent(String(id))).join(',')
-        filters.push(`carrier_id=in.(${inList})`)
+        const inList = businessFilteredOperatorIds.map((id) => encodeURIComponent(id)).join(',')
+        filters.push(`operator_id=in.(${inList})`)
       }
       if (apnLike) filters.push(`apn=ilike.${encodeURIComponent('%' + apnLike + '%')}`)
       const sortByRaw = req.query.sortBy ? String(req.query.sortBy) : null
@@ -11327,17 +12640,22 @@ export function createApp() {
       const filterQs = filters.length ? `&${filters.join('&')}` : ''
       const { data, total } = await supabase.selectWithCount(
         'package_versions',
-        `select=package_version_id,package_id,carrier_id,status,effective_from,service_type,apn,price_plan_version_id&order=${encodeURIComponent(sortCol)}.${encodeURIComponent(sortDir)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
+        `select=package_version_id,package_id,operator_id,status,effective_from,service_type,apn,price_plan_version_id&order=${encodeURIComponent(sortCol)}.${encodeURIComponent(sortDir)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
       )
       const nameMap = packageList.reduce((m, p) => { m[String(p.package_id)] = p.name; return m }, {})
-      const carrierIds = Array.isArray(data) ? Array.from(new Set(data.map((r) => r.carrier_id).filter(Boolean).map((id) => String(id)))) : []
-      let carrierMap = {}
-      if (carrierIds.length) {
-        const cidList = carrierIds.map((id) => encodeURIComponent(String(id))).join(',')
-        const carriers = await supabase.select('carriers', `select=carrier_id,mcc,mnc,name&carrier_id=in.(${cidList})`)
-        if (Array.isArray(carriers)) {
-          carriers.forEach((c) => {
-            carrierMap[String(c.carrier_id)] = { name: c.name ?? null, mcc: c.mcc ?? null, mnc: c.mnc ?? null }
+      const operatorIds = Array.isArray(data) ? Array.from(new Set(data.map((r) => r.operator_id).filter(Boolean).map((id) => String(id)))) : []
+      const operatorMap = {}
+      if (operatorIds.length) {
+        const oidList = operatorIds.map((id) => encodeURIComponent(String(id))).join(',')
+        const operators = await supabase.select('operators', `select=operator_id,name,business_operators(name,mcc,mnc)&operator_id=in.(${oidList})`)
+        if (Array.isArray(operators)) {
+          operators.forEach((op) => {
+            const business = op.business_operators ?? null
+            operatorMap[String(op.operator_id)] = {
+              name: business?.name ?? op.name ?? null,
+              mcc: business?.mcc ?? null,
+              mnc: business?.mnc ?? null,
+            }
           })
         }
       }
@@ -11345,10 +12663,10 @@ export function createApp() {
         packageVersionId: r.package_version_id,
         packageId: r.package_id,
         packageName: nameMap[String(r.package_id)] ?? null,
-        carrierId: r.carrier_id ?? null,
-        carrierName: r.carrier_id ? (carrierMap[String(r.carrier_id)]?.name ?? null) : null,
-        mcc: r.carrier_id ? (carrierMap[String(r.carrier_id)]?.mcc ?? null) : null,
-        mnc: r.carrier_id ? (carrierMap[String(r.carrier_id)]?.mnc ?? null) : null,
+        carrierId: r.operator_id ?? null,
+        carrierName: r.operator_id ? (operatorMap[String(r.operator_id)]?.name ?? null) : null,
+        mcc: r.operator_id ? (operatorMap[String(r.operator_id)]?.mcc ?? null) : null,
+        mnc: r.operator_id ? (operatorMap[String(r.operator_id)]?.mnc ?? null) : null,
         status: r.status,
         effectiveFrom: r.effective_from ?? null,
         serviceType: r.service_type ?? null,
@@ -11362,6 +12680,7 @@ export function createApp() {
       if (effStart) filterPairs.push(`effectiveFromStart=${effStart}`)
       if (effEnd) filterPairs.push(`effectiveFromEnd=${effEnd}`)
       if (carrierId) filterPairs.push(`carrierId=${carrierId}`)
+      if (req.query.operatorId) filterPairs.push(`operatorId=${String(req.query.operatorId)}`)
       if (mcc) filterPairs.push(`mcc=${mcc}`)
       if (mnc) filterPairs.push(`mnc=${mnc}`)
       if (mccmncRaw) filterPairs.push(`mccmnc=${mccmncRaw}`)
@@ -11374,7 +12693,7 @@ export function createApp() {
       filterPairs.push(`limit=${limit}`)
       filterPairs.push(`page=${page}`)
       const filterStr = filterPairs.join(';')
-      res.setHeader('X-Filters', filterStr)
+      setXFilters(res, filterStr)
       res.json({
         items,
         total: typeof total === 'number' ? total : items.length,
@@ -11426,87 +12745,68 @@ export function createApp() {
       if (serviceType) filters.push(`service_type=eq.${encodeURIComponent(serviceType)}`)
       if (effStart) filters.push(`effective_from=gte.${encodeURIComponent(effStart)}`)
       if (effEnd) filters.push(`effective_from=lte.${encodeURIComponent(effEnd)}`)
-      let carrierFilteredIds = null
-      if (carrierId) carrierFilteredIds = [carrierId]
-      if (mcc || mnc) {
-        const carrierFilters = []
-        if (mcc) carrierFilters.push(`mcc=eq.${encodeURIComponent(mcc)}`)
-        if (mnc) carrierFilters.push(`mnc=eq.${encodeURIComponent(mnc)}`)
-        const cFilterQs = carrierFilters.length ? `&${carrierFilters.join('&')}` : ''
-        const cRows = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc${cFilterQs}`)
-        const cIds = Array.isArray(cRows) ? cRows.map((r) => String(r.carrier_id)) : []
-        carrierFilteredIds = carrierFilteredIds ? carrierFilteredIds.filter((id) => cIds.includes(String(id))) : cIds
-      }
-      if (mccmncRaw) {
-        const s = mccmncRaw.replace(/[^0-9]/g, '')
-        let cIds2 = []
-        if (s.length === 5 || s.length === 6) {
-          const mcc3 = s.slice(0, 3)
-          const mnc2 = s.slice(3, 5)
-          const mnc3 = s.length === 6 ? s.slice(3, 6) : null
-          const cRowsA = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc&mcc=eq.${encodeURIComponent(mcc3)}&mnc=eq.${encodeURIComponent(mnc2)}`)
-          const idsA = Array.isArray(cRowsA) ? cRowsA.map((r) => String(r.carrier_id)) : []
-          let idsB = []
-          if (mnc3) {
-            const cRowsB = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc&mcc=eq.${encodeURIComponent(mcc3)}&mnc=eq.${encodeURIComponent(mnc3)}`)
-            idsB = Array.isArray(cRowsB) ? cRowsB.map((r) => String(r.carrier_id)) : []
+      if (operatorId) filters.push(`operator_id=eq.${encodeURIComponent(operatorId)}`)
+      const resolveOperatorIdsByBusinessFilters = async () => {
+        const businessFilters = []
+        if (mcc) businessFilters.push(`mcc=eq.${encodeURIComponent(mcc)}`)
+        if (mnc) businessFilters.push(`mnc=eq.${encodeURIComponent(mnc)}`)
+        if (carrierNameLike) businessFilters.push(`name=ilike.${encodeURIComponent('%' + carrierNameLike + '%')}`)
+        if (carrierName) businessFilters.push(`name=eq.${encodeURIComponent(carrierName)}`)
+        if (!businessFilters.length && !mccmncRaw && !mccmncListRaw) return null
+        let businessIds = null
+        if (businessFilters.length) {
+          const rows = await supabase.select('business_operators', `select=operator_id&order=operator_id.asc&${businessFilters.join('&')}`)
+          businessIds = new Set((Array.isArray(rows) ? rows : []).map((r) => String(r.operator_id)))
+        }
+        const collectByMccMncToken = async (token) => {
+          const digits = String(token || '').replace(/[^0-9]/g, '')
+          if (!(digits.length === 5 || digits.length === 6)) return []
+          const mcc3 = digits.slice(0, 3)
+          const mnc2 = digits.slice(3, 5)
+          const rowsA = await supabase.select(
+            'business_operators',
+            `select=operator_id&order=operator_id.asc&mcc=eq.${encodeURIComponent(mcc3)}&mnc=eq.${encodeURIComponent(mnc2)}`
+          )
+          const ids = new Set((Array.isArray(rowsA) ? rowsA : []).map((r) => String(r.operator_id)))
+          if (digits.length === 6) {
+            const mnc3 = digits.slice(3, 6)
+            const rowsB = await supabase.select(
+              'business_operators',
+              `select=operator_id&order=operator_id.asc&mcc=eq.${encodeURIComponent(mcc3)}&mnc=eq.${encodeURIComponent(mnc3)}`
+            )
+            for (const row of (Array.isArray(rowsB) ? rowsB : [])) ids.add(String(row.operator_id))
           }
-          cIds2 = Array.from(new Set([...(idsA || []), ...(idsB || [])]))
+          return Array.from(ids)
         }
-        carrierFilteredIds = carrierFilteredIds ? carrierFilteredIds.filter((id) => cIds2.includes(String(id))) : cIds2
-      }
-      if (carrierNameLike) {
-        const cRows = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc&name=ilike.${encodeURIComponent('%' + carrierNameLike + '%')}`)
-        const cIds = Array.isArray(cRows) ? cRows.map((r) => String(r.carrier_id)) : []
-        carrierFilteredIds = carrierFilteredIds ? carrierFilteredIds.filter((id) => cIds.includes(String(id))) : cIds
-      }
-      if (carrierFilteredIds) {
-        if (!carrierFilteredIds.length) {
-          res.setHeader('Content-Type', 'text/csv; charset=utf-8')
-          res.setHeader('Content-Disposition', 'attachment; filename="package_versions.csv"')
-          return res.send('packageVersionId,packageId,packageName,carrierId,carrierName,mcc,mnc,status,effectiveFrom,serviceType,apn\n')
+        if (mccmncRaw) {
+          const ids = await collectByMccMncToken(mccmncRaw)
+          const next = new Set(ids.map((id) => String(id)))
+          businessIds = businessIds ? new Set(Array.from(businessIds).filter((id) => next.has(id))) : next
         }
-        const inList = carrierFilteredIds.map((id) => encodeURIComponent(String(id))).join(',')
-        filters.push(`carrier_id=in.(${inList})`)
-      }
-      if (mccmncListRaw) {
-        const tokens = mccmncListRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
-        let acc = []
-        for (const t of tokens) {
-          const s = t.replace(/[^0-9]/g, '')
-          if (s.length === 5 || s.length === 6) {
-            const mcc3 = s.slice(0, 3)
-            const mnc2 = s.slice(3, 5)
-            const mnc3 = s.length === 6 ? s.slice(3, 6) : null
-            const cRowsA = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc&mcc=eq.${encodeURIComponent(mcc3)}&mnc=eq.${encodeURIComponent(mnc2)}`)
-            const idsA = Array.isArray(cRowsA) ? cRowsA.map((r) => String(r.carrier_id)) : []
-            acc.push(...idsA)
-            if (mnc3) {
-              const cRowsB = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc&mcc=eq.${encodeURIComponent(mcc3)}&mnc=eq.${encodeURIComponent(mnc3)}`)
-              const idsB = Array.isArray(cRowsB) ? cRowsB.map((r) => String(r.carrier_id)) : []
-              acc.push(...idsB)
-            }
+        if (mccmncListRaw) {
+          const tokens = mccmncListRaw.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+          const next = new Set()
+          for (const token of tokens) {
+            const ids = await collectByMccMncToken(token)
+            for (const id of ids) next.add(String(id))
           }
+          businessIds = businessIds ? new Set(Array.from(businessIds).filter((id) => next.has(id))) : next
         }
-        const uniq = Array.from(new Set(acc.map((id) => String(id))))
-        if (!uniq.length) {
-          res.setHeader('Content-Type', 'text/csv; charset=utf-8')
-          res.setHeader('Content-Disposition', 'attachment; filename="package_versions.csv"')
-          return res.send('packageVersionId,packageId,packageName,carrierId,carrierName,mcc,mnc,status,effectiveFrom,serviceType,apn\n')
-        }
-        const inList = uniq.map((id) => encodeURIComponent(String(id))).join(',')
-        filters.push(`carrier_id=in.(${inList})`)
+        const businessList = businessIds ? Array.from(businessIds) : []
+        if (!businessList.length) return []
+        const inList = businessList.map((id) => encodeURIComponent(id)).join(',')
+        const operatorRows = await supabase.select('operators', `select=operator_id&business_operator_id=in.(${inList})`)
+        return Array.from(new Set((Array.isArray(operatorRows) ? operatorRows : []).map((r) => String(r.operator_id))))
       }
-      if (carrierName) {
-        const cRows = await supabase.select('carriers', `select=carrier_id&order=carrier_id.asc&name=eq.${encodeURIComponent(carrierName)}`)
-        const cIds = Array.isArray(cRows) ? cRows.map((r) => String(r.carrier_id)) : []
-        if (!cIds.length) {
+      const businessFilteredOperatorIds = await resolveOperatorIdsByBusinessFilters()
+      if (businessFilteredOperatorIds) {
+        if (!businessFilteredOperatorIds.length) {
           res.setHeader('Content-Type', 'text/csv; charset=utf-8')
           res.setHeader('Content-Disposition', 'attachment; filename="package_versions.csv"')
           return res.send('packageVersionId,packageId,packageName,carrierId,carrierName,mcc,mnc,status,effectiveFrom,serviceType,apn\n')
         }
-        const inList = cIds.map((id) => encodeURIComponent(String(id))).join(',')
-        filters.push(`carrier_id=in.(${inList})`)
+        const inList = businessFilteredOperatorIds.map((id) => encodeURIComponent(id)).join(',')
+        filters.push(`operator_id=in.(${inList})`)
       }
       if (apnLike) filters.push(`apn=ilike.${encodeURIComponent('%' + apnLike + '%')}`)
       const sortByRaw = req.query.sortBy ? String(req.query.sortBy) : null
@@ -11517,17 +12817,18 @@ export function createApp() {
       const filterQs = filters.length ? `&${filters.join('&')}` : ''
       const { data } = await supabase.selectWithCount(
         'package_versions',
-        `select=package_version_id,package_id,carrier_id,status,effective_from,service_type,apn,price_plan_version_id&order=${encodeURIComponent(sortCol)}.${encodeURIComponent(sortDir)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
+        `select=package_version_id,package_id,operator_id,status,effective_from,service_type,apn,price_plan_version_id&order=${encodeURIComponent(sortCol)}.${encodeURIComponent(sortDir)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
       )
       const nameMap = packageList.reduce((m, p) => { m[String(p.package_id)] = p.name; return m }, {})
-      const carrierIds = Array.isArray(data) ? Array.from(new Set(data.map((r) => r.carrier_id).filter(Boolean).map((id) => String(id)))) : []
-      let carrierMap = {}
-      if (carrierIds.length) {
-        const cidList = carrierIds.map((id) => encodeURIComponent(String(id))).join(',')
-        const carriers = await supabase.select('carriers', `select=carrier_id,mcc,mnc,name&carrier_id=in.(${cidList})`)
-        if (Array.isArray(carriers)) {
-          carriers.forEach((c) => {
-            carrierMap[String(c.carrier_id)] = { name: c.name ?? null, mcc: c.mcc ?? null, mnc: c.mnc ?? null }
+      const operatorIds = Array.isArray(data) ? Array.from(new Set(data.map((r) => r.operator_id).filter(Boolean).map((id) => String(id)))) : []
+      const operatorMap = {}
+      if (operatorIds.length) {
+        const oidList = operatorIds.map((id) => encodeURIComponent(String(id))).join(',')
+        const operators = await supabase.select('operators', `select=operator_id,name,business_operators(name,mcc,mnc)&operator_id=in.(${oidList})`)
+        if (Array.isArray(operators)) {
+          operators.forEach((op) => {
+            const business = op.business_operators ?? null
+            operatorMap[String(op.operator_id)] = { name: business?.name ?? op.name ?? null, mcc: business?.mcc ?? null, mnc: business?.mnc ?? null }
           })
         }
       }
@@ -11537,12 +12838,12 @@ export function createApp() {
       for (const r of rows) {
         const pkgId = String(r.package_id)
         const pkgName = nameMap[pkgId] ?? ''
-        const cm = r.carrier_id ? (carrierMap[String(r.carrier_id)] || {}) : {}
+        const cm = r.operator_id ? (operatorMap[String(r.operator_id)] || {}) : {}
         csvRows.push([
           escapeCsv(r.package_version_id),
           escapeCsv(pkgId),
           escapeCsv(pkgName),
-          escapeCsv(r.carrier_id ?? ''),
+          escapeCsv(r.operator_id ?? ''),
           escapeCsv(cm.name ?? ''),
           escapeCsv(cm.mcc ?? ''),
           escapeCsv(cm.mnc ?? ''),
@@ -11563,6 +12864,7 @@ export function createApp() {
         if (effStart) filterPairs.push(`effectiveFromStart=${effStart}`)
         if (effEnd) filterPairs.push(`effectiveFromEnd=${effEnd}`)
         if (carrierId) filterPairs.push(`carrierId=${carrierId}`)
+        if (req.query.operatorId) filterPairs.push(`operatorId=${String(req.query.operatorId)}`)
         if (mcc) filterPairs.push(`mcc=${mcc}`)
         if (mnc) filterPairs.push(`mnc=${mnc}`)
         if (mccmncRaw) filterPairs.push(`mccmnc=${mccmncRaw}`)
@@ -11575,7 +12877,7 @@ export function createApp() {
         filterPairs.push(`limit=${limit}`)
         filterPairs.push(`page=${page}`)
         const filterStr = filterPairs.join(';')
-        res.setHeader('X-Filters', filterStr)
+        setXFilters(res, filterStr)
       }
       res.send(`${csvRows.join('\n')}\n`)
     })

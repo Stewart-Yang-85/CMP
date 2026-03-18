@@ -23,6 +23,74 @@ function isMissingColumnError(body) {
   )
 }
 
+function parseSupabaseError(text) {
+  if (!text) return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+function extractForeignKeyField(details, message) {
+  const detailText = String(details ?? '')
+  const detailMatch = detailText.match(/Key \(([^)]+)\)=\(([^)]+)\) is not present/)
+  if (detailMatch) {
+    return { field: detailMatch[1], value: detailMatch[2] }
+  }
+  const messageText = String(message ?? '')
+  const messageMatch = messageText.match(/_([a-z_]+)_fkey/)
+  if (messageMatch) {
+    return { field: messageMatch[1] }
+  }
+  return null
+}
+
+function mapForeignKeyField(field) {
+  const key = String(field ?? '').toLowerCase()
+  if (!key) return null
+  if (key === 'customer_id' || key === 'enterprise_id' || key === 'tenant_id') return 'enterpriseId'
+  if (key === 'supplier_id') return 'supplierId'
+  if (key === 'operator_id' || key === 'carrier_id') return 'operatorId'
+  if (key === 'reseller_id') return 'resellerId'
+  if (key === 'user_id' || key === 'actor_user_id') return 'userId'
+  if (key === 'sim_id') return 'simId'
+  if (key === 'department_id') return 'departmentId'
+  return null
+}
+
+function makeClientError(status, code, message, body) {
+  const err = new Error(message)
+  err.name = 'ClientError'
+  err.status = status
+  err.code = code
+  if (body !== undefined) {
+    err.body = body
+  }
+  return err
+}
+
+function mapSupabaseError(status, text) {
+  const body = parseSupabaseError(text)
+  if (!body) return null
+  const message = String(body.message ?? '')
+  const details = String(body.details ?? '')
+  const code = String(body.code ?? '')
+  if (code === '23503' || message.includes('violates foreign key constraint')) {
+    const info = extractForeignKeyField(details, message)
+    const field = mapForeignKeyField(info?.field)
+    const label = field ? `${field} not found.` : 'resource not found.'
+    return makeClientError(404, 'RESOURCE_NOT_FOUND', label, body)
+  }
+  if (message.includes('invalid input syntax for type uuid')) {
+    return makeClientError(400, 'BAD_REQUEST', 'invalid uuid.', body)
+  }
+  if (status === 404 && message) {
+    return makeClientError(404, 'RESOURCE_NOT_FOUND', message, body)
+  }
+  return null
+}
+
 export function createSupabaseRestClient({ useServiceRole = false, traceId = null } = {}) {
   const baseUrl = requireEnv('SUPABASE_URL').replace(/\/+$/, '')
   const anonKey = requireEnv('SUPABASE_ANON_KEY')
@@ -122,6 +190,10 @@ export function createSupabaseRestClient({ useServiceRole = false, traceId = nul
         if (!(suppressMissingColumns && isMissingColumnError(text))) {
           console.error(`Supabase upstream error: ${res.status} ${url} ${text}`)
         }
+        const mapped = mapSupabaseError(res.status, text)
+        if (mapped) {
+          throw mapped
+        }
         throw makeUpstreamError('UPSTREAM_BAD_RESPONSE', res.status, text)
       }
 
@@ -136,6 +208,10 @@ export function createSupabaseRestClient({ useServiceRole = false, traceId = nul
 
       if (!res.ok) {
         console.error(`Supabase upstream error: ${res.status} ${url} ${text}`)
+        const mapped = mapSupabaseError(res.status, text)
+        if (mapped) {
+          throw mapped
+        }
         throw makeUpstreamError('UPSTREAM_BAD_RESPONSE', res.status, text)
       }
 
@@ -158,6 +234,10 @@ export function createSupabaseRestClient({ useServiceRole = false, traceId = nul
         if (!(suppressMissingColumns && isMissingColumnError(text))) {
           console.error(`Supabase upstream error: ${res.status} ${url} ${text}`)
         }
+        const mapped = mapSupabaseError(res.status, text)
+        if (mapped) {
+          throw mapped
+        }
         throw makeUpstreamError('UPSTREAM_BAD_RESPONSE', res.status, text)
       }
 
@@ -178,6 +258,10 @@ export function createSupabaseRestClient({ useServiceRole = false, traceId = nul
         if (!(suppressMissingColumns && isMissingColumnError(text))) {
           console.error(`Supabase upstream error: ${res.status} ${url} ${text}`)
         }
+        const mapped = mapSupabaseError(res.status, text)
+        if (mapped) {
+          throw mapped
+        }
         throw makeUpstreamError('UPSTREAM_BAD_RESPONSE', res.status, text)
       }
 
@@ -190,6 +274,10 @@ export function createSupabaseRestClient({ useServiceRole = false, traceId = nul
         headers: { Prefer: 'return=minimal' },
       })
       if (!res.ok) {
+        const mapped = mapSupabaseError(res.status, text)
+        if (mapped) {
+          throw mapped
+        }
         throw makeUpstreamError('UPSTREAM_BAD_RESPONSE', res.status, text)
       }
       return null
@@ -202,6 +290,10 @@ export function createSupabaseRestClient({ useServiceRole = false, traceId = nul
       })
 
       if (!res.ok) {
+        const mapped = mapSupabaseError(res.status, text)
+        if (mapped) {
+          throw mapped
+        }
         throw makeUpstreamError('UPSTREAM_BAD_RESPONSE', res.status, text)
       }
 

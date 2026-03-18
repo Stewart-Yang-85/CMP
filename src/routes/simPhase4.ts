@@ -1,10 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { rbac } from '../middleware/rbac.js'
 import { runSimImport } from '../services/simImport.js'
-import { parseSimIdentifier, fetchSimStateHistory, changeSimStatus, batchDeactivateSims } from '../services/simLifecycle.js'
+import { parseSimIdentifier, fetchSimStateHistory, changeSimStatus, batchDeactivateSims, batchChangeSimStatus } from '../services/simLifecycle.js'
 
 type SupabaseClient = {
-  select: (table: string, queryString: string, options?: { headers?: Record<string, string> }) => Promise<unknown>
+  select: (table: string, queryString: string, options?: { headers?: Record<string, string>; suppressMissingColumns?: boolean }) => Promise<unknown>
   selectWithCount: (table: string, queryString: string) => Promise<{ data: unknown; total: number | null }>
   insert: (table: string, rows: unknown, options?: { returning?: 'minimal' | 'representation' }) => Promise<unknown>
   update: (table: string, matchQueryString: string, patch: unknown, options?: { returning?: 'minimal' | 'representation' }) => Promise<unknown>
@@ -80,6 +80,92 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
     return null
   }
 
+  const resolveOperatorFilter = async (supabase: SupabaseClient, operatorId: string, supplierId: string | null = null) => {
+    const supplierFilter = supplierId ? `&supplier_id=eq.${encodeURIComponent(supplierId)}` : ''
+    const operatorRows = await supabase.select(
+      'operators',
+      `select=operator_id&operator_id=eq.${encodeURIComponent(operatorId)}${supplierFilter}&limit=1`
+    )
+    const operator = Array.isArray(operatorRows) ? operatorRows[0] : null
+    if (operator?.operator_id) {
+      return { operatorIds: [String(operator.operator_id)] }
+    }
+    const mappedRows = await supabase.select(
+      'operators',
+      `select=operator_id&business_operator_id=eq.${encodeURIComponent(operatorId)}${supplierFilter}`
+    )
+    const operatorIds = Array.from(new Set(
+      (Array.isArray(mappedRows) ? mappedRows : [])
+        .map((row: any) => (row?.operator_id ? String(row.operator_id) : ''))
+        .filter(Boolean)
+    ))
+    if (!operatorIds.length) return null
+    return { operatorIds }
+  }
+
+  const appendOperatorFilter = (filters: string[], operatorFilter: { operatorIds: string[] } | null) => {
+    const operatorIds = Array.isArray(operatorFilter?.operatorIds) ? operatorFilter.operatorIds : []
+    if (!operatorIds.length) return
+    if (operatorIds.length === 1) {
+      filters.push(`operator_id=eq.${encodeURIComponent(operatorIds[0])}`)
+      return
+    }
+    filters.push(`operator_id=in.(${operatorIds.map((id) => encodeURIComponent(id)).join(',')})`)
+  }
+
+  const loadBusinessOperatorMap = async (supabase: SupabaseClient, operatorIds: unknown[]) => {
+    const ids = Array.from(new Set(
+      (Array.isArray(operatorIds) ? operatorIds : [])
+        .map((id) => String(id ?? '').trim())
+        .filter(Boolean)
+    ))
+    if (!ids.length) return new Map<string, any>()
+    const operatorRows = await supabase.select(
+      'operators',
+      `select=operator_id,business_operator_id&operator_id=in.(${ids.map((id) => encodeURIComponent(id)).join(',')})`
+    )
+    const operatorToBusinessMap = new Map<string, string>()
+    const businessIds = new Set(ids)
+    for (const row of (Array.isArray(operatorRows) ? operatorRows : [])) {
+      const operatorId = row?.operator_id ? String(row.operator_id) : null
+      const businessOperatorId = row?.business_operator_id ? String(row.business_operator_id) : null
+      if (!operatorId || !businessOperatorId) continue
+      operatorToBusinessMap.set(operatorId, businessOperatorId)
+      businessIds.add(businessOperatorId)
+    }
+    const rows = await supabase.select(
+      'business_operators',
+      `select=operator_id,name,mcc,mnc&operator_id=in.(${Array.from(businessIds).map((id) => encodeURIComponent(id)).join(',')})`
+    )
+    const businessMap = new Map(
+      (Array.isArray(rows) ? rows : [])
+        .filter((row: any) => row?.operator_id)
+        .map((row: any) => [String(row.operator_id), row])
+    )
+    const resolvedMap = new Map<string, any>()
+    for (const id of ids) {
+      const resolvedId = operatorToBusinessMap.get(id) ?? id
+      const business = businessMap.get(resolvedId)
+      if (business) resolvedMap.set(id, business)
+    }
+    return resolvedMap
+  }
+
+  const isMissingSimResellerColumnError = (err: any) => {
+    const text = String(err?.body ?? err?.message ?? '').toLowerCase()
+    return text.includes('column sims.reseller_id does not exist')
+  }
+
+  const detectSimResellerColumn = async (supabase: SupabaseClient) => {
+    try {
+      await supabase.select('sims', 'select=reseller_id&limit=1', { suppressMissingColumns: true })
+      return true
+    } catch (err) {
+      if (isMissingSimResellerColumnError(err)) return false
+      throw err
+    }
+  }
+
   app.post(
     `${prefix}/sims/import-jobs`,
     { preHandler: rbac(['sims.import'], { roles: ['reseller_admin'] }) },
@@ -101,36 +187,54 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
         return sendError(reply, 413, 'PAYLOAD_TOO_LARGE', 'Payload too large.')
       }
       const { fields, files } = parseMultipartFormData(bodyBuffer, boundaryMatch[1])
+      if (auth.scope !== 'reseller' && auth.scope !== 'platform') {
+        return sendError(reply, 403, 'FORBIDDEN', 'Insufficient permissions.')
+      }
+      const authResellerId = auth?.resellerId ? String(auth.resellerId).trim() : null
+      const resellerId = fields.resellerId ? String(fields.resellerId).trim() : null
       const supplierId = fields.supplierId ? String(fields.supplierId).trim() : null
-      const enterpriseIdRaw = fields.enterpriseId ? String(fields.enterpriseId).trim() : null
       const batchId = fields.batchId ? String(fields.batchId).trim() : null
+      const apn = fields.apn ? String(fields.apn).trim() : null
+      const operatorId = fields.operatorId ? String(fields.operatorId).trim() : null
+      if (!resellerId || !isValidUuid(resellerId)) {
+        return sendError(reply, 400, 'BAD_REQUEST', 'resellerId is required and must be a valid uuid.')
+      }
+      if (auth.scope === 'reseller') {
+        if (!authResellerId || !isValidUuid(authResellerId)) {
+          return sendError(reply, 403, 'FORBIDDEN', 'Invalid reseller context.')
+        }
+        if (resellerId !== authResellerId) {
+          return sendError(reply, 403, 'FORBIDDEN', 'resellerId is out of scope.')
+        }
+      }
       if (!supplierId || !isValidUuid(supplierId)) {
         return sendError(reply, 400, 'BAD_REQUEST', 'supplierId is required and must be a valid uuid.')
       }
-      if (enterpriseIdRaw && !isValidUuid(enterpriseIdRaw)) {
-        return sendError(reply, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+      if (!apn) {
+        return sendError(reply, 400, 'BAD_REQUEST', 'apn is required.')
+      }
+      if (!operatorId || !isValidUuid(operatorId)) {
+        return sendError(reply, 400, 'BAD_REQUEST', 'operatorId is required and must be a valid uuid.')
       }
       const file = files.file
       if (!file || !file.content) {
         return sendError(reply, 400, 'INVALID_FORMAT', 'file is required.')
       }
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(reply) })
-      let enterpriseId = enterpriseIdRaw
-      if (auth.scope === 'reseller') {
-        enterpriseId = await resolveEnterpriseForReseller(req, reply, supabase, enterpriseIdRaw)
-        if (!enterpriseId && enterpriseIdRaw) return
-      }
+      const enterpriseId = null
       const csvText = String(file.content ?? '')
       const result = await runSimImport({
         supabase,
         csvText,
         supplierId,
+        apn,
+        operatorId,
         enterpriseId,
         batchId,
         traceId: getTraceId(reply),
         actorUserId: auth.userId ?? null,
         actorRole: auth.role ?? null,
-        resellerId: auth.resellerId ?? null,
+        resellerId,
         sourceIp: req.ip,
       })
       if (!result.ok) {
@@ -208,10 +312,21 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
         enterpriseId = await resolveEnterpriseForReseller(req, reply, supabase, enterpriseId)
         if (!enterpriseId) return
       }
-      const carrierRows = await supabase.select('supplier_carriers', `select=carrier_id&supplier_id=eq.${encodeURIComponent(supplierIdValue)}`)
-      const allowedCarrierIds = new Set((Array.isArray(carrierRows) ? carrierRows : []).map((r: any) => String(r.carrier_id)))
-      if (allowedCarrierIds.size > 0 && !allowedCarrierIds.has(operatorIdValue)) {
+      const operatorRows = await supabase.select(
+        'operators',
+        `select=operator_id&operator_id=eq.${encodeURIComponent(operatorIdValue)}&supplier_id=eq.${encodeURIComponent(supplierIdValue)}&limit=1`
+      )
+      const operator = Array.isArray(operatorRows) ? operatorRows[0] : null
+      if (!operator?.operator_id) {
         return sendError(reply, 400, 'INVALID_OPERATOR', 'Operator is not linked to supplier.')
+      }
+      const businessRows = await supabase.select(
+        'business_operators',
+        `select=operator_id&operator_id=eq.${encodeURIComponent(operatorIdValue)}&limit=1`
+      )
+      const business = Array.isArray(businessRows) ? businessRows[0] : null
+      if (!business?.operator_id) {
+        return sendError(reply, 400, 'INVALID_OPERATOR', 'Operator is not found in business operators.')
       }
       const existingRows = await supabase.select('sims', `select=sim_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
       const existing = Array.isArray(existingRows) ? existingRows[0] : null
@@ -226,7 +341,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
         imsi_secondary_3: secondaryImsi3 ? String(secondaryImsi3).trim() : null,
         msisdn: msisdn ? String(msisdn).trim() : null,
         supplier_id: supplierIdValue,
-        carrier_id: operatorIdValue,
+        operator_id: operator.operator_id,
         enterprise_id: enterpriseId ?? null,
         status: 'INVENTORY',
         apn: apnValue,
@@ -262,6 +377,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
       const status = query.status ? String(query.status) : null
       const supplierId = query.supplierId ? String(query.supplierId) : null
       const operatorId = query.operatorId ? String(query.operatorId) : null
+      const resellerIdQuery = query.resellerId ? String(query.resellerId) : null
       const enterpriseIdQuery = query.enterpriseId ? String(query.enterpriseId) : null
       const departmentIdQuery = query.departmentId ? String(query.departmentId) : null
       const pageSize = query.pageSize ? Number(query.pageSize) : (query.limit ? Number(query.limit) : 20)
@@ -277,20 +393,89 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
       if (operatorId && !isValidUuid(operatorId)) {
         return sendError(reply, 400, 'BAD_REQUEST', 'operatorId must be a valid uuid.')
       }
+      if (resellerIdQuery && !isValidUuid(resellerIdQuery)) {
+        return sendError(reply, 400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
+      }
+      let operatorFilter: { operatorIds: string[] } | null = null
+      if (operatorId) {
+        const resolved = await resolveOperatorFilter(supabase, operatorId, supplierId)
+        if (!resolved) {
+          return reply.send({ items: [], total: 0, page, pageSize: limit })
+        }
+        operatorFilter = resolved
+      }
       let enterpriseId = getEnterpriseIdFromReq(req)
+      let resellerId: string | null = null
       if (roleScope === 'reseller') {
-        enterpriseId = await resolveEnterpriseForReseller(req, reply, supabase, enterpriseIdQuery)
-        if (!enterpriseId) return
+        resellerId = (req as { cmpAuth?: { resellerId?: string | null } }).cmpAuth?.resellerId ?? null
+        if (enterpriseIdQuery) {
+          enterpriseId = await resolveEnterpriseForReseller(req, reply, supabase, enterpriseIdQuery)
+          if (!enterpriseId) return
+        }
       } else if (roleScope === 'platform') {
         if (enterpriseIdQuery) enterpriseId = enterpriseIdQuery
+        if (resellerIdQuery) resellerId = resellerIdQuery
       }
       const departmentId = roleScope === 'department'
         ? getDepartmentIdFromReq(req)
         : await resolveDepartmentForEnterprise(req, reply, supabase, enterpriseId, departmentIdQuery)
       if (departmentIdQuery && roleScope !== 'department' && departmentIdQuery && !departmentId) return
 
+      const includeResellerInventory = !enterpriseId && roleScope === 'reseller' && !!resellerId
+      const hasSimResellerColumn = await detectSimResellerColumn(supabase)
+      let resellerEnterpriseIds: string[] | null = null
+      let resellerSupplierIds: string[] | null = null
+      if (!enterpriseId && resellerId) {
+        const resellerRows = await supabase.select(
+          'tenants',
+          `select=tenant_id&parent_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.ENTERPRISE`
+        )
+        resellerEnterpriseIds = (Array.isArray(resellerRows) ? resellerRows : []).map((t: any) => String(t.tenant_id))
+        if (!hasSimResellerColumn) {
+          const resellerSupplierRows = await supabase.select(
+            'reseller_suppliers',
+            `select=supplier_id&reseller_id=eq.${encodeURIComponent(resellerId)}`
+          )
+          resellerSupplierIds = Array.from(new Set(
+            (Array.isArray(resellerSupplierRows) ? resellerSupplierRows : [])
+              .map((row: any) => (row?.supplier_id ? String(row.supplier_id) : ''))
+              .filter(Boolean)
+          ))
+        }
+      }
+
       const filters = []
       if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
+      if (!enterpriseId && resellerEnterpriseIds) {
+        if (resellerId) {
+          if (hasSimResellerColumn) {
+            if (resellerEnterpriseIds.length) {
+              filters.push(`or=(enterprise_id.in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')}),reseller_id.eq.${encodeURIComponent(resellerId)})`)
+            } else {
+              filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
+            }
+          } else {
+            const parts: string[] = []
+            if (resellerEnterpriseIds.length) {
+              parts.push(`enterprise_id.in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`)
+            }
+            if (resellerSupplierIds?.length) {
+              parts.push(`supplier_id.in.(${resellerSupplierIds.map((id) => encodeURIComponent(id)).join(',')})`)
+            } else if (includeResellerInventory && !resellerEnterpriseIds.length) {
+              return reply.send({ items: [], total: 0, page, pageSize: limit })
+            }
+            if (parts.length > 1) {
+              filters.push(`or=(${parts.join(',')})`)
+            } else if (parts.length === 1) {
+              filters.push(parts[0])
+            } else {
+              return reply.send({ items: [], total: 0, page, pageSize: limit })
+            }
+          }
+        } else {
+          filters.push(`enterprise_id=in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`)
+        }
+      }
       if (departmentId) filters.push(`department_id=eq.${encodeURIComponent(departmentId)}`)
       if (iccidRaw) {
         if (iccidRaw.length >= 18) {
@@ -302,25 +487,95 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
       if (msisdn) filters.push(`msisdn=eq.${encodeURIComponent(msisdn)}`)
       if (status) filters.push(`status=eq.${encodeURIComponent(status)}`)
       if (supplierId) filters.push(`supplier_id=eq.${encodeURIComponent(supplierId)}`)
-      if (operatorId) filters.push(`carrier_id=eq.${encodeURIComponent(operatorId)}`)
+      appendOperatorFilter(filters, operatorFilter)
       const filterQs = filters.length ? `&${filters.join('&')}` : ''
 
+      const simSelectFields = [
+        'sim_id', 'iccid', 'primary_imsi', 'msisdn', 'status', 'apn', 'activation_date', 'bound_imei', 'activation_code',
+        'supplier_id', 'operator_id',
+        ...(hasSimResellerColumn ? ['reseller_id'] : []),
+        'enterprise_id', 'department_id', 'form_factor', 'upstream_status', 'upstream_status_updated_at', 'created_at',
+        'suppliers(name)', 'operators(name)',
+      ].join(',')
       const { data, total } = await supabase.selectWithCount(
         'sims',
-        `select=sim_id,iccid,primary_imsi,msisdn,status,apn,activation_date,bound_imei,supplier_id,carrier_id,enterprise_id,department_id,created_at,suppliers(name),carriers(name,mcc,mnc)&order=iccid.asc&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
+        `select=${simSelectFields}&order=iccid.asc&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
       )
 
       const rows = Array.isArray(data) ? data : []
+      const businessOperatorMap = await loadBusinessOperatorMap(
+        supabase,
+        rows.map((r: any) => r.operator_id)
+      )
       const enterpriseIds = Array.from(new Set(rows.map((r: any) => r.enterprise_id).filter(Boolean).map((v: any) => String(v))))
       const departmentIds = Array.from(new Set(rows.map((r: any) => r.department_id).filter(Boolean).map((v: any) => String(v))))
+      const supplierIds = Array.from(new Set(rows.map((r: any) => r.supplier_id).filter(Boolean).map((v: any) => String(v))))
       const tenantIds = Array.from(new Set([...enterpriseIds, ...departmentIds]))
       let tenantNameMap = new Map<string, string | null>()
+      let tenantParentMap = new Map<string, string | null>()
+      let resellerNameMap = new Map<string, string | null>()
+      let supplierResellerMap = new Map<string, string>()
+      if (supplierIds.length) {
+        const supplierRows = await supabase.select(
+          'reseller_suppliers',
+          `select=supplier_id,reseller_id&supplier_id=in.(${supplierIds.map((id) => encodeURIComponent(id)).join(',')})`
+        )
+        supplierResellerMap = new Map(
+          (Array.isArray(supplierRows) ? supplierRows : [])
+            .filter((row: any) => row?.supplier_id && row?.reseller_id)
+            .map((row: any) => [String(row.supplier_id), String(row.reseller_id)])
+        )
+      }
       if (tenantIds.length) {
-        const tRows = await supabase.select('tenants', `select=tenant_id,name&tenant_id=in.(${tenantIds.map((id) => encodeURIComponent(id)).join(',')})`)
+        const tRows = await supabase.select(
+          'tenants',
+          `select=tenant_id,name,parent_id&tenant_id=in.(${tenantIds.map((id) => encodeURIComponent(id)).join(',')})`
+        )
         tenantNameMap = new Map((Array.isArray(tRows) ? tRows : []).map((t: any) => [String(t.tenant_id), t.name ?? null]))
+        tenantParentMap = new Map(
+          (Array.isArray(tRows) ? tRows : []).map((t: any) => [
+            String(t.tenant_id),
+            t.parent_id ? String(t.parent_id) : null,
+          ])
+        )
+        const resellerIds = Array.from(new Set(
+          (Array.isArray(tRows) ? tRows : [])
+            .map((t: any) => (t?.parent_id ? String(t.parent_id) : ''))
+            .filter(Boolean)
+        ))
+        const directResellerIds = hasSimResellerColumn
+          ? Array.from(new Set(rows.map((r: any) => (r?.reseller_id ? String(r.reseller_id) : '')).filter(Boolean)))
+          : []
+        const allResellerIds = Array.from(new Set([...resellerIds, ...directResellerIds]))
+        if (!hasSimResellerColumn) {
+          for (const resellerIdFromSupplier of supplierResellerMap.values()) {
+            allResellerIds.push(resellerIdFromSupplier)
+          }
+        }
+        if (allResellerIds.length) {
+          const rRows = await supabase.select(
+            'tenants',
+            `select=tenant_id,name&tenant_id=in.(${allResellerIds.map((id) => encodeURIComponent(id)).join(',')})`
+          )
+          resellerNameMap = new Map(
+            (Array.isArray(rRows) ? rRows : []).map((t: any) => [String(t.tenant_id), t.name ?? null])
+          )
+        }
       }
 
-      const items = rows.map((r: any) => ({
+      const includeReseller = roleScope === 'platform' || roleScope === 'reseller'
+      const items = rows.map((r: any) => {
+        const resolvedResellerId = includeReseller
+          ? (
+              hasSimResellerColumn && r.reseller_id
+                ? String(r.reseller_id)
+                : (r.enterprise_id
+                    ? tenantParentMap.get(String(r.enterprise_id)) ?? null
+                    : (r.supplier_id ? supplierResellerMap.get(String(r.supplier_id)) ?? null : null))
+            )
+          : null
+        const businessOperator = r.operator_id ? businessOperatorMap.get(String(r.operator_id)) : null
+        return {
         simId: r.sim_id,
         iccid: r.iccid,
         imsi: r.primary_imsi,
@@ -330,12 +585,19 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
         upstreamStatus: r.upstream_status ?? null,
         upstreamStatusUpdatedAt: r.upstream_status_updated_at ?? null,
         formFactor: r.form_factor ?? null,
+        activationCode: r.activation_code ?? null,
         supplierId: r.supplier_id,
         supplierName: r.suppliers?.name ?? null,
-        operatorId: r.carrier_id,
-        operatorName: r.carriers?.name ?? null,
-        mcc: r.carriers?.mcc ?? null,
-        mnc: r.carriers?.mnc ?? null,
+            operatorId: businessOperator?.operator_id ?? r.operator_id ?? null,
+        operatorName: businessOperator?.name ?? r.operators?.name ?? null,
+        mcc: businessOperator?.mcc ?? null,
+        mnc: businessOperator?.mnc ?? null,
+        ...(includeReseller
+          ? {
+              resellerId: resolvedResellerId,
+              resellerName: resolvedResellerId ? resellerNameMap.get(resolvedResellerId) ?? null : null,
+            }
+          : {}),
         enterpriseId: r.enterprise_id ?? null,
         enterpriseName: r.enterprise_id ? tenantNameMap.get(String(r.enterprise_id)) ?? null : null,
         departmentId: r.department_id ?? null,
@@ -344,7 +606,8 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
         activationDate: toIsoDateTime(r.activation_date),
         totalUsageBytes: null,
         imei: r.bound_imei ?? null,
-      }))
+        }
+      })
 
       {
         const filterPairs = []
@@ -353,6 +616,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
         if (status) filterPairs.push(`status=${status}`)
         if (supplierId) filterPairs.push(`supplierId=${supplierId}`)
         if (operatorId) filterPairs.push(`operatorId=${operatorId}`)
+        if (resellerId) filterPairs.push(`resellerId=${resellerId}`)
         if (enterpriseId) filterPairs.push(`enterpriseId=${enterpriseId}`)
         if (departmentId) filterPairs.push(`departmentId=${departmentId}`)
         filterPairs.push(`pageSize=${limit}`)
@@ -565,49 +829,117 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
   )
 
   app.post(
-    `${prefix}/sims:batch-deactivate`,
-    { preHandler: rbac(['sims.batch_deactivate'], { roles: ['reseller_admin'] }) },
+    `${prefix}/sims:batch-status-change`,
+    { preHandler: rbac(['sims.batch_status_change']) },
     async (req, reply) => {
-      const auth = ensureResellerAdmin(req, reply)
+      const auth = ensureSimReadAccess(req, reply)
       if (!auth) return
+      const actor = (req as { cmpAuth?: { userId?: string | null; resellerId?: string | null; role?: string | null; roleScope?: string | null } }).cmpAuth ?? null
+      const body = (req.body ?? {}) as Record<string, unknown>
+      const actionValue = String(body.action || '').trim().toUpperCase()
+      if (!actionValue) {
+        return sendError(reply, 400, 'BAD_REQUEST', 'action is required.')
+      }
+      if (actionValue === 'RETIRE' && body.confirm !== true) {
+        return sendError(reply, 400, 'BAD_REQUEST', 'confirm must be true.')
+      }
+      const simIds = Array.isArray(body.simIds) ? body.simIds.map((v) => String(v)) : []
+      if (simIds.length === 0) {
+        return sendError(reply, 400, 'BAD_REQUEST', 'simIds must be a non-empty array.')
+      }
+      if (simIds.length > 100) {
+        return sendError(reply, 400, 'BAD_REQUEST', 'simIds must not exceed 100 items.')
+      }
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(reply) })
-      const { reason, idempotencyKey, enterpriseId: enterpriseIdBody } = (req.body ?? {}) as Record<string, unknown>
       const roleScope = getRoleScope(req)
+      const enterpriseIdBody = body.enterpriseId ? String(body.enterpriseId) : null
       let enterpriseId = getEnterpriseIdFromReq(req)
       if (roleScope === 'reseller') {
-        enterpriseId = await resolveEnterpriseForReseller(req, reply, supabase, enterpriseIdBody ? String(enterpriseIdBody) : null)
-        if (!enterpriseId) return
+        enterpriseId = await resolveEnterpriseForReseller(req, reply, supabase, enterpriseIdBody)
+        if (!enterpriseId && enterpriseIdBody) return
       } else if (roleScope === 'platform' && enterpriseIdBody) {
-        enterpriseId = String(enterpriseIdBody)
+        enterpriseId = enterpriseIdBody
+      } else if (roleScope === 'customer' || roleScope === 'department') {
+        if (!enterpriseId) {
+          return sendError(reply, 403, 'FORBIDDEN', 'enterpriseId is required.')
+        }
+        if (enterpriseIdBody && String(enterpriseIdBody) !== String(enterpriseId)) {
+          return sendError(reply, 403, 'FORBIDDEN', 'enterpriseId is out of scope.')
+        }
       }
-      if (!enterpriseId) {
-        return sendError(reply, 400, 'BAD_REQUEST', 'enterpriseId is required.')
-      }
-      const result = await batchDeactivateSims({
+      const tenantQs = buildSimTenantFilter(req, enterpriseId)
+      const result = await batchChangeSimStatus({
         supabase,
-        enterpriseId,
-        reason: reason ? String(reason) : null,
-        idempotencyKey: idempotencyKey ? String(idempotencyKey) : null,
-        actor: auth,
+        simIds,
+        tenantQs,
+        enterpriseId: enterpriseId ?? null,
+        action: actionValue,
+        reason: body.reason ? String(body.reason) : null,
+        actor,
         traceId: getTraceId(reply),
         sourceIp: req.ip,
         pushSimStatusToUpstream,
+        commitmentExempt: body.commitmentExempt === true,
       })
       if (!result.ok) {
         return sendError(reply, result.status, result.code, result.message)
       }
-      if (result.idempotent) {
-        return reply.status(200).send({
+      const statusCode = result.failed === 0 ? 200 : (result.succeeded === 0 ? 400 : 207)
+      reply.status(statusCode).send(result)
+    }
+  )
+
+  app.post(
+    `${prefix}/sims:batch-deactivate`,
+    { preHandler: rbac(['sims.batch_deactivate'], { roles: ['reseller_admin'] }) },
+    async (req, reply) => {
+      try {
+        const auth = ensureResellerAdmin(req, reply)
+        if (!auth) return
+        const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(reply) })
+        const { reason, idempotencyKey, enterpriseId: enterpriseIdBody } = (req.body ?? {}) as Record<string, unknown>
+        const roleScope = getRoleScope(req)
+        let enterpriseId = getEnterpriseIdFromReq(req)
+        if (roleScope === 'reseller') {
+          enterpriseId = await resolveEnterpriseForReseller(req, reply, supabase, enterpriseIdBody ? String(enterpriseIdBody) : null)
+          if (!enterpriseId) return
+        } else if (roleScope === 'platform' && enterpriseIdBody) {
+          enterpriseId = String(enterpriseIdBody)
+        }
+        if (!enterpriseId) {
+          return sendError(reply, 400, 'BAD_REQUEST', 'enterpriseId is required.')
+        }
+        const result = await batchDeactivateSims({
+          supabase,
+          enterpriseId,
+          reason: reason ? String(reason) : null,
+          idempotencyKey: idempotencyKey ? String(idempotencyKey) : null,
+          actor: auth,
+          traceId: getTraceId(reply),
+          sourceIp: req.ip,
+          pushSimStatusToUpstream,
+        })
+        if (!result.ok) {
+          return sendError(reply, result.status, result.code, result.message)
+        }
+        if (result.idempotent) {
+          return reply.status(200).send({
+            jobId: result.jobId,
+            status: result.status,
+            progress: result.progress,
+          })
+        }
+        reply.status(202).send({
           jobId: result.jobId,
           status: result.status,
-          progress: result.progress,
+          totalRows: result.totalRows,
         })
+      } catch (err: any) {
+        const status = Number(err?.status) || 500
+        const code = err?.code || (err?.upstreamType ? 'UPSTREAM_ERROR' : 'INTERNAL_ERROR')
+        const message = status >= 500 ? 'Unexpected error.' : String(err?.message || 'Unexpected error.')
+        return sendError(reply, status, code, message)
       }
-      reply.status(202).send({
-        jobId: result.jobId,
-        status: result.status,
-        totalRows: result.totalRows,
-      })
     }
   )
 }

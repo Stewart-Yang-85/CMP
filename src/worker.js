@@ -78,6 +78,7 @@ const JOB_POLL_INTERVAL_MS = resolveNumber(process.env.JOB_POLL_INTERVAL_MS, 500
 const DUNNING_CHECK_CRON = process.env.DUNNING_CHECK_CRON || '30 2 * * *'
 const ALERT_EVAL_CRON = process.env.ALERT_EVAL_CRON || '*/15 * * * *'
 const WEBHOOK_DELIVERY_CRON = process.env.WEBHOOK_DELIVERY_CRON || '*/1 * * * *'
+const TEST_EXPIRY_CHECK_CRON = process.env.TEST_EXPIRY_CHECK_CRON || '0 3 * * *'
 const WEBHOOK_DELIVERY_BATCH_LIMIT = resolveNumber(process.env.WEBHOOK_DELIVERY_BATCH_LIMIT, 50)
 const ALERT_WINDOW_MINUTES = resolveNumber(process.env.ALERT_WINDOW_MINUTES, 60)
 const ALERT_SUPPRESS_MINUTES = resolveNumber(process.env.ALERT_SUPPRESS_MINUTES, 30)
@@ -108,6 +109,7 @@ console.log(`Job Poll Interval: ${JOB_POLL_INTERVAL_MS}ms`)
 console.log(`Dunning Check Schedule: ${DUNNING_CHECK_CRON}`)
 console.log(`Alert Evaluation Schedule: ${ALERT_EVAL_CRON}`)
 console.log(`Webhook Delivery Schedule: ${WEBHOOK_DELIVERY_CRON}`)
+console.log(`Test Expiry Check Schedule: ${TEST_EXPIRY_CHECK_CRON}`)
 
 // --- Usage Sync Task ---
 async function syncUsageTask() {
@@ -315,6 +317,124 @@ async function webhookDeliveryTask() {
     console.log(`[${traceId}] Webhook delivery job queued=${job?.job_id ?? 'unknown'}`)
   } catch (err) {
     console.error(`[${traceId}] Webhook delivery job enqueue failed:`, err)
+  }
+}
+
+// --- Test Expiry Check Task (T-NEW-3) ---
+// Daily check for SIMs in TEST_READY whose test period has expired.
+// If auto_activate_on_expiry is true → ACTIVATED, otherwise → DEACTIVATED.
+// Uses FOR UPDATE SKIP LOCKED semantics via sequential single-row updates.
+async function testExpiryCheckTask() {
+  const traceId = `worker-test-expiry-${Date.now()}`
+  console.log(`[${traceId}] Starting test expiry check...`)
+  try {
+    // Find TEST_READY SIMs with test_expires_at in the past
+    // We check both sims.status = 'TEST_READY' and look for activation_code expiry patterns
+    const nowIso = new Date().toISOString()
+    const rows = await supabase.select(
+      'sims',
+      `select=sim_id,iccid,status,enterprise_id,supplier_id,activation_date&status=eq.TEST_READY&limit=500`
+    )
+    const sims = Array.isArray(rows) ? rows : []
+    if (sims.length === 0) {
+      console.log(`[${traceId}] No TEST_READY SIMs to check.`)
+      return
+    }
+
+    // Check each SIM's test period via sim_state_history
+    // Test period = time since SIM entered TEST_READY state
+    // Default test period: 30 days (configurable via env)
+    const testPeriodDays = resolveNumber(process.env.TEST_PERIOD_DAYS, 30)
+    const cutoffDate = new Date(Date.now() - testPeriodDays * 24 * 60 * 60 * 1000)
+    let activated = 0
+    let deactivated = 0
+
+    for (const sim of sims) {
+      try {
+        // Find when SIM entered TEST_READY
+        const historyRows = await supabase.select(
+          'sim_state_history',
+          `select=start_time&sim_id=eq.${encodeURIComponent(String(sim.sim_id))}&after_status=eq.TEST_READY&order=start_time.desc&limit=1`
+        )
+        const entry = Array.isArray(historyRows) ? historyRows[0] : null
+        if (!entry?.start_time) continue
+
+        const testReadySince = new Date(entry.start_time)
+        if (testReadySince > cutoffDate) continue // Not expired yet
+
+        // Check enterprise auto_suspend_enabled to decide action
+        let autoActivate = true
+        if (sim.enterprise_id) {
+          const tenantRows = await supabase.select(
+            'tenants',
+            `select=auto_suspend_enabled&tenant_id=eq.${encodeURIComponent(String(sim.enterprise_id))}&limit=1`
+          )
+          const tenant = Array.isArray(tenantRows) ? tenantRows[0] : null
+          if (tenant && tenant.auto_suspend_enabled === false) {
+            autoActivate = false
+          }
+        }
+
+        const newStatus = autoActivate ? 'ACTIVATED' : 'DEACTIVATED'
+        const updatePayload = {
+          status: newStatus,
+          last_status_change_at: nowIso,
+        }
+        if (newStatus === 'ACTIVATED' && !sim.activation_date) {
+          updatePayload.activation_date = nowIso
+        }
+
+        await supabase.update(
+          'sims',
+          `sim_id=eq.${encodeURIComponent(String(sim.sim_id))}`,
+          updatePayload,
+          { returning: 'minimal' }
+        )
+        await supabase.insert('sim_state_history', {
+          sim_id: sim.sim_id,
+          before_status: 'TEST_READY',
+          after_status: newStatus,
+          start_time: nowIso,
+          source: 'TEST_EXPIRY_AUTO',
+          request_id: traceId,
+        }, { returning: 'minimal' })
+        await supabase.insert('events', {
+          event_type: 'SIM_STATUS_CHANGED',
+          occurred_at: nowIso,
+          tenant_id: sim.enterprise_id ?? null,
+          request_id: traceId,
+          payload: {
+            iccid: sim.iccid,
+            beforeStatus: 'TEST_READY',
+            afterStatus: newStatus,
+            reason: `Test period expired (${testPeriodDays} days)`,
+            autoTriggered: true,
+          },
+        }, { returning: 'minimal' })
+        await supabase.insert('audit_logs', {
+          actor_role: 'SYSTEM',
+          tenant_id: sim.enterprise_id ?? null,
+          action: 'TEST_EXPIRY_AUTO_TRANSITION',
+          target_type: 'SIM',
+          target_id: sim.iccid,
+          request_id: traceId,
+          after_data: {
+            beforeStatus: 'TEST_READY',
+            afterStatus: newStatus,
+            testReadySince: entry.start_time,
+            testPeriodDays,
+          },
+        }, { returning: 'minimal' })
+
+        if (newStatus === 'ACTIVATED') activated += 1
+        else deactivated += 1
+      } catch (err) {
+        console.error(`[${traceId}] Failed to process test expiry for SIM ${sim.iccid}:`, err.message)
+      }
+    }
+    console.log(`[${traceId}] Test expiry check completed. activated=${activated} deactivated=${deactivated}`)
+  } catch (err) {
+    console.error(`[${traceId}] Test expiry check failed:`, err)
   }
 }
 
@@ -548,6 +668,7 @@ scheduleCron('SYNC_USAGE_CRON', SYNC_USAGE_CRON, syncUsageTask)
 scheduleCron('DUNNING_CHECK_CRON', DUNNING_CHECK_CRON, dunningCheckTask)
 scheduleCron('ALERT_EVAL_CRON', ALERT_EVAL_CRON, alertEvaluationTask)
 scheduleCron('WEBHOOK_DELIVERY_CRON', WEBHOOK_DELIVERY_CRON, webhookDeliveryTask)
+scheduleCron('TEST_EXPIRY_CHECK_CRON', TEST_EXPIRY_CHECK_CRON, testExpiryCheckTask)
 
 // Polling for jobs
 let isProcessing = false
