@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
+      - run: npm ci --omit=optional
       - name: Run smoke test
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
