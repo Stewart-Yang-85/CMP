@@ -55,6 +55,10 @@ function firstDayNextMonthUtc() {
   return new Date(Date.UTC(m === 11 ? y + 1 : y, (m + 1) % 12, 1, 0, 0, 0, 0))
 }
 
+function endOfCurrentMonthUtc() {
+  return new Date(firstDayNextMonthUtc().getTime() - 1000)
+}
+
 function addDaysUtc(date, days) {
   const d = new Date(date)
   d.setUTCDate(d.getUTCDate() + days)
@@ -277,6 +281,7 @@ export async function switchSubscription({
   supabase,
   enterpriseId,
   iccid,
+  fromSubscriptionId,
   newPackageVersionId,
   effectiveStrategy,
   tenantFilter,
@@ -291,7 +296,7 @@ export async function switchSubscription({
   }
   const pkgId = String(newPackageVersionId || '').trim()
   if (!isValidUuid(pkgId)) {
-    return toError(400, 'BAD_REQUEST', 'newPackageVersionId is required and must be a valid uuid.')
+    return toError(400, 'BAD_REQUEST', 'toPackageVersionId is required and must be a valid uuid.')
   }
   const sim = await loadSimByIccid(supabase, iccidValue, tenantFilter)
   if (!sim) {
@@ -314,6 +319,9 @@ export async function switchSubscription({
   const from = Array.isArray(current) ? current[0] : null
   if (!from?.subscription_id) {
     return toError(404, 'SUBSCRIPTION_NOT_FOUND', 'No active MAIN subscription.')
+  }
+  if (fromSubscriptionId && String(from.subscription_id) !== String(fromSubscriptionId).trim()) {
+    return toError(400, 'BAD_REQUEST', 'fromSubscriptionId does not match the current MAIN subscription for this SIM.')
   }
   const pkg = await loadPackageVersion(supabase, pkgId)
   if (!pkg || String(pkg.status || '').toUpperCase() !== 'PUBLISHED') {
@@ -412,7 +420,7 @@ export async function cancelSubscription({
   }
   const rows = await supabase.select(
     'subscriptions',
-    `select=subscription_id,enterprise_id,state&subscription_id=eq.${encodeURIComponent(id)}&limit=1`
+    `select=subscription_id,enterprise_id,state,subscription_kind,expires_at&subscription_id=eq.${encodeURIComponent(id)}&limit=1`
   )
   const sub = Array.isArray(rows) ? rows[0] : null
   if (!sub) {
@@ -421,30 +429,159 @@ export async function cancelSubscription({
   if (String(sub.enterprise_id) !== String(enterpriseId)) {
     return toError(403, 'FORBIDDEN', 'Subscription does not belong to your enterprise.')
   }
-  const nowIso = new Date().toISOString()
+  const state = String(sub.state || '').toUpperCase()
+  const kind = String(sub.subscription_kind || '').toUpperCase()
   const shouldImmediate = String(immediate || '').toLowerCase() === 'true'
-  const expiresAt = shouldImmediate
-    ? nowIso
-    : new Date(firstDayNextMonthUtc().getTime() - 1000).toISOString()
-  const nextState = shouldImmediate ? 'CANCELLED' : 'EXPIRED'
-  await supabase.update(
-    'subscriptions',
-    `subscription_id=eq.${encodeURIComponent(id)}`,
-    { state: nextState, cancelled_at: shouldImmediate ? nowIso : null, expires_at: expiresAt }
+  const nowIso = new Date().toISOString()
+
+  if (state === 'PENDING') {
+    const expiresAt = nowIso
+    const nextState = 'CANCELLED'
+    await supabase.update(
+      'subscriptions',
+      `subscription_id=eq.${encodeURIComponent(id)}`,
+      { state: nextState, cancelled_at: nowIso, expires_at: expiresAt }
+    )
+    await writeAuditLog(supabase, {
+      actor_user_id: audit?.actorUserId ?? null,
+      actor_role: audit?.actorRole ?? null,
+      tenant_id: enterpriseId ?? null,
+      action: 'SUBSCRIPTION_CANCELLED',
+      target_type: 'SUBSCRIPTION',
+      target_id: id,
+      request_id: audit?.requestId ?? null,
+      source_ip: audit?.sourceIp ?? null,
+      before_data: { state },
+      after_data: { state: nextState, expiresAt, reason: 'PENDING_cancelled' },
+    })
+    return { ok: true, value: { subscriptionId: id, state: nextState, expiresAt, scheduled: false } }
+  }
+
+  if (state === 'ACTIVE') {
+    if (shouldImmediate) {
+      return toError(
+        400,
+        'ACTIVE_CANNOT_IMMEDIATE_CANCEL',
+        'ACTIVE subscription cannot be cancelled immediately. Use immediate=false to schedule cancel at end of cycle.'
+      )
+    }
+    const endOfMonth = endOfCurrentMonthUtc()
+    const scheduledExecuteAt =
+      kind === 'ADD_ON' && sub.expires_at && new Date(sub.expires_at).getTime() < endOfMonth.getTime()
+        ? new Date(sub.expires_at).toISOString()
+        : endOfMonth.toISOString()
+    let existingRow = null
+    try {
+      const existing = await supabase.select(
+        'subscription_cancel_schedules',
+        `select=schedule_id&subscription_id=eq.${encodeURIComponent(id)}&status=eq.PENDING&limit=1`
+      )
+      existingRow = Array.isArray(existing) ? existing[0] : null
+    } catch (err) {
+      if (String(err?.message || '').includes('subscription_cancel_schedules')) {
+        return toError(503, 'MIGRATION_REQUIRED', 'subscription_cancel_schedules table not found. Run migration 20260312100001_subscription_cancel_schedules.sql')
+      }
+      throw err
+    }
+    if (existingRow) {
+      return toError(409, 'CANCEL_ALREADY_SCHEDULED', 'Cancel is already scheduled for this subscription.')
+    }
+    try {
+      await supabase.insert(
+        'subscription_cancel_schedules',
+        {
+          subscription_id: id,
+          scheduled_execute_at: scheduledExecuteAt,
+          status: 'PENDING',
+        },
+        { returning: 'minimal' }
+      )
+    } catch (err) {
+      if (String(err?.message || '').includes('subscription_cancel_schedules')) {
+        return toError(503, 'MIGRATION_REQUIRED', 'subscription_cancel_schedules table not found. Run migration 20260312100001_subscription_cancel_schedules.sql')
+      }
+      throw err
+    }
+    await writeAuditLog(supabase, {
+      actor_user_id: audit?.actorUserId ?? null,
+      actor_role: audit?.actorRole ?? null,
+      tenant_id: enterpriseId ?? null,
+      action: 'SUBSCRIPTION_CANCEL_SCHEDULED',
+      target_type: 'SUBSCRIPTION',
+      target_id: id,
+      request_id: audit?.requestId ?? null,
+      source_ip: audit?.sourceIp ?? null,
+      after_data: { subscriptionId: id, scheduledExecuteAt, kind },
+    })
+    return {
+      ok: true,
+      value: {
+        subscriptionId: id,
+        state: 'ACTIVE',
+        scheduled: true,
+        scheduledExecuteAt,
+        message: 'Cancel scheduled; will execute at end of cycle.',
+      },
+    }
+  }
+
+  return toError(400, 'INVALID_STATE', `Subscription in state ${state} cannot be cancelled.`)
+}
+
+export async function executeScheduledCancels({ supabase }) {
+  const nowIso = new Date().toISOString()
+  const rows = await supabase.select(
+    'subscription_cancel_schedules',
+    `select=schedule_id,subscription_id&status=eq.PENDING&scheduled_execute_at=lte.${encodeURIComponent(nowIso)}&limit=100`
   )
-  await writeAuditLog(supabase, {
-    actor_user_id: audit?.actorUserId ?? null,
-    actor_role: audit?.actorRole ?? null,
-    tenant_id: enterpriseId ?? null,
-    action: 'SUBSCRIPTION_CANCELLED',
-    target_type: 'SUBSCRIPTION',
-    target_id: id,
-    request_id: audit?.requestId ?? null,
-    source_ip: audit?.sourceIp ?? null,
-    before_data: { state: String(sub.state ?? '') },
-    after_data: { state: nextState, expiresAt, immediate: shouldImmediate },
-  })
-  return { ok: true, value: { subscriptionId: id, state: nextState, expiresAt } }
+  const pending = Array.isArray(rows) ? rows : []
+  const results = []
+  for (const row of pending) {
+    const subId = String(row.subscription_id || '')
+    const scheduleId = String(row.schedule_id || '')
+    try {
+      const subRows = await supabase.select(
+        'subscriptions',
+        `select=subscription_id,enterprise_id,state&subscription_id=eq.${encodeURIComponent(subId)}&limit=1`
+      )
+      const sub = Array.isArray(subRows) ? subRows[0] : null
+      if (!sub || String(sub.state).toUpperCase() !== 'ACTIVE') {
+        await supabase.update(
+          'subscription_cancel_schedules',
+          `schedule_id=eq.${encodeURIComponent(scheduleId)}`,
+          { status: 'CANCELLED' }
+        )
+        results.push({ scheduleId, subscriptionId: subId, status: 'SKIPPED', reason: 'subscription_not_active' })
+        continue
+      }
+      const endOfMonth = endOfCurrentMonthUtc().toISOString()
+      await supabase.update(
+        'subscriptions',
+        `subscription_id=eq.${encodeURIComponent(subId)}`,
+        { state: 'EXPIRED', expires_at: endOfMonth }
+      )
+      await supabase.update(
+        'subscription_cancel_schedules',
+        `schedule_id=eq.${encodeURIComponent(scheduleId)}`,
+        { status: 'EXECUTED', executed_at: nowIso }
+      )
+      await writeAuditLog(supabase, {
+        actor_user_id: null,
+        actor_role: 'SYSTEM',
+        tenant_id: String(sub.enterprise_id || ''),
+        action: 'SUBSCRIPTION_CANCELLED',
+        target_type: 'SUBSCRIPTION',
+        target_id: subId,
+        request_id: null,
+        source_ip: null,
+        after_data: { state: 'EXPIRED', expiresAt: endOfMonth, source: 'scheduled_cancel' },
+      })
+      results.push({ scheduleId, subscriptionId: subId, status: 'EXECUTED' })
+    } catch (err) {
+      results.push({ scheduleId, subscriptionId: subId, status: 'ERROR', error: String(err?.message || err) })
+    }
+  }
+  return { ok: true, value: { processed: pending.length, results } }
 }
 
 export async function listSimSubscriptions({
@@ -538,6 +675,186 @@ export async function listSimSubscriptions({
       total: Number(total ?? items.length),
       page: pageNum,
       pageSize: sizeNum,
+    },
+  }
+}
+
+export async function listSubscriptions({
+  supabase,
+  enterpriseId,
+  iccid,
+  state,
+  kind,
+  page,
+  pageSize,
+  tenantFilter,
+}) {
+  if (!isValidUuid(enterpriseId)) {
+    return toError(400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+  }
+  let simId = null
+  if (iccid) {
+    const iccidVal = String(iccid || '').trim()
+    if (!isValidIccid(iccidVal)) {
+      return toError(400, 'BAD_REQUEST', 'iccid must be 18-20 digits when provided.')
+    }
+    const sim = await loadSimByIccid(supabase, iccidVal, tenantFilter || '')
+    if (!sim) {
+      return toError(404, 'SIM_NOT_FOUND', `sim ${iccidVal} not found.`)
+    }
+    if (String(sim.enterprise_id) !== String(enterpriseId)) {
+      return toError(403, 'FORBIDDEN', 'SIM does not belong to your enterprise.')
+    }
+    simId = String(sim.sim_id)
+  }
+  const pageNum = Math.max(1, Number(page ?? 1) || 1)
+  const sizeNum = Math.min(200, Math.max(1, Number(pageSize ?? 20) || 20))
+  const offset = (pageNum - 1) * sizeNum
+  const filters = [`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`]
+  if (simId) filters.push(`sim_id=eq.${encodeURIComponent(simId)}`)
+  const stateValue = String(state || '').toUpperCase()
+  if (stateValue === 'PENDING' || stateValue === 'ACTIVE' || stateValue === 'CANCELLED' || stateValue === 'EXPIRED') {
+    filters.push(`state=eq.${encodeURIComponent(stateValue)}`)
+  }
+  const kindValue = String(kind || '').toUpperCase()
+  if (kindValue === 'MAIN' || kindValue === 'ADD_ON') {
+    filters.push(`subscription_kind=eq.${encodeURIComponent(kindValue)}`)
+  }
+  const query = `select=subscription_id,enterprise_id,sim_id,package_version_id,subscription_kind,state,effective_at,expires_at,cancelled_at,first_subscribed_at,commitment_end_at&${filters.join('&')}&order=effective_at.desc&limit=${sizeNum}&offset=${offset}`
+  const { data, total } = await supabase.selectWithCount('subscriptions', query)
+  const rows = Array.isArray(data) ? data : []
+  const simIds = [...new Set(rows.map((r) => String(r.sim_id || '')).filter(Boolean))]
+  const packageVersionIds = [...new Set(rows.map((r) => String(r.package_version_id || '')).filter(Boolean))]
+  const simMap = new Map()
+  if (simIds.length) {
+    const simRows = await supabase.select(
+      'sims',
+      `select=sim_id,iccid&sim_id=in.(${simIds.map((v) => encodeURIComponent(v)).join(',')})`
+    )
+    if (Array.isArray(simRows)) {
+      for (const s of simRows) {
+        if (s.sim_id) simMap.set(String(s.sim_id), s)
+      }
+    }
+  }
+  const versionMap = new Map()
+  if (packageVersionIds.length) {
+    const versions = await supabase.select(
+      'package_versions',
+      `select=package_version_id,package_id&package_version_id=in.(${packageVersionIds.map((v) => encodeURIComponent(v)).join(',')})`
+    )
+    if (Array.isArray(versions)) {
+      for (const v of versions) {
+        if (v.package_version_id) versionMap.set(String(v.package_version_id), v)
+      }
+    }
+  }
+  const packageIds = Array.from(versionMap.values()).map((v) => String(v.package_id || '')).filter(Boolean)
+  const packageMap = new Map()
+  if (packageIds.length) {
+    const packages = await supabase.select(
+      'packages',
+      `select=package_id,name&package_id=in.(${packageIds.map((v) => encodeURIComponent(v)).join(',')})`
+    )
+    if (Array.isArray(packages)) {
+      for (const p of packages) {
+        if (p.package_id) packageMap.set(String(p.package_id), p)
+      }
+    }
+  }
+  const items = rows.map((row) => {
+    const packageVersionId = String(row.package_version_id || '')
+    const pkgVersion = versionMap.get(packageVersionId)
+    const pkg = pkgVersion?.package_id ? packageMap.get(String(pkgVersion.package_id)) : null
+    const sim = row.sim_id ? simMap.get(String(row.sim_id)) : null
+    return {
+      subscriptionId: String(row.subscription_id || ''),
+      enterpriseId: String(row.enterprise_id || ''),
+      simId: String(row.sim_id || ''),
+      iccid: sim?.iccid ?? null,
+      packageVersionId,
+      packageName: pkg?.name ?? null,
+      kind: String(row.subscription_kind || ''),
+      state: String(row.state || ''),
+      effectiveAt: row.effective_at ?? null,
+      expiresAt: row.expires_at ?? null,
+      cancelledAt: row.cancelled_at ?? null,
+      firstSubscribedAt: row.first_subscribed_at ?? null,
+      commitmentEndAt: row.commitment_end_at ?? null,
+    }
+  })
+  return {
+    ok: true,
+    value: {
+      items,
+      total: Number(total ?? items.length),
+      page: pageNum,
+      pageSize: sizeNum,
+    },
+  }
+}
+
+export async function getSubscription({ supabase, enterpriseId, subscriptionId }) {
+  if (!isValidUuid(enterpriseId)) {
+    return toError(400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+  }
+  const id = String(subscriptionId || '').trim()
+  if (!isValidUuid(id)) {
+    return toError(400, 'BAD_REQUEST', 'subscriptionId must be a valid uuid.')
+  }
+  const rows = await supabase.select(
+    'subscriptions',
+    `select=subscription_id,enterprise_id,sim_id,package_version_id,subscription_kind,state,effective_at,expires_at,cancelled_at,first_subscribed_at,commitment_end_at&subscription_id=eq.${encodeURIComponent(id)}&limit=1`
+  )
+  const row = Array.isArray(rows) ? rows[0] : null
+  if (!row) {
+    return toError(404, 'SUBSCRIPTION_NOT_FOUND', `subscription ${id} not found.`)
+  }
+  if (String(row.enterprise_id) !== String(enterpriseId)) {
+    return toError(403, 'FORBIDDEN', 'Subscription does not belong to your enterprise.')
+  }
+  const packageVersionId = String(row.package_version_id || '')
+  let packageName = null
+  if (packageVersionId) {
+    const versions = await supabase.select(
+      'package_versions',
+      `select=package_id&package_version_id=eq.${encodeURIComponent(packageVersionId)}&limit=1`
+    )
+    const v = Array.isArray(versions) ? versions[0] : null
+    if (v?.package_id) {
+      const pkgs = await supabase.select(
+        'packages',
+        `select=name&package_id=eq.${encodeURIComponent(String(v.package_id))}&limit=1`
+      )
+      const p = Array.isArray(pkgs) ? pkgs[0] : null
+      packageName = p?.name ?? null
+    }
+  }
+  let iccid = null
+  if (row.sim_id) {
+    const simRows = await supabase.select(
+      'sims',
+      `select=iccid&sim_id=eq.${encodeURIComponent(String(row.sim_id))}&limit=1`
+    )
+    const s = Array.isArray(simRows) ? simRows[0] : null
+    iccid = s?.iccid ?? null
+  }
+  return {
+    ok: true,
+    value: {
+      subscriptionId: String(row.subscription_id || ''),
+      enterpriseId: String(row.enterprise_id || ''),
+      simId: String(row.sim_id || ''),
+      iccid,
+      packageVersionId,
+      packageName,
+      kind: String(row.subscription_kind || ''),
+      state: String(row.state || ''),
+      effectiveAt: row.effective_at ?? null,
+      expiresAt: row.expires_at ?? null,
+      cancelledAt: row.cancelled_at ?? null,
+      firstSubscribedAt: row.first_subscribed_at ?? null,
+      commitmentEndAt: row.commitment_end_at ?? null,
     },
   }
 }
