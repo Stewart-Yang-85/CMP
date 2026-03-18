@@ -752,28 +752,46 @@ async function main() {
         process.stdout.write('SKIP: Admin job run (set SUPABASE_SERVICE_ROLE_KEY)\n')
       }
       if (process.env.SUPABASE_SERVICE_ROLE_KEY) {
-        const wxSync = await httpJson(`${base}/v1/admin/jobs:wx-sync-daily-usage`, {
-          method: 'POST',
-          headers: buildHeaders({ includeAuth: false, extra: { 'X-API-Key': adminKey, 'Content-Type': 'application/json' } }),
-          body: {},
-        })
-        assert(typeof wxSync?.jobId === 'string', 'wx sync must return jobId')
-        assert(typeof wxSync?.processed === 'number', 'wx sync processed must be number')
-        assert(typeof wxSync?.total === 'number', 'wx sync total must be number')
+        try {
+          const wxSync = await httpJson(`${base}/v1/admin/jobs:wx-sync-daily-usage`, {
+            method: 'POST',
+            headers: buildHeaders({ includeAuth: false, extra: { 'X-API-Key': adminKey, 'Content-Type': 'application/json' } }),
+            body: {},
+          })
+          assert(typeof wxSync?.jobId === 'string', 'wx sync must return jobId')
+          assert(typeof wxSync?.processed === 'number', 'wx sync processed must be number')
+          assert(typeof wxSync?.total === 'number', 'wx sync total must be number')
+        } catch (err) {
+          const msg = String(err?.message || '')
+          if (msg.includes('502') && msg.includes('UPSTREAM_UNAVAILABLE')) {
+            log('SKIP: WX sync daily usage (WXZHONGGENG upstream unreachable in CI)')
+          } else {
+            throw err
+          }
+        }
       } else {
         process.stdout.write('SKIP: Admin WX sync smoke (set SUPABASE_SERVICE_ROLE_KEY)\n')
       }
       log('Testing WX sync sim info batch...')
       if (process.env.SUPABASE_SERVICE_ROLE_KEY) {
-        const wxSyncSimInfo = await httpJson(`${base}/v1/admin/jobs:wx-sync-sim-info-batch`, {
-          method: 'POST',
-          headers: buildHeaders({ includeAuth: false, extra: { 'X-API-Key': adminKey, 'Content-Type': 'application/json' } }),
-          body: { pageSize: 50, pageIndex: 1 },
-        })
-        assert(typeof wxSyncSimInfo?.jobId === 'string', 'wx sync sim info must return jobId')
-        assert(typeof wxSyncSimInfo?.processed === 'number', 'wx sync sim info processed must be number')
-        assert(typeof wxSyncSimInfo?.total === 'number', 'wx sync sim info total must be number')
-        log('WX sync sim info batch passed')
+        try {
+          const wxSyncSimInfo = await httpJson(`${base}/v1/admin/jobs:wx-sync-sim-info-batch`, {
+            method: 'POST',
+            headers: buildHeaders({ includeAuth: false, extra: { 'X-API-Key': adminKey, 'Content-Type': 'application/json' } }),
+            body: { pageSize: 50, pageIndex: 1 },
+          })
+          assert(typeof wxSyncSimInfo?.jobId === 'string', 'wx sync sim info must return jobId')
+          assert(typeof wxSyncSimInfo?.processed === 'number', 'wx sync sim info processed must be number')
+          assert(typeof wxSyncSimInfo?.total === 'number', 'wx sync sim info total must be number')
+          log('WX sync sim info batch passed')
+        } catch (err) {
+          const msg = String(err?.message || '')
+          if (msg.includes('502') && msg.includes('UPSTREAM_UNAVAILABLE')) {
+            log('SKIP: WX sync sim info batch (WXZHONGGENG upstream unreachable in CI)')
+          } else {
+            throw err
+          }
+        }
       } else {
         process.stdout.write('SKIP: Admin WX sync sim info smoke (set SUPABASE_SERVICE_ROLE_KEY)\n')
       }
