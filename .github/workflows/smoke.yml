@@ -1,0 +1,34 @@
+# Smoke 测试：需在 GitHub Repo Settings → Secrets 中配置：
+#   SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+#   AUTH_TOKEN_SECRET
+#   AUTH_CLIENT_ID, AUTH_CLIENT_SECRET（可选，默认 cmp/cmp-secret）
+#   ADMIN_API_KEY（可选，用于 admin 接口测试）
+name: smoke
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Run smoke test
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          AUTH_TOKEN_SECRET: ${{ secrets.AUTH_TOKEN_SECRET }}
+          AUTH_CLIENT_ID: ${{ secrets.AUTH_CLIENT_ID }}
+          AUTH_CLIENT_SECRET: ${{ secrets.AUTH_CLIENT_SECRET }}
+          ADMIN_API_KEY: ${{ secrets.ADMIN_API_KEY }}
+        run: npm run smoke
