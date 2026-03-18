@@ -19,7 +19,7 @@ import { registerReconciliationRoutes } from './routes/reconciliation.js'
 import { registerWebhookRoutes } from './routes/webhooks.js'
 import { registerEventRoutes } from './routes/events.js'
 import { registerVendorMappingRoutes } from './routes/vendorMappings.js'
-import { createSubscription, switchSubscription, cancelSubscription, listSimSubscriptions } from './services/subscription.js'
+import { createSubscription, switchSubscription, cancelSubscription, listSimSubscriptions, listSubscriptions, getSubscription } from './services/subscription.js'
 import { parseSimIdentifier } from './services/simLifecycle.js'
 import { runBillingGenerate } from './services/billingGenerate.js'
 import { createAdjustmentNote, approveAdjustmentNote, listAdjustmentNotes } from './services/adjustmentNote.js'
@@ -321,8 +321,14 @@ function getRoleScope(req) {
   return v ? String(v) : null
 }
 
+function isBillCsvDownloadWithToken(req) {
+  const path = String(req.originalUrl || req.url || req.path || '').split('?')[0]
+  return /\/bills\/[^/]+\/files\/csv$/.test(path) && req.query?.downloadToken
+}
+
 function requireRoleScopes(scopes) {
   return function (req, res, next) {
+    if (isBillCsvDownloadWithToken(req)) return next()
     const roleScope = getRoleScope(req)
     if (!roleScope) {
       return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
@@ -344,6 +350,7 @@ function getEnterpriseIdFromRequest(req) {
 
 function requireEnterpriseScope() {
   return async function (req, res, next) {
+    if (isBillCsvDownloadWithToken(req)) return next()
     const roleScope = getRoleScope(req)
     if (!roleScope) {
       return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
@@ -373,7 +380,8 @@ function requireEnterpriseScope() {
       }
       const enterpriseId = getEnterpriseIdFromRequest(req)
       if (!enterpriseId) {
-        return sendError(res, 403, 'FORBIDDEN', 'enterpriseId is required for reseller scope.')
+        req.tenantScope = { ...(req.tenantScope ?? {}), resellerId: String(resellerId) }
+        return next()
       }
       try {
         const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
@@ -453,6 +461,8 @@ const defaultPermissionsByRoleScope = {
     'bills.list',
     'bills.read',
     'bills.export',
+    'bills.mark_paid',
+    'bills.adjust',
     'sims.list',
     'sims.read',
     'sims.export',
@@ -538,13 +548,14 @@ async function resolveRolePermissions(role, roleScope, tenantKey, bypassCache) {
       scope ? `scope=eq.${encodeURIComponent(scope)}` : null,
       'limit=1',
     ].filter(Boolean).join('&')
-    const roles = await supabase.select('roles', roleQuery)
+    const roles = await supabase.select('roles', roleQuery, { suppressMissingColumns: true })
     const roleRow = Array.isArray(roles) && roles.length > 0 ? roles[0] : null
     const roleId = roleRow ? String(roleRow.id ?? roleRow.role_id ?? '') : ''
     if (!roleId) return null
     const rolePermissions = await supabase.select(
       'role_permissions',
-      `select=permission_id&role_id=eq.${encodeURIComponent(roleId)}`
+      `select=permission_id&role_id=eq.${encodeURIComponent(roleId)}`,
+      { suppressMissingColumns: true }
     )
     const permissionIds = Array.isArray(rolePermissions)
       ? rolePermissions.map((r) => r.permission_id).filter(Boolean).map((id) => String(id))
@@ -554,12 +565,12 @@ async function resolveRolePermissions(role, roleScope, tenantKey, bypassCache) {
       return []
     }
     const idFilter = permissionIds.map((id) => encodeURIComponent(id)).join(',')
-    const permissionRows = await supabase.select('permissions', `select=code&id=in.(${idFilter})`)
+    const permissionRows = await supabase.select('permissions', `select=code&id=in.(${idFilter})`, { suppressMissingColumns: true })
     let codes = Array.isArray(permissionRows)
       ? permissionRows.map((p) => p.code).filter(Boolean).map((code) => String(code))
       : []
     if (!codes.length) {
-      const fallbackRows = await supabase.select('permissions', `select=code&permission_id=in.(${idFilter})`)
+      const fallbackRows = await supabase.select('permissions', `select=code&permission_id=in.(${idFilter})`, { suppressMissingColumns: true })
       codes = Array.isArray(fallbackRows)
         ? fallbackRows.map((p) => p.code).filter(Boolean).map((code) => String(code))
         : []
@@ -581,7 +592,7 @@ async function getEffectivePermissions(req) {
     const tenantKey = getTenantCacheKey(auth)
     const bypassCache = shouldBypassRbacCache(req)
     const rolePermissions = await resolveRolePermissions(role, roleScope, tenantKey, bypassCache)
-    if (rolePermissions !== null) return rolePermissions
+    if (rolePermissions !== null && rolePermissions.length > 0) return rolePermissions
   }
   const defaults = roleScope && defaultPermissionsByRoleScope[roleScope] ? defaultPermissionsByRoleScope[roleScope] : []
   return defaults.slice()
@@ -762,7 +773,7 @@ function getTestPeriodDays() {
   return Math.max(1, n)
 }
 
-function getTestQuotaKb() {
+function getTestQuotaMb() {
   const n = getEnvNumber('TEST_QUOTA_KB', 102400)
   return Math.max(0, n)
 }
@@ -777,8 +788,8 @@ function normalizeCommercialTerms(obj) {
   const up = (s) => (typeof s === 'string' ? s.toUpperCase() : undefined)
   const testPeriodDays =
     n(v('testPeriodDays')) ?? n(v('test_period_days')) ?? n(v('testPeriod')) ?? n(v('test_period'))
-  const testQuotaKb =
-    n(v('testQuotaKb')) ?? n(v('test_quota_kb')) ?? n(v('testQuota')) ?? n(v('test_quota'))
+  const testQuotaMb =
+    n(v('testQuotaMb')) ?? n(v('test_quota_mb')) ?? n(v('testQuota')) ?? n(v('test_quota'))
   const testExpiryConditionRaw =
     up(v('testExpiryCondition')) ?? up(v('test_expiry_condition'))
   const testExpiryCondition =
@@ -797,7 +808,7 @@ function normalizeCommercialTerms(obj) {
       : undefined
   return {
     testPeriodDays,
-    testQuotaKb,
+    testQuotaMb,
     testExpiryCondition,
     commitmentPeriodMonths,
     commitmentPeriodDays,
@@ -1011,6 +1022,12 @@ function authGuard(req, res, next) {
   if (req.path === '/favicon.ico') return next()
   if (req.path === '/auth/token') return next()
   if (req.path === '/v1/auth/token') return next()
+
+  if (isBillCsvDownloadWithToken(req)) {
+    req.cmpAuth = { roleScope: 'platform', role: 'platform_admin' }
+    req.tenantScope = {}
+    return next()
+  }
 
   const apiKey = req.header('x-api-key')
   const apiSecret = req.header('x-api-secret')
@@ -1296,6 +1313,28 @@ function computeOneTimeExpiry(effectiveAtIso, validityDays, expiryBoundary) {
 
 export function createApp() {
   const app = express()
+
+  // Patch Express 4 to catch async route handler errors and forward them to the global error handler
+  for (const method of ['get', 'post', 'put', 'patch', 'delete']) {
+    const original = app[method].bind(app)
+    app[method] = function (path, ...handlers) {
+      const wrapped = handlers.map((fn) => {
+        if (typeof fn !== 'function') return fn
+        if (fn.length >= 4) return fn
+        return (req, res, next) => {
+          try {
+            const result = fn(req, res, next)
+            if (result && typeof result.catch === 'function') {
+              result.catch(next)
+            }
+          } catch (err) {
+            next(err)
+          }
+        }
+      })
+      return original(path, ...wrapped)
+    }
+  }
 
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*')
@@ -1966,17 +2005,23 @@ export function createApp() {
       return body.includes('does not exist') && body.includes(column)
     }
 
-    function resolveBillWriteAuth(req, res, bill) {
+    async function resolveBillWriteAuth(req, res, supabase, bill) {
       const auth = req?.cmpAuth ?? {}
       const roleScope = getRoleScope(req)
       const role = auth?.role ? String(auth.role) : null
       if (roleScope === 'platform' || role === 'platform_admin') return auth
       if (roleScope === 'reseller' && role === 'reseller_admin') {
-        if (String(bill.reseller_id || '') !== String(auth.resellerId || '')) {
-          sendError(res, 403, 'FORBIDDEN', 'billId is out of reseller scope.')
-          return null
+        if (bill.reseller_id && String(bill.reseller_id) === String(auth.resellerId || '')) return auth
+        if (bill.enterprise_id && auth.resellerId) {
+          const entRows = await supabase.select(
+            'tenants',
+            `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(bill.enterprise_id)}&tenant_type=eq.ENTERPRISE&limit=1`
+          )
+          const ent = Array.isArray(entRows) ? entRows[0] : null
+          if (ent && String(ent.parent_id || '') === String(auth.resellerId)) return auth
         }
-        return auth
+        sendError(res, 403, 'FORBIDDEN', 'billId is out of reseller scope.')
+        return null
       }
       if (roleScope === 'customer') {
         const enterpriseId = getEnterpriseIdFromReq(req)
@@ -2134,10 +2179,10 @@ export function createApp() {
           if (m) {
             const y = Number(m[1])
             const mm = Number(m[2])
-            const start = `${m[1]}-${m[2]}-01`
-            const end = new Date(Date.UTC(y, mm, 0)).toISOString().slice(0, 10)
-            filters.push(`period_start=eq.${encodeURIComponent(start)}`)
-            filters.push(`period_end=eq.${encodeURIComponent(end)}`)
+            const monthStart = `${m[1]}-${m[2]}-01`
+            const nextMonth = mm === 12 ? `${y + 1}-01-01` : `${m[1]}-${String(mm + 1).padStart(2, '0')}-01`
+            filters.push(`period_start=gte.${encodeURIComponent(monthStart)}`)
+            filters.push(`period_start=lt.${encodeURIComponent(nextMonth)}`)
           }
         }
 
@@ -2188,13 +2233,35 @@ export function createApp() {
       const sortOrderRaw = req.query.sortOrder ? String(req.query.sortOrder) : null
 
       let resellerId = null
+      let enterpriseIdFilter = null
       if (roleScope === 'reseller') {
         resellerId = auth.resellerId
         if (!resellerId) {
           return sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
         }
+        const tenantRows = await supabase.select(
+          'tenants',
+          `select=tenant_id&parent_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.ENTERPRISE&limit=1000`
+        )
+        const customerIds = Array.isArray(tenantRows) ? tenantRows.map((r) => r?.tenant_id).filter(Boolean).map((v) => encodeURIComponent(String(v))) : []
+        if (customerIds.length === 0) {
+          return res.json({ items: [], total: 0 })
+        }
+        enterpriseIdFilter = `enterprise_id=in.(${customerIds.join(',')})`
       } else if (roleScope === 'platform') {
         resellerId = resellerIdParam
+        if (resellerId) {
+          const tenantRows = await supabase.select(
+            'tenants',
+            `select=tenant_id&parent_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.ENTERPRISE&limit=1000`
+          )
+          const customerIds = Array.isArray(tenantRows) ? tenantRows.map((r) => r?.tenant_id).filter(Boolean).map((v) => encodeURIComponent(String(v))) : []
+          if (customerIds.length > 0) {
+            enterpriseIdFilter = `enterprise_id=in.(${customerIds.join(',')})`
+          } else {
+            enterpriseIdFilter = `reseller_id=eq.${encodeURIComponent(resellerId)}`
+          }
+        }
       } else {
         return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
       }
@@ -2203,17 +2270,21 @@ export function createApp() {
       const page = req.query.page ? Number(req.query.page) : 1
       const offset = Math.max(0, (Math.max(1, page) - 1) * Math.max(0, limit))
       const filters = []
-      if (resellerId) filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
+      if (enterpriseIdFilter) {
+        filters.push(enterpriseIdFilter)
+      } else if (resellerId) {
+        filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
+      }
       if (status) filters.push(`status=eq.${encodeURIComponent(status)}`)
       if (period) {
         const m = period.match(/^(\d{4})-(\d{2})$/)
         if (m) {
           const y = Number(m[1])
           const mm = Number(m[2])
-          const start = `${m[1]}-${m[2]}-01`
-          const end = new Date(Date.UTC(y, mm, 0)).toISOString().slice(0, 10)
-          filters.push(`period_start=eq.${encodeURIComponent(start)}`)
-          filters.push(`period_end=eq.${encodeURIComponent(end)}`)
+          const monthStart = `${m[1]}-${m[2]}-01`
+          const nextMonth = mm === 12 ? `${y + 1}-01-01` : `${m[1]}-${String(mm + 1).padStart(2, '0')}-01`
+          filters.push(`period_start=gte.${encodeURIComponent(monthStart)}`)
+          filters.push(`period_start=lt.${encodeURIComponent(nextMonth)}`)
         }
       }
       const sortByMap = {
@@ -2271,10 +2342,10 @@ export function createApp() {
           if (m) {
             const y = Number(m[1])
             const mm = Number(m[2])
-            const start = `${m[1]}-${m[2]}-01`
-            const end = new Date(Date.UTC(y, mm, 0)).toISOString().slice(0, 10)
-            filters.push(`period_start=eq.${encodeURIComponent(start)}`)
-            filters.push(`period_end=eq.${encodeURIComponent(end)}`)
+            const monthStart = `${m[1]}-${m[2]}-01`
+            const nextMonth = mm === 12 ? `${y + 1}-01-01` : `${m[1]}-${String(mm + 1).padStart(2, '0')}-01`
+            filters.push(`period_start=gte.${encodeURIComponent(monthStart)}`)
+            filters.push(`period_start=lt.${encodeURIComponent(nextMonth)}`)
           }
         }
         const sortByMap = { period: 'period_start', dueDate: 'due_date', totalAmount: 'total_amount', status: 'status' }
@@ -2310,33 +2381,86 @@ export function createApp() {
         }
         return res.send(`${csvRows.join('\n')}\n`)
       }
-      const supabase = createSupabaseRestClient({ traceId: getTraceId(res) })
+      const roleScope = getRoleScope(req)
+      const auth = getAuthContext(req)
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const period = req.query.period ? String(req.query.period) : null
       const status = req.query.status ? String(req.query.status) : null
-      const sortBy = req.query.sortBy ? String(req.query.sortBy) : null
-      const sortOrder = req.query.sortOrder ? String(req.query.sortOrder) : null
+      const resellerIdParam = req.query.resellerId ? String(req.query.resellerId) : null
+      const sortByRaw = req.query.sortBy ? String(req.query.sortBy) : null
+      const sortOrderRaw = req.query.sortOrder ? String(req.query.sortOrder) : null
       const limit = req.query.limit ? Number(req.query.limit) : 1000
       const page = req.query.page ? Number(req.query.page) : 1
       const offset = Math.max(0, (Math.max(1, page) - 1) * Math.max(0, limit))
-      const data = await supabase.rpc('list_bills', {
-        p_period: period,
-        p_status: status,
-        p_sort_by: sortBy,
-        p_sort_order: sortOrder,
-        p_limit: limit,
-        p_offset: offset
-      })
-      const rows = Array.isArray(data?.items) ? data.items : (Array.isArray(data) ? data : [])
-      const headers = ['billId','period','status','dueDate','currency','totalAmount']
+
+      let resellerId = null
+      let enterpriseIdFilter = null
+      if (roleScope === 'reseller') {
+        resellerId = auth.resellerId
+        if (!resellerId) {
+          return sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
+        }
+        const tenantRows = await supabase.select(
+          'tenants',
+          `select=tenant_id&parent_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.ENTERPRISE&limit=1000`
+        )
+        const customerIds = Array.isArray(tenantRows) ? tenantRows.map((r) => r?.tenant_id).filter(Boolean).map((v) => encodeURIComponent(String(v))) : []
+        if (customerIds.length === 0) {
+          res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+          res.setHeader('Content-Disposition', 'attachment; filename="bills.csv"')
+          return res.send('billId,period,status,dueDate,currency,totalAmount,enterpriseId\n')
+        }
+        enterpriseIdFilter = `enterprise_id=in.(${customerIds.join(',')})`
+      } else if (roleScope === 'platform') {
+        resellerId = resellerIdParam
+        if (resellerId) {
+          const tenantRows = await supabase.select(
+            'tenants',
+            `select=tenant_id&parent_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.ENTERPRISE&limit=1000`
+          )
+          const customerIds = Array.isArray(tenantRows) ? tenantRows.map((r) => r?.tenant_id).filter(Boolean).map((v) => encodeURIComponent(String(v))) : []
+          if (customerIds.length > 0) {
+            enterpriseIdFilter = `enterprise_id=in.(${customerIds.join(',')})`
+          } else {
+            enterpriseIdFilter = `reseller_id=eq.${encodeURIComponent(resellerId)}`
+          }
+        }
+      } else {
+        return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
+      }
+
+      const filters = []
+      if (enterpriseIdFilter) filters.push(enterpriseIdFilter)
+      else if (resellerId) filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
+      if (status) filters.push(`status=eq.${encodeURIComponent(status)}`)
+      if (period) {
+        const m = period.match(/^(\d{4})-(\d{2})$/)
+        if (m) {
+          const y = Number(m[1])
+          const mm = Number(m[2])
+          const monthStart = `${m[1]}-${m[2]}-01`
+          const nextMonth = mm === 12 ? `${y + 1}-01-01` : `${m[1]}-${String(mm + 1).padStart(2, '0')}-01`
+          filters.push(`period_start=gte.${encodeURIComponent(monthStart)}`)
+          filters.push(`period_start=lt.${encodeURIComponent(nextMonth)}`)
+        }
+      }
+      const sortByMap = { period: 'period_start', dueDate: 'due_date', totalAmount: 'total_amount', status: 'status' }
+      const sortBy = sortByRaw && sortByMap[sortByRaw] ? sortByMap[sortByRaw] : 'period_start'
+      const sortOrder = sortOrderRaw === 'asc' || sortOrderRaw === 'desc' ? sortOrderRaw : 'desc'
+      const qs = `select=bill_id,enterprise_id,period_start,period_end,status,currency,total_amount,due_date&${filters.join('&')}&order=${sortBy}.${sortOrder}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`
+      const { data } = await supabase.selectWithCount('bills', qs)
+      const rows = Array.isArray(data) ? data : []
+      const headers = ['billId','period','status','dueDate','currency','totalAmount','enterpriseId']
       const csvRows = [headers.map(escapeCsv).join(',')]
       for (const b of rows) {
         csvRows.push([
-          escapeCsv(b.billId ?? b.bill_id),
-          escapeCsv(String(b.period ?? '').slice(0, 7)),
-          escapeCsv(b.status ?? ''),
-          escapeCsv(b.dueDate ?? b.due_date ?? ''),
+          escapeCsv(b.bill_id),
+          escapeCsv(String(b.period_start).slice(0, 7)),
+          escapeCsv(b.status),
+          escapeCsv(b.due_date ?? ''),
           escapeCsv(b.currency ?? ''),
-          escapeCsv(b.totalAmount ?? b.total_amount ?? ''),
+          escapeCsv(b.total_amount ?? ''),
+          escapeCsv(b.enterprise_id ?? ''),
         ].join(','))
       }
       res.setHeader('Content-Type', 'text/csv; charset=utf-8')
@@ -2345,8 +2469,9 @@ export function createApp() {
         const filterPairs = []
         if (period) filterPairs.push(`period=${period}`)
         if (status) filterPairs.push(`status=${status}`)
-        if (sortBy) filterPairs.push(`sortBy=${sortBy}`)
-        if (sortOrder) filterPairs.push(`sortOrder=${sortOrder}`)
+        if (resellerIdParam) filterPairs.push(`resellerId=${resellerIdParam}`)
+        if (sortByRaw) filterPairs.push(`sortBy=${sortByRaw}`)
+        if (sortOrderRaw) filterPairs.push(`sortOrder=${sortOrderRaw}`)
         filterPairs.push(`limit=${limit}`)
         filterPairs.push(`page=${page}`)
         setXFilters(res, filterPairs.join(';'))
@@ -2381,6 +2506,18 @@ export function createApp() {
       if (!bill) {
         return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
       }
+      const roleScope = getRoleScope(req)
+      const auth = getAuthContext(req)
+      if (roleScope === 'reseller' && auth?.resellerId) {
+        const entRows = await supabase.select(
+          'tenants',
+          `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(bill.enterprise_id)}&tenant_type=eq.ENTERPRISE&limit=1`
+        )
+        const ent = Array.isArray(entRows) ? entRows[0] : null
+        if (!ent || String(ent.parent_id || '') !== String(auth.resellerId)) {
+          return sendError(res, 403, 'FORBIDDEN', 'Bill is out of reseller scope.')
+        }
+      }
       const lineItems = await loadBillLineItems(supabase, billId)
       res.json(buildBillDetail({ bill, lineItems: Array.isArray(lineItems) ? lineItems : [] }))
     })
@@ -2405,7 +2542,7 @@ export function createApp() {
         )
         bill = Array.isArray(rows) ? rows[0] : null
         if (bill) {
-          const auth = resolveBillWriteAuth(req, res, bill)
+          const auth = await resolveBillWriteAuth(req, res, supabase, bill)
           if (!auth) return
         }
       }
@@ -2692,7 +2829,7 @@ export function createApp() {
         }
         const ratingRows = await supabase.select(
           'rating_results',
-          `select=visited_mccmnc,matched_subscription_id,matched_package_version_id,classification,charged_kb&sim_id=eq.${encodeURIComponent(sim.sim_id)}&usage_day=gte.${encodeURIComponent(start.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(end.toISOString().slice(0, 10))}`
+          `select=visited_mccmnc,matched_subscription_id,matched_package_version_id,classification,charged_mb&sim_id=eq.${encodeURIComponent(sim.sim_id)}&usage_day=gte.${encodeURIComponent(start.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(end.toISOString().slice(0, 10))}`
         )
         const ratingList = Array.isArray(ratingRows) ? ratingRows : []
         const subIds = Array.from(new Set(ratingList.map((r) => r.matched_subscription_id).filter(Boolean).map(String)))
@@ -2722,11 +2859,11 @@ export function createApp() {
           const pkgId = row.matched_package_version_id ? String(row.matched_package_version_id) : null
           const subKind = row.matched_subscription_id ? subKinds.get(String(row.matched_subscription_id)) : null
           const classification = String(row.classification || '')
-          const chargedKb = Number(row.charged_kb ?? 0)
+          const chargedMb = Number(row.charged_mb ?? 0)
           const current = zoneMatchStats.get(zoneKey) || new Map()
           const key = pkgId || 'NO_PACKAGE'
-          const entry = current.get(key) || { chargedKb: 0, subKind, classification }
-          entry.chargedKb += chargedKb
+          const entry = current.get(key) || { chargedMb: 0, subKind, classification }
+          entry.chargedMb += chargedMb
           entry.subKind = subKind ?? entry.subKind
           entry.classification = classification || entry.classification
           current.set(key, entry)
@@ -2741,8 +2878,8 @@ export function createApp() {
             let bestCharged = -1
             let best = null
             for (const [key, value] of stats.entries()) {
-              if (value.chargedKb > bestCharged) {
-                bestCharged = value.chargedKb
+              if (value.chargedMb > bestCharged) {
+                bestCharged = value.chargedMb
                 bestKey = key
                 best = value
               }
@@ -2879,7 +3016,7 @@ export function createApp() {
       const activatedSimCount = Array.isArray(simsRows) ? simsRows.length : 0
       const ratingRows = await supabase.select(
         'rating_results',
-        `select=matched_package_version_id,charged_kb&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&usage_day=gte.${encodeURIComponent(start.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(end.toISOString().slice(0, 10))}`
+        `select=matched_package_version_id,charged_mb&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&usage_day=gte.${encodeURIComponent(start.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(end.toISOString().slice(0, 10))}`
       )
       const ratingList = Array.isArray(ratingRows) ? ratingRows : []
       const packageUsage = new Map()
@@ -2887,7 +3024,7 @@ export function createApp() {
         const pkgId = row.matched_package_version_id ? String(row.matched_package_version_id) : null
         if (!pkgId) continue
         const current = packageUsage.get(pkgId) || 0
-        packageUsage.set(pkgId, current + Number(row.charged_kb ?? 0))
+        packageUsage.set(pkgId, current + Number(row.charged_mb ?? 0))
       }
       const packageVersionIds = Array.from(packageUsage.keys())
       const packageMeta = new Map()
@@ -2913,7 +3050,7 @@ export function createApp() {
           const planFilter = pricePlanVersionIds.map((id) => encodeURIComponent(id)).join(',')
           const planRows = await supabase.select(
             'price_plan_versions',
-            `select=price_plan_version_id,quota_kb,total_quota_kb,per_sim_quota_kb&price_plan_version_id=in.(${planFilter})`
+            `select=price_plan_version_id,quota_mb,total_quota_mb,per_sim_quota_mb&price_plan_version_id=in.(${planFilter})`
           )
           const planList = Array.isArray(planRows) ? planRows : []
           for (const plan of planList) {
@@ -2926,14 +3063,14 @@ export function createApp() {
       const byPackage = Array.from(packageUsage.entries()).map(([pkgVersionId, usedKb]) => {
         const meta = packageMeta.get(pkgVersionId) || {}
         const plan = meta.pricePlanVersionId ? pricePlanMeta.get(String(meta.pricePlanVersionId)) : null
-        const quotaKb = Number(plan?.total_quota_kb ?? plan?.per_sim_quota_kb ?? plan?.quota_kb ?? 0)
-        const quotaValue = Number.isFinite(quotaKb) && quotaKb > 0 ? quotaKb : null
+        const quotaMb = Number(plan?.total_quota_mb ?? plan?.per_sim_quota_mb ?? plan?.quota_mb ?? 0)
+        const quotaValue = Number.isFinite(quotaMb) && quotaMb > 0 ? quotaMb : null
         const usagePercent = quotaValue ? Number(((usedKb / quotaValue) * 100).toFixed(2)) : null
         const overageKb = quotaValue ? Math.max(0, Number(usedKb) - quotaValue) : 0
         return {
           packageId: meta.packageId ?? null,
           packageName: meta.packageName ?? null,
-          quotaKb: quotaValue ?? null,
+          quotaMb: quotaValue ?? null,
           usedKb: Math.floor(Number(usedKb ?? 0)),
           usagePercent,
           overageKb: Math.floor(Number(overageKb)),
@@ -2949,16 +3086,51 @@ export function createApp() {
     })
 
     app.get(`${prefix}/bills/:billId/files`, async (req, res) => {
+      const enterpriseId = getEnterpriseIdFromReq(req)
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const billId = String(req.params.billId)
+      let bill = null
+      if (enterpriseId) {
+        const rows = await supabase.select('bills', `select=bill_id,enterprise_id&bill_id=eq.${encodeURIComponent(billId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`)
+        bill = Array.isArray(rows) ? rows[0] : null
+      } else {
+        const rows = await supabase.select('bills', `select=bill_id,enterprise_id&bill_id=eq.${encodeURIComponent(billId)}&limit=1`)
+        bill = Array.isArray(rows) ? rows[0] : null
+        if (bill) {
+          const roleScope = getRoleScope(req)
+          const auth = getAuthContext(req)
+          if (roleScope === 'reseller' && auth?.resellerId) {
+            const entRows = await supabase.select(
+              'tenants',
+              `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(bill.enterprise_id)}&tenant_type=eq.ENTERPRISE&limit=1`
+            )
+            const ent = Array.isArray(entRows) ? entRows[0] : null
+            if (!ent || String(ent.parent_id || '') !== String(auth.resellerId)) {
+              return sendError(res, 403, 'FORBIDDEN', 'Bill is out of reseller scope.')
+            }
+          }
+        }
+      }
+      if (!bill) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
+      }
       const baseUrl = buildBaseUrl(req)
+      const secret = getEnvTrim('AUTH_TOKEN_SECRET')
+      let csvUrl = `${baseUrl}${prefix}/bills/${billId}/files/csv`
+      if (secret) {
+        const downloadToken = signJwtHs256(
+          { billId, purpose: 'csv', exp: Math.floor(Date.now() / 1000) + 900 },
+          secret
+        )
+        csvUrl += `?downloadToken=${encodeURIComponent(downloadToken)}`
+      }
       res.json({
         pdfUrl: null,
-        csvUrl: `${baseUrl}${prefix}/bills/${billId}/files/csv`,
+        csvUrl,
       })
     })
 
     app.get(`${prefix}/bills/:billId/files/csv`, async (req, res) => {
-      const enterpriseId = getEnterpriseIdFromReq(req)
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const billId = String(req.params.billId)
       const limitParam = req.query?.limit ?? req.query?.pageSize
@@ -2967,10 +3139,45 @@ export function createApp() {
         { defaultPage: 1, defaultPageSize: 2000, maxPageSize: 10000 }
       )
 
-      if (enterpriseId) {
-        const bills = await supabase.select('bills', `select=bill_id&bill_id=eq.${encodeURIComponent(billId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`)
-        if (!Array.isArray(bills) || bills.length === 0) {
+      const downloadToken = req.query?.downloadToken ? String(req.query.downloadToken) : null
+      if (downloadToken) {
+        const secret = getEnvTrim('AUTH_TOKEN_SECRET')
+        if (!secret) {
+          return sendError(res, 401, 'UNAUTHORIZED', 'Download token not supported.')
+        }
+        const result = verifyJwtHs256(downloadToken, secret)
+        if (!result.ok || result.payload?.purpose !== 'csv' || String(result.payload?.billId || '') !== billId) {
+          return sendError(res, 401, 'UNAUTHORIZED', 'Invalid or expired download token.')
+        }
+        const billRows = await supabase.select('bills', `select=bill_id&bill_id=eq.${encodeURIComponent(billId)}&limit=1`)
+        if (!Array.isArray(billRows) || billRows.length === 0) {
           return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
+        }
+      } else {
+        const enterpriseId = getEnterpriseIdFromReq(req)
+        if (enterpriseId) {
+          const bills = await supabase.select('bills', `select=bill_id&bill_id=eq.${encodeURIComponent(billId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`)
+          if (!Array.isArray(bills) || bills.length === 0) {
+            return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
+          }
+        } else {
+          const billRows = await supabase.select('bills', `select=bill_id,enterprise_id&bill_id=eq.${encodeURIComponent(billId)}&limit=1`)
+          const bill = Array.isArray(billRows) ? billRows[0] : null
+          if (!bill) {
+            return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
+          }
+          const roleScope = getRoleScope(req)
+          const auth = getAuthContext(req)
+          if (roleScope === 'reseller' && auth?.resellerId) {
+            const entRows = await supabase.select(
+              'tenants',
+              `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(bill.enterprise_id)}&tenant_type=eq.ENTERPRISE&limit=1`
+            )
+            const ent = Array.isArray(entRows) ? entRows[0] : null
+            if (!ent || String(ent.parent_id || '') !== String(auth.resellerId)) {
+              return sendError(res, 403, 'FORBIDDEN', 'Bill is out of reseller scope.')
+            }
+          }
         }
       }
 
@@ -2988,8 +3195,8 @@ export function createApp() {
         'calculationId',
         'iccid',
         'visitedMccMnc',
-        'chargedKb',
-        'ratePerKb',
+        'chargedMb',
+        'ratePerMb',
         'inputRef',
         'createdAt',
       ]
@@ -3005,8 +3212,8 @@ export function createApp() {
             meta.calculationId,
             meta.iccid,
             meta.visitedMccMnc,
-            meta.chargedKb,
-            meta.ratePerKb,
+            meta.chargedMb,
+            meta.ratePerMb,
             meta.inputRef,
             it.created_at,
           ]
@@ -3037,7 +3244,7 @@ export function createApp() {
       if (!bill) {
         return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
       }
-      const auth = resolveBillWriteAuth(req, res, bill)
+      const auth = await resolveBillWriteAuth(req, res, supabase, bill)
       if (!auth) return
       const result = await transitionBillStatus({
         supabase,
@@ -3072,7 +3279,7 @@ export function createApp() {
       if (!bill) {
         return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
       }
-      const auth = resolveBillWriteAuth(req, res, bill)
+      const auth = await resolveBillWriteAuth(req, res, supabase, bill)
       if (!auth) return
       if (!reason) {
         return sendError(res, 400, 'BAD_REQUEST', 'reason is required.')
@@ -3138,7 +3345,7 @@ export function createApp() {
 
   function mountJobsRoutes(prefix) {
     app.get(`${prefix}/jobs/:jobId`, async (req, res) => {
-      const supabase = createSupabaseRestClient({ traceId: getTraceId(res) })
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const jobId = String(req.params.jobId)
       const rows = await supabase.select('jobs', `select=job_id,job_type,status,progress_processed,progress_total,error_summary,actor_user_id,created_at,started_at,finished_at&job_id=eq.${encodeURIComponent(jobId)}&limit=1`)
       const job = Array.isArray(rows) ? rows[0] : null
@@ -3339,6 +3546,7 @@ export function createApp() {
         ensureResellerAdmin,
         ensureResellerSales,
         resolveEnterpriseForReseller,
+        getEnterpriseIdFromReq,
         isValidUuid,
       },
     })
@@ -3647,22 +3855,23 @@ export function createApp() {
       })
     })
 
+    const simAllowedTransitions = {
+      INVENTORY:   new Set(['TEST_READY', 'ACTIVATED']),
+      TEST_READY:  new Set(['ACTIVATED', 'DEACTIVATED']),
+      ACTIVATED:   new Set(['DEACTIVATED']),
+      DEACTIVATED: new Set(['ACTIVATED', 'RETIRED']),
+      RETIRED:     new Set(),
+    }
+    const simValidStatuses = new Set(['INVENTORY', 'TEST_READY', 'ACTIVATED', 'DEACTIVATED', 'RETIRED'])
+
     app.patch(`${prefix}/sims/:iccid`, async (req, res) => {
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const iccid = requireIccid(res, req.params.iccid)
       if (!iccid) return
-      const { status } = req.body ?? {}
-      if (!status || (status !== 'ACTIVATED' && status !== 'DEACTIVATED')) {
-        return sendError(res, 400, 'BAD_REQUEST', 'status is required and must be ACTIVATED or DEACTIVATED.')
+      const { status, reason } = req.body ?? {}
+      if (!status || !simValidStatuses.has(status)) {
+        return sendError(res, 400, 'BAD_REQUEST', `status is required and must be one of: ${[...simValidStatuses].join(', ')}.`)
       }
-
-      const jobs = await supabase.insert('jobs', {
-        job_type: 'SIM_STATUS_CHANGE',
-        status: 'QUEUED',
-        progress_processed: 0,
-        progress_total: 1,
-      })
-      const jobId = Array.isArray(jobs) ? jobs[0]?.job_id : null
 
       const enterpriseId = getEnterpriseIdFromReq(req)
       const tenantQs = buildSimTenantFilter(req, enterpriseId)
@@ -3675,11 +3884,32 @@ export function createApp() {
       if (!existing) {
         return sendError(res, 404, 'RESOURCE_NOT_FOUND', `sim ${iccid} not found.`)
       }
+
+      if (existing.status === status) {
+        return sendError(res, 409, 'ALREADY_IN_STATUS', `SIM is already ${status}.`)
+      }
+      const allowed = simAllowedTransitions[existing.status]
+      if (!allowed || !allowed.has(status)) {
+        return sendError(res, 409, 'INVALID_TRANSITION', `Cannot transition from ${existing.status} to ${status}.`)
+      }
+      if ((status === 'DEACTIVATED' || status === 'RETIRED') && !reason) {
+        return sendError(res, 400, 'BAD_REQUEST', 'reason is required for DEACTIVATED or RETIRED transitions.')
+      }
+
+      const jobs = await supabase.insert('jobs', {
+        job_type: 'SIM_STATUS_CHANGE',
+        status: 'QUEUED',
+        progress_processed: 0,
+        progress_total: 1,
+      })
+      const jobId = Array.isArray(jobs) ? jobs[0]?.job_id : null
+
       const nowIso = new Date().toISOString()
-      await supabase.update('sims', `sim_id=eq.${encodeURIComponent(existing.sim_id)}`, {
-        status,
-        last_status_change_at: nowIso,
-      }, { returning: 'minimal' })
+      const updatePayload = { status, last_status_change_at: nowIso }
+      if (status === 'ACTIVATED' && !existing.activation_date) {
+        updatePayload.activation_date = nowIso
+      }
+      await supabase.update('sims', `sim_id=eq.${encodeURIComponent(existing.sim_id)}`, updatePayload, { returning: 'minimal' })
       await supabase.insert('sim_state_history', {
         sim_id: existing.sim_id,
         before_status: existing.status,
@@ -3697,7 +3927,7 @@ export function createApp() {
           iccid,
           beforeStatus: existing.status,
           afterStatus: status,
-          reason: 'API_STATUS_CHANGE',
+          reason: reason || 'API_STATUS_CHANGE',
         },
       }, { returning: 'minimal' })
       await pushSimStatusToUpstream({ iccid, status, traceId: getTraceId(res), supplierId: existing?.supplier_id ?? null })
@@ -4054,6 +4284,97 @@ export function createApp() {
       res.json(result.value)
     })
 
+    app.get(`${prefix}/subscriptions`, async (req, res) => {
+      const auth = ensureSubscriptionAccess(req, res)
+      if (!auth) return
+      const query = req.query ?? {}
+      const roleScope = getRoleScope(req)
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      let enterpriseId = query.enterpriseId ? String(query.enterpriseId).trim() : null
+      if (roleScope === 'reseller') {
+        if (!enterpriseId || !isValidUuid(enterpriseId)) {
+          return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+        }
+        enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, enterpriseId)
+        if (!enterpriseId) return
+      } else if (roleScope === 'platform') {
+        const fromReq = getEnterpriseIdFromReq(req)
+        enterpriseId = enterpriseId || (fromReq ? String(fromReq) : null)
+        if (enterpriseId && !isValidUuid(enterpriseId)) {
+          return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+        }
+        if (!enterpriseId) {
+          return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required for list subscriptions.')
+        }
+      } else {
+        const fromReq = getEnterpriseIdFromReq(req)
+        enterpriseId = fromReq ? String(fromReq) : null
+        if (!enterpriseId || !isValidUuid(enterpriseId)) {
+          return sendError(res, 401, 'UNAUTHORIZED', 'Enterprise token required.')
+        }
+        const queryEnterpriseId = query.enterpriseId ? String(query.enterpriseId).trim() : null
+        if (queryEnterpriseId && queryEnterpriseId !== enterpriseId) {
+          return sendError(res, 403, 'FORBIDDEN', 'enterpriseId in query must match your token scope.')
+        }
+      }
+      const result = await listSubscriptions({
+        supabase,
+        enterpriseId,
+        iccid: query.iccid,
+        state: query.state,
+        kind: query.kind,
+        page: query.page,
+        pageSize: query.pageSize,
+        tenantFilter: buildSimTenantFilter(req, enterpriseId),
+      })
+      if (!result.ok) return sendError(res, result.status, result.code, result.message)
+      {
+        const filterPairs = []
+        if (query.enterpriseId) filterPairs.push(`enterpriseId=${enterpriseId}`)
+        if (query.iccid) filterPairs.push(`iccid=${query.iccid}`)
+        if (query.state) filterPairs.push(`state=${query.state}`)
+        if (query.kind) filterPairs.push(`kind=${query.kind}`)
+        filterPairs.push(`page=${result.value.page}`)
+        filterPairs.push(`pageSize=${result.value.pageSize}`)
+        setXFilters(res, filterPairs.join(';'))
+      }
+      res.json(result.value)
+    })
+
+    app.get(`${prefix}/subscriptions/:subscriptionId`, async (req, res) => {
+      const auth = ensureSubscriptionAccess(req, res)
+      if (!auth) return
+      const subscriptionId = req.params.subscriptionId
+      const roleScope = getRoleScope(req)
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      let enterpriseId = null
+      if (roleScope === 'reseller') {
+        const queryEnterpriseId = req.query.enterpriseId ? String(req.query.enterpriseId).trim() : null
+        if (!queryEnterpriseId || !isValidUuid(queryEnterpriseId)) {
+          return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+        }
+        enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, queryEnterpriseId)
+        if (!enterpriseId) return
+      } else if (roleScope === 'platform') {
+        enterpriseId = getEnterpriseIdFromReq(req) || (req.query.enterpriseId ? String(req.query.enterpriseId).trim() : null)
+        if (!enterpriseId || !isValidUuid(enterpriseId)) {
+          return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required.')
+        }
+      } else {
+        enterpriseId = getEnterpriseIdFromReq(req)
+        if (!enterpriseId || !isValidUuid(enterpriseId)) {
+          return sendError(res, 401, 'UNAUTHORIZED', 'Enterprise token required.')
+        }
+        const queryEnterpriseId = req.query.enterpriseId ? String(req.query.enterpriseId).trim() : null
+        if (queryEnterpriseId && queryEnterpriseId !== enterpriseId) {
+          return sendError(res, 403, 'FORBIDDEN', 'enterpriseId in query must match your token scope.')
+        }
+      }
+      const result = await getSubscription({ supabase, enterpriseId, subscriptionId })
+      if (!result.ok) return sendError(res, result.status, result.code, result.message)
+      res.json(result.value)
+    })
+
     app.post(`${prefix}/subscriptions`, async (req, res) => {
       const auth = ensureSubscriptionAccess(req, res)
       if (!auth) return
@@ -4078,6 +4399,10 @@ export function createApp() {
         enterpriseId = fromReq ? String(fromReq) : null
         if (!enterpriseId || !isValidUuid(enterpriseId)) {
           return sendError(res, 401, 'UNAUTHORIZED', 'Enterprise token required.')
+        }
+        const bodyEnterpriseId = body.enterpriseId ? String(body.enterpriseId).trim() : null
+        if (bodyEnterpriseId && bodyEnterpriseId !== enterpriseId) {
+          return sendError(res, 403, 'FORBIDDEN', 'enterpriseId in body must match your token scope.')
         }
       }
       const result = await createSubscription({
@@ -4154,12 +4479,18 @@ export function createApp() {
         if (!enterpriseId || !isValidUuid(enterpriseId)) {
           return sendError(res, 401, 'UNAUTHORIZED', 'Enterprise token required.')
         }
+        const bodyEnterpriseId = body.enterpriseId ? String(body.enterpriseId).trim() : null
+        if (bodyEnterpriseId && bodyEnterpriseId !== enterpriseId) {
+          return sendError(res, 403, 'FORBIDDEN', 'enterpriseId in body must match your token scope.')
+        }
       }
+      const newPackageVersionId = body.toPackageVersionId ?? body.newPackageVersionId
       const result = await switchSubscription({
         supabase,
         enterpriseId,
         iccid: body.iccid,
-        newPackageVersionId: body.newPackageVersionId,
+        fromSubscriptionId: body.fromSubscriptionId,
+        newPackageVersionId,
         effectiveStrategy: body.effectiveStrategy,
         tenantFilter: buildSimTenantFilter(req, enterpriseId),
       })
@@ -4173,7 +4504,7 @@ export function createApp() {
           subscriptionId: result.value.newSubscriptionId,
           iccid: body.iccid ? String(body.iccid) : null,
           fromPackageVersionId: null,
-          toPackageVersionId: body.newPackageVersionId ? String(body.newPackageVersionId) : null,
+          toPackageVersionId: newPackageVersionId ? String(newPackageVersionId) : null,
           beforeState: null,
           afterState: strategy === 'IMMEDIATE' ? 'ACTIVE' : 'PENDING',
           effectiveAt: result.value.effectiveAt,
@@ -4229,25 +4560,30 @@ export function createApp() {
         if (!enterpriseId || !isValidUuid(enterpriseId)) {
           return sendError(res, 401, 'UNAUTHORIZED', 'Enterprise token required.')
         }
+        const providedEnterpriseId = (query.enterpriseId ? String(query.enterpriseId).trim() : null) || (body.enterpriseId ? String(body.enterpriseId).trim() : null)
+        if (providedEnterpriseId && providedEnterpriseId !== enterpriseId) {
+          return sendError(res, 403, 'FORBIDDEN', 'enterpriseId must match your token scope.')
+        }
       }
+      const immediate = body.immediate !== undefined && body.immediate !== null ? body.immediate : query.immediate
       const result = await cancelSubscription({
         supabase,
         enterpriseId,
         subscriptionId: req.params.subscriptionId,
-        immediate: query.immediate,
+        immediate,
       })
       if (!result.ok) return sendError(res, result.status, result.code, result.message)
       {
         const nowIso = new Date().toISOString()
-        const immediate = String(query.immediate || '').toLowerCase() === 'true'
         const actorUserId = req?.cmpAuth?.userId
         const actorUserIdValue = actorUserId && isValidUuid(actorUserId) ? String(actorUserId) : null
         const payload = {
           subscriptionId: result.value.subscriptionId,
           beforeState: null,
           afterState: result.value.state,
-          immediate,
-          expiresAt: result.value.expiresAt,
+          scheduled: result.value.scheduled ?? false,
+          expiresAt: result.value.expiresAt ?? null,
+          scheduledExecuteAt: result.value.scheduledExecuteAt ?? null,
         }
         try {
           await supabase.insert('events', {
@@ -4261,7 +4597,7 @@ export function createApp() {
             actor_user_id: actorUserIdValue,
             actor_role: req?.cmpAuth?.role ?? req?.cmpAuth?.roleScope ?? null,
             tenant_id: enterpriseId ?? null,
-            action: 'SUBSCRIPTION_CANCEL',
+            action: result.value.scheduled ? 'SUBSCRIPTION_CANCEL_SCHEDULED' : 'SUBSCRIPTION_CANCEL',
             target_type: 'SUBSCRIPTION',
             target_id: result.value.subscriptionId,
             request_id: getTraceId(res),
@@ -5145,7 +5481,7 @@ export function createApp() {
       const sims = Array.isArray(data) ? data : []
       const cond = getTestExpiryCondition()
       const periodDays = getTestPeriodDays()
-      const quotaKbLimit = getTestQuotaKb()
+      const quotaMbLimit = getTestQuotaMb()
       let processed = 0
       let activated = 0
       for (const sim of sims) {
@@ -5173,7 +5509,7 @@ export function createApp() {
             totalKb += Number(r.total_kb ?? 0)
           }
         }
-        const expireByQuota = quotaKbLimit > 0 ? totalKb >= quotaKbLimit : false
+        const expireByQuota = quotaMbLimit > 0 ? totalKb >= quotaMbLimit : false
         const shouldExpire = cond === 'PERIOD_ONLY' ? expireByPeriod : cond === 'QUOTA_ONLY' ? expireByQuota : (expireByPeriod || expireByQuota)
         if (!shouldExpire) continue
         const nowIso = new Date().toISOString()
@@ -5203,7 +5539,7 @@ export function createApp() {
             expiryBy: expireByPeriod && expireByQuota ? 'PERIOD_OR_QUOTA' : expireByPeriod ? 'PERIOD' : 'QUOTA',
             totalKb,
             periodDays,
-            quotaKbLimit,
+            quotaMbLimit,
             startTime: startTimeIso,
             endTime: nowIso,
           },
@@ -6535,7 +6871,7 @@ export function createApp() {
       const pageSize = req.body?.pageSize ? Math.max(1, Number(req.body.pageSize)) : 100
       const cond = getTestExpiryCondition()
       const periodDays = getTestPeriodDays()
-      const quotaKbLimit = getTestQuotaKb()
+      const quotaMbLimit = getTestQuotaMb()
       const filters = [`status=eq.TEST_READY`]
       if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
       const { total } = await supabase.selectWithCount(
@@ -6583,7 +6919,7 @@ export function createApp() {
           if (Array.isArray(usageRows)) {
             for (const r of usageRows) totalKb += Number(r.total_kb ?? 0)
           }
-          const expireByQuota = quotaKbLimit > 0 ? totalKb >= quotaKbLimit : false
+          const expireByQuota = quotaMbLimit > 0 ? totalKb >= quotaMbLimit : false
           const shouldExpire = cond === 'PERIOD_ONLY' ? expireByPeriod : cond === 'QUOTA_ONLY' ? expireByQuota : (expireByPeriod || expireByQuota)
           if (!shouldExpire) continue
           const nowIso = new Date().toISOString()
@@ -6613,7 +6949,7 @@ export function createApp() {
               expiryBy: expireByPeriod && expireByQuota ? 'PERIOD_OR_QUOTA' : expireByPeriod ? 'PERIOD' : 'QUOTA',
               totalKb,
               periodDays,
-              quotaKbLimit,
+              quotaMbLimit,
               startTime: startTimeIso,
               endTime: nowIso,
             },
@@ -6906,7 +7242,7 @@ export function createApp() {
             await supabase.update('jobs', `job_id=eq.${encodeURIComponent(jobId)}`, {
               status: 'FAILED',
               finished_at: new Date().toISOString(),
-              error: 'upstream_ping_failed'
+              error_summary: 'upstream_ping_failed'
             }, { returning: 'minimal' })
           }
           return sendError(res, 502, 'UPSTREAM_UNAVAILABLE', 'WXZHONGGENG ping failed.')
@@ -11231,12 +11567,12 @@ export function createApp() {
       if (!emailRegex.test(contactEmail)) {
         return sendError(res, 400, 'VALIDATION_ERROR', 'contactEmail is invalid.')
       }
+      if (auth.scope === 'reseller' && resellerIdRaw && resellerIdRaw !== auth.resellerId) {
+        return sendError(res, 403, 'FORBIDDEN', 'resellerId does not match your reseller scope.')
+      }
       const resellerId = auth.scope === 'reseller' ? auth.resellerId : resellerIdRaw
       if (!resellerId) {
         return sendError(res, 400, 'VALIDATION_ERROR', 'resellerId is required.')
-      }
-      if (auth.scope === 'reseller' && resellerId !== auth.resellerId) {
-        return sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
       }
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const resellerRows = await supabase.select(
@@ -11575,11 +11911,19 @@ export function createApp() {
         if (access.error === 'not_found') return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
         return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
       }
-      const inserted = await supabase.insert('tenants', {
-        parent_id: enterpriseId,
-        tenant_type: 'DEPARTMENT',
-        name,
-      })
+      let inserted
+      try {
+        inserted = await supabase.insert('tenants', {
+          parent_id: enterpriseId,
+          tenant_type: 'DEPARTMENT',
+          name,
+        })
+      } catch (err) {
+        if (err?.name === 'ClientError') {
+          return sendError(res, err.status || 400, err.code || 'BAD_REQUEST', err.message)
+        }
+        throw err
+      }
       const row = Array.isArray(inserted) ? inserted[0] : null
       if (!row) {
         return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create department.')
@@ -11760,12 +12104,20 @@ export function createApp() {
           return sendError(res, 403, 'FORBIDDEN', 'assignedEnterpriseIds must belong to reseller.')
         }
       }
-      const inserted = await supabase.insert('users', {
-        tenant_id: resellerId,
-        email,
-        display_name: displayName,
-        status: 'ACTIVE',
-      })
+      let inserted
+      try {
+        inserted = await supabase.insert('users', {
+          tenant_id: resellerId,
+          email,
+          display_name: displayName,
+          status: 'ACTIVE',
+        })
+      } catch (err) {
+        if (err?.name === 'ClientError' && err?.code === 'DUPLICATE') {
+          return sendError(res, 409, 'DUPLICATE', `email ${email} already exists for this reseller.`)
+        }
+        throw err
+      }
       const row = Array.isArray(inserted) ? inserted[0] : null
       if (!row) {
         return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create user.')
@@ -12072,12 +12424,20 @@ export function createApp() {
           return sendError(res, 400, 'VALIDATION_ERROR', 'departmentId is invalid.')
         }
       }
-      const inserted = await supabase.insert('users', {
-        tenant_id: enterpriseId,
-        email,
-        display_name: displayName,
-        status: 'ACTIVE',
-      })
+      let inserted
+      try {
+        inserted = await supabase.insert('users', {
+          tenant_id: enterpriseId,
+          email,
+          display_name: displayName,
+          status: 'ACTIVE',
+        })
+      } catch (err) {
+        if (err?.name === 'ClientError' && err?.code === 'DUPLICATE') {
+          return sendError(res, 409, 'DUPLICATE', `email ${email} already exists for this enterprise.`)
+        }
+        throw err
+      }
       const row = Array.isArray(inserted) ? inserted[0] : null
       if (!row) {
         return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create user.')
@@ -13159,6 +13519,11 @@ export function createApp() {
     if (err instanceof SyntaxError && err.message && err.message.toLowerCase().includes('json')) {
       return sendError(res, 400, 'BAD_REQUEST', 'Invalid JSON body.')
     }
+    if (err?.name === 'ClientError') {
+      const status = Number(err.status) || 400
+      const code = err.code || 'BAD_REQUEST'
+      return sendError(res, status, code, err.message || 'Bad request.')
+    }
     if (err?.name === 'UpstreamError') {
       const status = Number(err.status) || 502
       const type = String(err.upstreamType || 'UPSTREAM_ERROR')
@@ -13174,6 +13539,7 @@ export function createApp() {
       }
       return sendError(res, status, 'UPSTREAM_ERROR', msg)
     }
+    console.error('Unhandled route error:', err)
     return sendError(res, 500, 'INTERNAL_ERROR', 'Unexpected error.')
   })
   return app
