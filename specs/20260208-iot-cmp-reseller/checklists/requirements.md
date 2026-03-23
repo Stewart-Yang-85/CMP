@@ -64,12 +64,12 @@
 - [x] 通用规则（金额精度/流量单位KB/生效时间/业务类型/计费周期）
 - [x] 通用字段（serviceType/currency/billingCycleType/firstCycleProration/prorationRounding）
 - [x] 分摊算法（DAILY_PRORATION: perDayFee/activeDays/chargedMonthlyFee）
-- [x] One-time 规则（oneTimeFee/quotaKb/validityDays/expiryBoundary）
-- [x] SIM Dependent Bundle 规则（monthlyFee/deactivatedMonthlyFee/perSimQuotaKb/overageRatePerKb）
-- [x] Fixed Bundle 规则（monthlyFee/deactivatedMonthlyFee/totalQuotaKb/overageRatePerKb）
+- [x] One-time 规则（oneTimeFee/quotaMb/validityDays/expiryBoundary）
+- [x] SIM Dependent Bundle 规则（monthlyFee/deactivatedMonthlyFee/perSimQuotaMb/overageRatePerMb）
+- [x] Fixed Bundle 规则（monthlyFee/deactivatedMonthlyFee/totalQuotaMb/overageRatePerMb）
 - [x] Tiered Pricing 规则（monthlyFee/deactivatedMonthlyFee/tiers[]）
 - [x] 分段累进（Progressive）计费公式
-- [x] Zone-based PAYG Rates（paygRates[]/zoneCode/countries/ratePerKb）
+- [x] Zone-based PAYG Rates（paygRates[]/zoneCode/countries/ratePerMb）
 - [x] PAYG 匹配优先级（MCC+MNC > MCC 通配）
 - [x] PAYG 冲突处理（同级冲突配置错误阻断）
 - [x] 运营商业务（RAT/业务类型/Roaming Profile/APN）
@@ -80,7 +80,7 @@
 - [x] 月租费与停机保号费绝对互斥
 - [x] Waterfall Logic 用量匹配（叠加包优先 -> 范围最小 -> 主套餐 -> Out-of-Profile）
 - [x] Out-of-Profile 不扣减套餐配额 + PAYG 独立计费
-- [x] SIM Dependent Bundle 总配额 = activatedSimCount(高水位) × perSimQuotaKb
+- [x] SIM Dependent Bundle 总配额 = activatedSimCount(高水位) × perSimQuotaMb
 - [x] 多包场景示例（Global + France + 古巴）
 - [x] 用量数据采集（API 拉取 + CDR 解析）
 - [x] 漫游用量报表最小字段

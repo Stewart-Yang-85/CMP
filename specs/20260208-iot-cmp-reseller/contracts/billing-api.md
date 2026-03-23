@@ -311,14 +311,14 @@ POST /v1/billing:generate
    d. 无覆盖 → Out-of-Profile
 3. 计费处理：
    - In-Profile 配额未耗尽：扣减配额
-   - In-Profile 配额耗尽：按 overageRatePerKb 套外计费
+   - In-Profile 配额耗尽：按 overageRatePerMb 套外计费
    - Out-of-Profile：不扣减任何套餐配额，按 paygRates 独立计费 + 异常漫游告警
 ```
 
 ### 4.3 SIM Dependent Bundle 动态池
 
 ```
-totalQuotaKb = activatedSimCount(高水位) × perSimQuotaKb
+totalQuotaMb = activatedSimCount(高水位) × perSimQuotaMb
 费用 = Σ(activated × monthlyFee) + Σ(deactivated × deactivatedMonthlyFee) + overageCharge
 ```
 
@@ -450,10 +450,10 @@ GET /v1/enterprises/{enterpriseId}/usage?period={}
     {
       "packageId": "uuid",
       "packageName": "Global 1GB",
-      "quotaKb": 524288000,
-      "usedKb": 419430400,
+      "quotaMb": 512000,
+      "usedMb": 409600,
       "usagePercent": 80.0,
-      "overageKb": 0
+      "overageMb": 0
     }
   ]
 }

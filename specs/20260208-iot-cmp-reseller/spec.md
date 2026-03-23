@@ -5,6 +5,14 @@
 **Status**: Draft
 **Input**: User description: "根据现有的需求文档重建SPEC /Users/yangzong.exe/Downloads/04_Project_CMP1/CMP_Requirements_Workshop.md"
 
+## 工程澄清文档（Clarifications）
+
+与实现细节、异步任务与 FAQ 相关的补充说明（不替代正文需求，供研发与验收对照）：
+
+- [账单状态机（GENERATED / PUBLISHED、`publish` 与出账任务关系等）](clarifications/bill-status-machine.md)
+- [Jobs：`SIM_STATUS_CHANGE` 与上游供应商同步](clarifications/jobs-sim-status-change.md)
+- [Webhook 向下游投递与失败重试（`WEBHOOK_DELIVERY`）](clarifications/webhook-delivery.md)
+
 ## User Scenarios & Testing *(mandatory)*
 
 <!--
@@ -132,6 +140,13 @@
   - `POST /v1/enterprises` 创建企业
   - `POST /v1/enterprises/{enterpriseId}/departments` 创建部门
 
+- **RBAC 权限配置**（当前实现）：
+  - 权限按 `roleScope`（platform/reseller/customer/department）分配，定义于 `defaultPermissionsByRoleScope`（`src/app.js`、`src/middleware/rbac.ts`）
+  - 请求路径由 `resolvePermissionForRequest` 映射为权限码（如 `GET /v1/bills` → `bills.list`，`GET /v1/bills/{id}` → `bills.read`）
+  - Bills 模块权限码：`bills.list`、`bills.read`、`bills.export`、`bills.mark_paid`、`bills.adjust`
+  - **禁止 enterprise 访问 bills**：从 `customer` 和 `department` 的权限列表中移除上述 bills.* 权限即可
+  - platform_admin 与 platform scope 拥有全量权限，不受此配置限制
+
 **Independent Test**: 可通过创建代理商、企业、用户并验证权限隔离来独立测试，验证不同角色只能访问授权范围内的数据。
 
 **Acceptance Scenarios**:
@@ -151,6 +166,7 @@
 - 表名：`sim_cards`（原 sims 重命名）
 - SIM 号码：ICCID (UNIQUE)、imsi_primary、imsi_secondary_1、imsi_secondary_2、imsi_secondary_3、MSISDN
 - SIM 卡形态：`form_factor` ENUM（consumer_removable / industrial_removable / consumer_embedded / industrial_embedded / automotive_grade_embedded / other）
+- **备注（remark）** [V1.1]：`remark` (TEXT, nullable)，用于标识该 SIM 卡的主要用途，便于用户直接理解（例如：「研发工程师测试用 SIM」「产线设备 A 专用」）。用户可在 Web Portal 上编辑。
 - 四方归属链：supplier_id (FK)、operator_id (FK)、reseller_id (FK)、customer_id (FK nullable)
 - SIM 状态：INVENTORY / TEST_READY / ACTIVATED / DEACTIVATED / RETIRED
 - SIM 子状态：`lifecycle_sub_status`（normal / activating / activation_failed），用于标识激活过程中的中间态与失败态
@@ -162,6 +178,7 @@
 
 **eSIM Profile 数据模型**：
 - 表名：`esim_profiles`
+- **备注（remark）** [V1.1]：`remark` (TEXT, nullable)，用于标识该 eSIM Profile 的主要用途，便于用户直接理解（例如：「研发工程师测试用 eSIM」「车载设备预置 Profile」）。用户可在 Web Portal 上编辑。
 - SIM Profile 信息：
   - ICCID（UNIQUE，必填）
   - IMSI：imsi_primary、imsi_secondary_1/2/3（可选）
@@ -248,6 +265,7 @@
   - `POST /v1/sims/{simId}:deactivate`
   - `POST /v1/sims/{simId}:reactivate`
   - `POST /v1/sims/{simId}:retire`（仅代理商管理员；前置：DEACTIVATED）
+  - **备注编辑** [V1.1]：`PATCH /v1/sims/{iccid}` 支持 `remark` 字段更新；`PATCH /v1/esim-profiles/{profileId}` 支持 `remark` 字段更新。供 Web Portal 前端直接编辑，便于用户标识 SIM/eSIM 的主要用途。
 
 **Independent Test**: 可通过导入 SIM 卡、执行状态变更操作、验证状态机约束来独立测试。
 
@@ -262,6 +280,10 @@
 7. **Given** 本地已停机但上游仍为 ACTIVE, **When** 同步重试超过最大次数仍失败, **Then** 标记 status_sync_conflict 并触发告警，冻结状态变更操作
 8. **Given** 测试期到期且 Test Expiry Action=DEACTIVATED, **When** 到期条件满足, **Then** 自动进入 DEACTIVATED
 9. **Given** SIM 处于 DEACTIVATED 且申请豁免拆机, **When** 代理商管理员或系统管理员确认原因, **Then** 跳过承诺期校验并进入 RETIRED
+
+**V1.1 推迟需求 — SIM/eSIM 备注（remark）**：
+- **字段**：SIM 卡与 eSIM Profile 均新增 `remark` (TEXT, nullable)，用于标识主要用途（如「研发工程师测试用 SIM」「车载设备预置 Profile」），便于用户在 Web Portal 上直接理解。
+- **接口**：`PATCH /v1/sims/{iccid}` 支持 `remark` 字段更新；`PATCH /v1/esim-profiles/{profileId}` 支持 `remark` 字段更新。供 Web Portal 前端直接编辑。
 
 ---
 
@@ -287,7 +309,7 @@
 
 **资费计划类型**：
 1. **One-time（一次性）**：购买即收，含额度与有效时长，到期边界支持 CALENDAR_DAY_END / DURATION_EXCLUSIVE_END，取消不退款
-2. **SIM Dependent Bundle（前向流量池，monthly recurring）**：按卡动态累加池额度；总配额 = activatedSimCount(高水位) × perSimQuotaKb
+2. **SIM Dependent Bundle（前向流量池，monthly recurring）**：按卡动态累加池额度；总配额 = activatedSimCount(高水位) × perSimQuotaMb
 3. **Fixed Bundle（后向流量池，monthly recurring）**：固定总池额度，不随 SIM 数变化
 4. **Tiered Pricing（阶梯计费，monthly recurring）**：分段累进（Progressive），非全量按档
 
@@ -300,7 +322,7 @@
 **通用规则**：
 - 金额精度：币种最小货币单位，四舍五入保留 2 位小数
 - 币种策略：按代理商固定币种（代理商创建时配置结算币种，下属企业及产品包继承，不支持跨币种混合计费）
-- 流量单位：KB，向上取整
+- 流量单位：MB，向上取整
 - 生效时间：TIMESTAMPTZ，按系统时区解释
 - 每个 Price Plan 仅针对一种电信业务类型（DATA/VOICE/SMS）
 - 计费周期：支持自然月 (CALENDAR_MONTH) 与自定义周期 (CUSTOM_RANGE)
@@ -314,7 +336,7 @@
 
 **分区标准资费（Zone-based PAYG Rates）**：
 - 适用所有 Price Plan 类型（兜底费率）
-- 字段：`paygRates[]`（zoneCode、countries[MCC+MNC 或 MCC 通配]、ratePerKb）
+- 字段：`paygRates[]`（zoneCode、countries[MCC+MNC 或 MCC 通配]、ratePerMb）
 - 匹配优先级：MCC+MNC 精确 > MCC 通配
 - 冲突处理：同级冲突视为配置错误，发布校验阶段阻断
 - 缺省行为：未配置则默认阻断（直接停机/断网，不产生费用）
@@ -327,14 +349,14 @@
 - RAT：3G/4G/5G/NB-IoT（缺省 4G）
 - 业务类型：Data/Voice/SMS（缺省 Data）
 - Roaming Profile：按 `roamingProfileId`（快照 ID）索引；用于计费兜底，当产品包的 Price Plan 未覆盖 SIM 拜访地时按该 Profile 定价
-- Roaming Profile 最小字段：mcc、mnc、ratePerKb（如 0.000004 USD/KB）
+- Roaming Profile 最小字段：mcc、mnc、ratePerMb（如 0.004096 USD/MB）
 - APN：运营商 APN 
 - MVP：每个 Data 产品包绑定 1 个默认 APN + 1 个 Roaming Profile
 - APN/Roaming Profile 变更次月生效
 - 数据模型：
   - `apn_profiles`：id, name, apn, auth_type, username, password_ref, reseller_id, supplier_id, operator_id, status(draft/published/deprecated), published_at, source_apn_profile_id
   - `roaming_profiles`：id, name, reseller_id, supplier_id, operator_id, status(draft/published/deprecated), published_at, source_roaming_profile_id
-  - `roaming_profile_entries`：id, roaming_profile_id, mcc, mnc, rate_per_kb
+  - `roaming_profile_entries`：id, roaming_profile_id, mcc, mnc, rate_per_mb
   - `package_network_policies`：package_id, apn_profile_id, roaming_profile_id, effective_from, effective_to, status(active/scheduled/expired)
 - 校验来源：
   - APN 必须存在于上游供应商的可用目录或能力声明中
@@ -354,7 +376,7 @@
 
 **商业条款（Commercial Terms）**：
 - Test Period（测试期）
-- Test Quota（测试期流量配额，KB 向上取整）
+- Test Quota（测试期流量配额，MB 向上取整）
 - Test Expiry Condition：PERIOD_ONLY / QUOTA_ONLY / PERIOD_OR_QUOTA（默认）
 - Test Expiry Action：ACTIVATED / DEACTIVATED（默认 ACTIVATED）
 - Commitment Period（承诺期）
@@ -404,20 +426,20 @@
 | Price Plan 类型 | 字段 | 含义 | 约束/边界 |
 |---|---|---|---|
 | One-time | `oneTimeFee` | 一次性费用 | >= 0 |
-| One-time | `quotaKb` | 包含额度 | >= 0（仅 `DATA`） |
+| One-time | `quotaMb` | 包含额度 | >= 0（仅 `DATA`） |
 | One-time | `validityDays` | 有效天数 | >= 1 |
 | One-time | `expiryBoundary` | 到期边界 | ENUM: `CALENDAR_DAY_END`/`DURATION_EXCLUSIVE_END`，默认 `CALENDAR_DAY_END` |
 | SIM Dependent Bundle | `monthlyFee` | 月租费 | >= 0 |
 | SIM Dependent Bundle | `deactivatedMonthlyFee` | 停机保号费（按月） | >= 0 |
-| SIM Dependent Bundle | `perSimQuotaKb` | 每 SIM 配额 | >= 0（仅 `DATA`） |
-| SIM Dependent Bundle | `overageRatePerKb` | 套外单价 | >= 0（仅 `DATA`） |
+| SIM Dependent Bundle | `perSimQuotaMb` | 每 SIM 配额 | >= 0（仅 `DATA`） |
+| SIM Dependent Bundle | `overageRatePerMb` | 套外单价 | >= 0（仅 `DATA`） |
 | Fixed Bundle | `monthlyFee` | 月租费 | >= 0 |
 | Fixed Bundle | `deactivatedMonthlyFee` | 停机保号费（按月） | >= 0 |
-| Fixed Bundle | `totalQuotaKb` | 总池额度 | >= 0（仅 `DATA`） |
-| Fixed Bundle | `overageRatePerKb` | 套外单价 | >= 0（仅 `DATA`） |
+| Fixed Bundle | `totalQuotaMb` | 总池额度 | >= 0（仅 `DATA`） |
+| Fixed Bundle | `overageRatePerMb` | 套外单价 | >= 0（仅 `DATA`） |
 | Tiered Pricing | `monthlyFee` | 月租费 | >= 0 |
 | Tiered Pricing | `deactivatedMonthlyFee` | 停机保号费（按月） | >= 0 |
-| Tiered Pricing | `tiers[]` | 阶梯费率 | 按阈值升序；阈值单位 KB；费率单位 `currency/Kb` |
+| Tiered Pricing | `tiers[]` | 阶梯费率 | 按阈值升序；阈值单位 MB；费率单位 `currency/Mb` |
 
 - API 接口：
   - `POST /v1/apn-profiles` 创建 APN Profile 草稿快照
@@ -461,7 +483,7 @@
     - 列表展示固定包含：`name`、`publishedAt`、`status`
     - `mcc`：3 位数字，必填
     - `mnc`：2~3 位数字，或 `*`（表示该 MCC 下全部运营商）
-    - `ratePerKb`：必填，非负数
+    - `ratePerMb`：必填，非负数
     - `mcc` 为空时必须报错
   - 冲突规则：
     - 同一快照内，`mcc+mnc` 组合唯一；重复组合返回 `409 CONFLICT`
@@ -480,9 +502,9 @@
     - `INVALID_STATUS`：对非 DRAFT 快照执行更新，或对非 DRAFT/非合法状态执行发布
     - `RESOURCE_LOCKED`：目标快照已发布或已进入不可写状态，不允许修改 entries
   - 示例请求（创建 Roaming Profile 草稿）：
-    - `{"name":"SEA roaming","resellerId":"<uuid>","supplierId":"<uuid>","operatorId":"<uuid>","mccmncList":[{"mcc":"460","mnc":"00","ratePerKb":0.0008},{"mcc":"460","mnc":"*","ratePerKb":0.0012}]}`
+    - `{"name":"SEA roaming","resellerId":"<uuid>","supplierId":"<uuid>","operatorId":"<uuid>","mccmncList":[{"mcc":"460","mnc":"00","ratePerMb":0.0008},{"mcc":"460","mnc":"*","ratePerMb":0.0012}]}`
   - 示例请求（克隆并编辑为新快照）：
-    - `{"sourceRoamingProfileId":"<uuid>","name":"SEA roaming","operations":[{"op":"UPSERT","mcc":"454","mnc":"12","ratePerKb":0.0015},{"op":"DELETE","mcc":"460","mnc":"00"}]}`
+    - `{"sourceRoamingProfileId":"<uuid>","name":"SEA roaming","operations":[{"op":"UPSERT","mcc":"454","mnc":"12","ratePerMb":0.0015},{"op":"DELETE","mcc":"460","mnc":"00"}]}`
 
 - APN / Control Policy / Price Plan 快照条文补充（speckit）：
   - APN Profile：
@@ -501,7 +523,7 @@
 
 **Acceptance Scenarios**:
 
-1. **Given** 创建 SIM Dependent Bundle 产品包, **When** 月租=10, perSimQuotaKb=1048576(1GB), 当月 3 张 SIM, **Then** 总配额=3GB, 月租=30
+1. **Given** 创建 SIM Dependent Bundle 产品包, **When** 月租=10, perSimQuotaMb=1024(1GB), 当月 3 张 SIM, **Then** 总配额=3GB, 月租=30
 2. **Given** 创建 One-time 产品包(quota=10GB, validity=30天, expiry=CALENDAR_DAY_END), **When** 2026-02-01 10:00 生效, **Then** 到期时间 2026-03-02 23:59:59
 3. **Given** 产品包绑定 APN=A, **When** 变更为 APN=B 发布为次月生效, **Then** 当月不影响，次月生效并下发上游
 
@@ -538,8 +560,12 @@
 **订阅约束与变更策略**：
 - 变更（Switch）：默认次月生效，本月旧套餐全额月租，下月新套餐，无补差价
 - 退订（Cancel）：
-  - 模式 A（默认）：到期退订（Expire at End）
-  - 模式 B（可选）：立即退订（Terminate Now），当月月租不退
+  - **MAIN 订阅**：
+    - 已生效（ACTIVE）：无法立即取消，必须到本计费周期结束时才能取消；取消请求插入队列，由定时任务在周期末执行
+    - 未生效（PENDING）：可立即取消
+  - **ADD_ON 订阅**：
+    - 已生效（ACTIVE）：无法立即取消，必须到其到期截止时才能取消；取消请求插入队列，由定时任务在到期时执行
+    - 未生效（PENDING）：可立即取消
 
 **计数口径**：订阅生效时间决定月初取数与月内新增计数。
 
@@ -555,6 +581,7 @@
   - CANCELLED：撤销（当月计数与配额不回收）
   - EXPIRED：到期或被替换后归档
 - 月内取消订阅：当月仍按全额月租计费，配额保留至月底
+- 取消队列：`subscription_cancel_schedules` 表存储已生效订阅的待执行取消；定时任务扫描并执行
 
 - API 接口：
   - `POST /v1/subscriptions` 创建订阅
@@ -606,7 +633,7 @@
    - 非活跃状态用量：默认 Out-of-Profile 处理
 
 **SIM Dependent Bundle 计费**：
-- 总配额 = activatedSimCount(高水位) × perSimQuotaKb
+- 总配额 = activatedSimCount(高水位) × perSimQuotaMb
 - 仅支付停机保号费的 SIM 不贡献配额
 - 费用 = (activatedSimCount × monthlyFee) + (deactivatedSimCount × deactivatedMonthlyFee) + 套外费用
 
@@ -1012,6 +1039,11 @@
 
 ## Clarifications
 
+### Session 2026-03-12
+
+- Q: 不同角色的访问权限如何定义与配置？若需禁止 enterprise 用户访问 bills 模块，应如何操作？ → A: 当前实现采用 `defaultPermissionsByRoleScope` 硬编码（`src/app.js` 约 437 行、`src/middleware/rbac.ts` 约 51 行），按 roleScope（platform/reseller/customer/department）分配权限。请求到达时由 `resolvePermissionForRequest` 将路径映射为权限码（如 `/v1/bills` → bills.list），`permissionGuard` 校验用户是否具备该权限。禁止 enterprise 访问 bills：从 `customer` 和 `department` 的权限列表中移除 `bills.list`、`bills.read`、`bills.export`、`bills.mark_paid`、`bills.adjust` 即可。若未来启用 DB 驱动的 roles/permissions/role_permissions 表，则通过数据库配置覆盖默认值。
+- Q: 后续版本能否按数据库表配置每个角色的访问权限（reseller_admin, reseller_sales_director, reseller_sales, reseller_finance, customer_admin, customer_ops）？ → A: 可以。V1.1 将新增专门任务：创建 roles/permissions/role_permissions 三表及迁移、预置 6 种角色与 38+ 权限码的 seed、重构 `getEffectivePermissions` 优先从 DB 解析、保留硬编码为兜底。详见 tasks.md Phase 23。
+
 ### Session 2026-02-08
 
 - Q: 本系统的主要开发语言是什么？ → A: TypeScript (Node.js)
@@ -1068,7 +1100,7 @@
 - **FR-023**: 系统 MUST 基于高水位原则计算月租费（ACTIVATED > DEACTIVATED > 其他）
 - **FR-024**: 系统 MUST 实现 Waterfall Logic 用量匹配（叠加包优先 -> 范围最小优先 -> 主套餐兜底 -> Out-of-Profile）
 - **FR-025**: 系统 MUST 对 Out-of-Profile 用量不扣减任何套餐配额，独立按 PAYG 计费并触发告警
-- **FR-026**: 系统 MUST 支持 SIM Dependent Bundle 动态累加池额度（高水位 activatedSimCount × perSimQuotaKb）
+- **FR-026**: 系统 MUST 支持 SIM Dependent Bundle 动态累加池额度（高水位 activatedSimCount × perSimQuotaMb）
 - **FR-027**: 系统 MUST 阶梯计费采用分段累进（Progressive）
 - **FR-028**: 系统 MUST 计费结果可追溯（inputRef + ruleVersion + calculationId）
 
@@ -1089,7 +1121,7 @@
 - **FR-038**: 系统 MUST 南向指令支持幂等（idempotencyKey）
 
 **可观测性**：
-- **FR-039**: 系统 MUST 实现统一事件目录（SIM_STATUS_CHANGED/SUBSCRIPTION_CHANGED/BILL_PUBLISHED/PAYMENT_CONFIRMED/ALERT_TRIGGERED/ENTERPRISE_STATUS_CHANGED）
+- **FR-039**: 系统 MUST 实现统一事件目录（SIM_STATUS_CHANGED/SUBSCRIPTION_CHANGED/BILL_PUBLISHED/PAYMENT_CONFIRMED/ALERT_TRIGGERED/ENTERPRISE_STATUS_CHANGED）；事件向下游 Webhook 投递与重试见 [clarifications/webhook-delivery.md](clarifications/webhook-delivery.md)
 
 **实体建模（CMP.xlsx 对齐）**：
 - **FR-040**: 系统 MUST 使用独立表建模（resellers、customers、suppliers、business_operators、operators），废弃通用 tenants 表
@@ -1230,7 +1262,7 @@ MVP 目标：8 周内交付最小闭环。
 
 **统一约定**：
 - 计费周期：自然月（CALENDAR_MONTH）
-- 流量单位：KB 向上取整
+- 流量单位：MB 向上取整
 - 用量维度：`iccid + visitedMccMnc + eventTime`
 - 用量命中：叠加包优先 -> 范围最小优先 -> 主套餐兜底 -> Out-of-Profile
 - Out-of-Profile：不扣减任何套餐配额，按 paygRates 计费 + 异常漫游告警
@@ -1245,9 +1277,9 @@ MVP 目标：8 周内交付最小闭环。
 | U-02 | 主：Europe 1GB；叠加：France 500MB | 208-01 | 100MB | 叠加（France） | 扣减 France 配额 100MB | 无 |
 | U-03 | 主：Europe 1GB；叠加：France 500MB | 262-02 | 100MB | 主套餐（Europe） | France 不覆盖，扣减 Europe 配额 100MB | 无 |
 | U-04 | 主：Europe 1GB；叠加：France 500MB；叠加：EU+UK 800MB | 208-01 | 100MB | 叠加（France） | 多叠加覆盖时范围更小优先 | 无 |
-| U-05 | 主：Europe 1GB（不含阿联酋）；PAYG Zone4=0.02 USD/KB | 424-02 | 10MB | Out-of-Profile | 不扣减套餐；按 PAYG 计费 | 异常漫游 |
+| U-05 | 主：Europe 1GB（不含阿联酋）；PAYG Zone4=20.48 USD/MB | 424-02 | 10MB | Out-of-Profile | 不扣减套餐；按 PAYG 计费 | 异常漫游 |
 | U-06 | 主：Europe 1GB；PAYG 未覆盖 999-99 | 999-99 | 10MB | Out-of-Profile | 不扣减；默认阻断或高价告警 | 异常漫游+规则缺失 |
-| U-07 | 主：Global 1GB（配额已耗尽）；overageRate=0.01/KB | 234-15 | 10MB | 主套餐 | 按套外单价计费 | 可选 |
+| U-07 | 主：Global 1GB（配额已耗尽）；overageRate=10.24/MB | 234-15 | 10MB | 主套餐 | 按套外单价计费 | 可选 |
 
 ### 非活跃状态用量（异常/漏控）
 
@@ -1313,7 +1345,7 @@ MVP 目标：8 周内交付最小闭环。
 - [x] MVP 周期：8 周
 - [x] D-23 计费时区：GMT+0。月初 = 每月 1 日 00:00:00 GMT+0，月末 = 月末最后一天 23:59:59 GMT+0
 - [x] D-24 高水位采样粒度：按状态变更事件（sim_state_history）。当月出现过 ACTIVATED 状态（哪怕 1 秒）即按全额月租费计
-- [x] D-25 Fixed Bundle 共享池超额：totalQuotaKb 为共享池，超额后走套外计费（Out-of-Profile PAYG），有专门资费定义（overageRatePerKb / paygRates），不存在并发扣减问题
+- [x] D-25 Fixed Bundle 共享池超额：totalQuotaMb 为共享池，超额后走套外计费（Out-of-Profile PAYG），有专门资费定义（overageRatePerMb / paygRates），不存在并发扣减问题
 - [x] D-26 零用量出账：月租费按 SIM 高水位状态决定（活跃→全额月租费、停机→停机保号费、不满足条件→不收）；流量费 = 0
 - [x] D-27 跨月用量归属：CDR 跨月数据会话的用量归属到会话开始所在月份（算上个月）
 - [x] D-28 MVP 范围裁剪：MVP 仅实现 3 个角色（platform_admin / reseller_admin / customer_admin）、2 种资费类型（Fixed Bundle / One-time）、L1+L3 账单结构；白标/Dunning/多供应商 SPI/告警去重 推迟至 V1.1

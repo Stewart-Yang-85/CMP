@@ -379,7 +379,7 @@ function getTestPeriodDays() {
   return Math.max(1, n)
 }
 
-function getTestQuotaKb() {
+function getTestQuotaMb() {
   const n = getEnvNumber('TEST_QUOTA_KB', 102400)
   return Math.max(0, n)
 }
@@ -1359,7 +1359,7 @@ function registerAdminApiClientRoutes({
     const sims = Array.isArray(data) ? data : []
     const cond = getTestExpiryCondition()
     const periodDays = getTestPeriodDays()
-    const quotaKbLimit = getTestQuotaKb()
+    const quotaMbLimit = getTestQuotaMb()
     let processed = 0
     let activated = 0
     for (const sim of sims) {
@@ -1385,7 +1385,7 @@ function registerAdminApiClientRoutes({
       if (Array.isArray(usageRows)) {
         for (const r of usageRows) totalKb += Number(r.total_kb ?? 0)
       }
-      const expireByQuota = quotaKbLimit > 0 ? totalKb >= quotaKbLimit : false
+      const expireByQuota = quotaMbLimit > 0 ? totalKb >= quotaMbLimit : false
       const shouldExpire = cond === 'PERIOD_ONLY' ? expireByPeriod : cond === 'QUOTA_ONLY' ? expireByQuota : (expireByPeriod || expireByQuota)
       if (!shouldExpire) continue
       const nowIso = new Date().toISOString()
@@ -1415,7 +1415,7 @@ function registerAdminApiClientRoutes({
           expiryBy: expireByPeriod && expireByQuota ? 'PERIOD_OR_QUOTA' : expireByPeriod ? 'PERIOD' : 'QUOTA',
           totalKb,
           periodDays,
-          quotaKbLimit,
+          quotaMbLimit,
           startTime: startTimeIso,
           endTime: nowIso,
         },
@@ -1489,8 +1489,8 @@ function registerBillFileRoutes({
       'calculationId',
       'iccid',
       'visitedMccMnc',
-      'chargedKb',
-      'ratePerKb',
+      'chargedMb',
+      'ratePerMb',
       'inputRef',
       'createdAt',
     ]
@@ -1505,8 +1505,8 @@ function registerBillFileRoutes({
           meta.calculationId,
           meta.iccid,
           meta.visitedMccMnc,
-          meta.chargedKb,
-          meta.ratePerKb,
+          meta.chargedMb,
+          meta.ratePerMb,
           meta.inputRef,
           it.created_at,
         ]

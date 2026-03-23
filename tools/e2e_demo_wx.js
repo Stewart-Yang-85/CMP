@@ -24,6 +24,40 @@ function getEnv(name) {
   return v ? String(v) : null
 }
 
+/** 与 app.js 一致，用于校验租户 UUID */
+function isValidUuid(value) {
+  const s = String(value || '').trim().toLowerCase()
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s)
+}
+
+/**
+ * switchSubscription 只查询 ACTIVE 的 MAIN；若用「下月生效」创建会得到 PENDING，
+ * 与卡上已有 ACTIVE MAIN 并存时，fromSubscriptionId 会对不上。
+ * 演示脚本可选：在创建前取消该 SIM 上已有 ACTIVE MAIN（勿对生产卡默认开启）。
+ */
+async function cancelActiveMainSubscriptionsForWxDemo(supabaseClient, simId) {
+  const sid = String(simId || '').trim()
+  if (!sid) return
+  try {
+    const rows = await supabaseClient.select(
+      'subscriptions',
+      `select=subscription_id&sim_id=eq.${encodeURIComponent(sid)}&state=eq.ACTIVE&subscription_kind=eq.MAIN`
+    )
+    const iso = new Date().toISOString()
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const id = row?.subscription_id
+      if (!id) continue
+      await supabaseClient.update(
+        'subscriptions',
+        `subscription_id=eq.${encodeURIComponent(String(id))}`,
+        { state: 'CANCELLED', cancelled_at: iso, expires_at: iso }
+      )
+    }
+  } catch {
+    /* 演示容错 */
+  }
+}
+
 function nowIso() {
   return new Date().toISOString()
 }
@@ -157,20 +191,39 @@ async function main() {
       })
       const accessToken = String(tokenResp?.accessToken || '')
       const c = createSupabaseRestClient({ useServiceRole: true })
-      const simRows = await c.select('sims', `select=sim_id,enterprise_id,supplier_id,carrier_id,operator_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
+      // sims 在部分迁移后无 carrier_id，仅选当前库常见列；套餐 carrier_id 可为 null
+      const simRows = await c.select(
+        'sims',
+        `select=sim_id,enterprise_id,supplier_id,operator_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`
+      )
       const sim = Array.isArray(simRows) ? simRows[0] : null
       if (sim) {
-        const entId = sim.enterprise_id || getEnv('AUTH_ENTERPRISE_ID')
-        let operatorId = sim.operator_id
-        if (!operatorId && sim.supplier_id && sim.carrier_id) {
+        const entIdRaw =
+          sim.enterprise_id ??
+          getEnv('AUTH_ENTERPRISE_ID') ??
+          getEnv('DEMO_ENTERPRISE_ID') ??
+          getEnv('SMOKE_ENTERPRISE_ID')
+        const entId = entIdRaw ? String(entIdRaw).trim() : null
+        if (!isValidUuid(entId)) {
+          process.stdout.write(
+            'SKIP: subscription demo (无有效 enterprise UUID：请给 SIM 绑定 enterprise_id，或设置 AUTH_ENTERPRISE_ID / DEMO_ENTERPRISE_ID / SMOKE_ENTERPRISE_ID)\n'
+          )
+        } else {
+        const demoBusinessOperatorId = '1413a2b1-8888-4e5a-9a66-949ca1f56d72'
+        let operatorId = sim.operator_id ?? null
+        if (!operatorId && sim.supplier_id) {
           const opRows = await c.select(
             'operators',
-            `select=operator_id&supplier_id=eq.${encodeURIComponent(sim.supplier_id)}&carrier_id=eq.${encodeURIComponent(sim.carrier_id)}&limit=1`
+            `select=operator_id&supplier_id=eq.${encodeURIComponent(sim.supplier_id)}&limit=1`
           )
           if (Array.isArray(opRows) && opRows[0]?.operator_id) {
             operatorId = opRows[0].operator_id
           } else {
-            const createdOps = await c.insert('operators', { supplier_id: sim.supplier_id, carrier_id: sim.carrier_id })
+            const createdOps = await c.insert('operators', {
+              supplier_id: sim.supplier_id,
+              business_operator_id: demoBusinessOperatorId,
+              name: 'e2e-wx-demo-operator',
+            })
             operatorId = Array.isArray(createdOps) ? createdOps[0]?.operator_id : null
           }
         }
@@ -184,11 +237,12 @@ async function main() {
           first_cycle_proration: 'NONE',
         })
         const planId = Array.isArray(planRows) ? planRows[0]?.price_plan_id : null
+        // 与 migrate_kb_to_mb / 线上 PostgREST 一致：列名为 *_mb
         const ppvRows = await c.insert('price_plan_versions', {
           price_plan_id: planId,
           version: 1,
           monthly_fee: 0,
-          quota_kb: 102400,
+          quota_mb: 100,
         })
         const ppvId = Array.isArray(ppvRows) ? ppvRows[0]?.price_plan_version_id : null
         const pkgRows = await c.insert('packages', {
@@ -196,13 +250,17 @@ async function main() {
           name: `wx-pkg-${Date.now()}`,
         })
         const pkgId = Array.isArray(pkgRows) ? pkgRows[0]?.package_id : null
-        const terms1 = { testPeriodDays: 14, testQuotaKb: 102400, testExpiryCondition: 'PERIOD_OR_QUOTA', commitmentPeriodMonths: 1 }
+        const terms1 = {
+          testPeriodDays: 14,
+          testQuotaMb: 100,
+          testExpiryCondition: 'PERIOD_OR_QUOTA',
+          commitmentPeriodMonths: 1,
+        }
         const pv1Rows = await c.insert('package_versions', {
           package_id: pkgId,
           version: 1,
           status: 'PUBLISHED',
           supplier_id: sim.supplier_id,
-          carrier_id: sim.carrier_id,
           operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: terms1,
@@ -215,41 +273,97 @@ async function main() {
           version: 2,
           status: 'PUBLISHED',
           supplier_id: sim.supplier_id,
-          carrier_id: sim.carrier_id,
           operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: terms2,
           price_plan_version_id: ppvId,
         })
         const pv2Id = Array.isArray(pv2Rows) ? pv2Rows[0]?.package_version_id : null
-        const now = new Date()
         const scenarioStart = nowIso()
-        const eff = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0, 0)).toISOString()
-        const created = await httpJson(`${base}/subscriptions`, {
-          method: 'POST',
-          headers: buildHeaders({ Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }),
-          body: { iccid, packageVersionId: pv1Id, kind: 'MAIN', effectiveAt: eff },
-        })
+        // 须立即生效 → state=ACTIVE，才能与 switch 查询的 ACTIVE MAIN 一致
+        const effImmediate = scenarioStart
+        // 默认会结束该 SIM 上已有 ACTIVE MAIN，避免与「立即生效」新 MAIN 冲突；生产卡请设 E2E_WX_CANCEL_EXISTING_MAIN=0
+        const cancelExisting =
+          getEnv('E2E_WX_CANCEL_EXISTING_MAIN') !== '0' && getEnv('E2E_WX_CANCEL_EXISTING_MAIN') !== 'false'
+        if (cancelExisting) {
+          process.stdout.write(
+            'wx.demo: cancel existing ACTIVE MAIN on SIM (set E2E_WX_CANCEL_EXISTING_MAIN=0 to skip)\n'
+          )
+          await cancelActiveMainSubscriptionsForWxDemo(c, String(sim.sim_id))
+        }
+        let created
+        try {
+          created = await httpJson(`${base}/subscriptions`, {
+            method: 'POST',
+            headers: buildHeaders({ Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }),
+            body: { enterpriseId: entId, iccid, packageVersionId: pv1Id, kind: 'MAIN', effectiveAt: effImmediate },
+          })
+        } catch (e) {
+          const m = String(e?.message || e)
+          if (m.includes('MAIN_SUBSCRIPTION_EXISTS') || m.includes('409')) {
+            process.stderr.write(
+              'HINT: 卡上已有 ACTIVE MAIN。可设 E2E_WX_CANCEL_EXISTING_MAIN=1（本演示会取消现有 ACTIVE MAIN）或换无 MAIN 的测试卡。\n'
+            )
+          }
+          throw e
+        }
         process.stdout.write(`sub.create.id=${String(created?.subscriptionId || '')} ce=${String(created?.commitmentEndAt || '')}\n`)
+        // 延期取消仅允许 ACTIVE/PENDING；switch(NEXT_CYCLE) 会把原 MAIN 置为 EXPIRED，故须在 switch 之前调用
+        try {
+          const cancelDef = await httpJson(
+            `${base}/subscriptions/${encodeURIComponent(created.subscriptionId)}:cancel?immediate=false`,
+            {
+              method: 'POST',
+              headers: buildHeaders({ Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }),
+              body: { immediate: false, enterpriseId: entId },
+            }
+          )
+          const defLabel =
+            cancelDef?.scheduled === true
+              ? `scheduled@${String(cancelDef?.scheduledExecuteAt || '')}`
+              : String(cancelDef?.state || 'ok')
+          process.stdout.write(`sub.cancel.deferred=${defLabel}\n`)
+        } catch (e) {
+          const m = String(e?.message || e)
+          if (m.includes('CANCEL_ALREADY_SCHEDULED')) {
+            process.stdout.write('sub.cancel.deferred=SKIP (CANCEL_ALREADY_SCHEDULED)\n')
+          } else if (m.includes('MIGRATION_REQUIRED') || m.includes('503')) {
+            process.stdout.write('sub.cancel.deferred=SKIP (subscription_cancel_schedules 未迁移)\n')
+          } else {
+            throw e
+          }
+        }
         let switched = null
         try {
           switched = await httpJson(`${base}/subscriptions:switch`, {
             method: 'POST',
             headers: buildHeaders({ Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }),
-            body: { iccid, fromSubscriptionId: created.subscriptionId, newPackageVersionId: pv2Id },
+            body: { enterpriseId: entId, iccid, fromSubscriptionId: created.subscriptionId, newPackageVersionId: pv2Id },
           })
         } catch (err) {
           const msg = String(err?.message || err)
           if (msg.includes('SUBSCRIPTION_NOT_FOUND') || msg.includes('HTTP 404')) {
-            await httpJson(`${base}/subscriptions`, {
+            const recreated = await httpJson(`${base}/subscriptions`, {
               method: 'POST',
               headers: buildHeaders({ Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }),
-              body: { iccid, packageVersionId: pv1Id, kind: 'MAIN', effectiveAt: new Date().toISOString() },
+              body: {
+                enterpriseId: entId,
+                iccid,
+                packageVersionId: pv1Id,
+                kind: 'MAIN',
+                effectiveAt: new Date().toISOString(),
+              },
             })
+            created = recreated
             switched = await httpJson(`${base}/subscriptions:switch`, {
               method: 'POST',
               headers: buildHeaders({ Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }),
-              body: { iccid, fromSubscriptionId: created.subscriptionId, newPackageVersionId: pv2Id },
+              body: {
+                enterpriseId: entId,
+                iccid,
+                fromSubscriptionId: recreated.subscriptionId,
+                newPackageVersionId: pv2Id,
+              },
             })
           } else {
             throw err
@@ -263,15 +377,9 @@ async function main() {
         const cancelImm = await httpJson(`${base}/subscriptions/${encodeURIComponent(switchedNewId)}:cancel?immediate=true`, {
           method: 'POST',
           headers: buildHeaders({ Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }),
-          body: { immediate: true },
+          body: { immediate: true, enterpriseId: entId },
         })
         process.stdout.write(`sub.cancel.immediate=${String(cancelImm?.state || '')}\n`)
-        const cancelDef = await httpJson(`${base}/subscriptions/${encodeURIComponent(created.subscriptionId)}:cancel?immediate=false`, {
-          method: 'POST',
-          headers: buildHeaders({ Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }),
-          body: { immediate: false },
-        })
-        process.stdout.write(`sub.cancel.deferred=${String(cancelDef?.state || '')}\n`)
         const evs = await httpJson(`${base}/admin/events?eventType=SUBSCRIPTION_CHANGED&start=${encodeURIComponent(scenarioStart)}&limit=50&page=1`, {
           headers: buildHeaders({ 'X-API-Key': adminKey }),
         })
@@ -305,6 +413,7 @@ async function main() {
           try {
             await c.delete('price_plans', `price_plan_id=eq.${encodeURIComponent(String(planId))}`)
           } catch {}
+        }
         }
       } else {
         process.stdout.write('SKIP: subscription demo (SIM not found)\n')

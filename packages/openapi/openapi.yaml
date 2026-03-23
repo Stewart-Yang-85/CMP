@@ -7600,30 +7600,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
-  /sims/{iccid}/plan:
-    put:
-      tags: [SIMs]
-      summary: Change Rate Plan
-      parameters:
-        - name: iccid
-          in: path
-          required: true
-          schema:
-            type: string
-            pattern: '^[0-9]{18,20}$'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SimPlanChange'
-      responses:
-        '200':
-          description: Plan change scheduled
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SimPlanChangeResponse'
   /sims/{iccid}/subscriptions:
     get:
       tags: [SIMs]

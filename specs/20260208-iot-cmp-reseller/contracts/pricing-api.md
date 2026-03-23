@@ -30,9 +30,9 @@ POST /v1/price-plans
 - 公共字段：`name`、`pricePlanType`、`serviceType`、`currency`、`billingCycleType`、`firstCycleProration`、`prorationRounding`、`paygRates`
 - 类型：`ONE_TIME | SIM_DEPENDENT_BUNDLE | FIXED_BUNDLE | TIERED_PRICING`
 - 各类型专属字段与校验：
-  - ONE_TIME：`oneTimeFee`、`quotaKb`、`validityDays`、`expiryBoundary`
-  - SIM_DEPENDENT_BUNDLE：`monthlyFee`、`deactivatedMonthlyFee`、`perSimQuotaKb`、`overageRatePerKb`
-  - FIXED_BUNDLE：`monthlyFee`、`deactivatedMonthlyFee`、`totalQuotaKb`、`overageRatePerKb`
+  - ONE_TIME：`oneTimeFee`、`quotaMb`、`validityDays`、`expiryBoundary`
+  - SIM_DEPENDENT_BUNDLE：`monthlyFee`、`deactivatedMonthlyFee`、`perSimQuotaMb`、`overageRatePerMb`
+  - FIXED_BUNDLE：`monthlyFee`、`deactivatedMonthlyFee`、`totalQuotaMb`、`overageRatePerMb`
   - TIERED_PRICING：`monthlyFee`、`deactivatedMonthlyFee`、`tiers[]`
 
 **Response 201**:
@@ -337,8 +337,10 @@ POST /v1/subscriptions/{subscriptionId}:cancel
 | immediate | boolean | true=立即退订（需二次确认），false=到期退订（默认） |
 
 **业务规则**:
-- 到期退订（默认）：服务至月底，ACTIVE → EXPIRED
-- 立即退订：当月月租不退费，ACTIVE → CANCELLED
+- **PENDING（未生效）**：可立即取消，state → CANCELLED
+- **ACTIVE（已生效）**：不可立即取消；取消请求插入队列，由定时任务在到期时执行
+  - MAIN：到期时间 = 本计费周期末（自然月末）
+  - ADD_ON：到期时间 = expires_at（若无则按本计费周期末）
 - 月内取消：当月仍按全额月租计费，配额保留至月底
 
 ### 7.4 查询 SIM 订阅历史

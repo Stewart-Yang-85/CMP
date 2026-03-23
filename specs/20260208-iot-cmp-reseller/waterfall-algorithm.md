@@ -55,12 +55,12 @@ function waterfallMatch(sim, subscriptions, usageRecord, packageDetailsMap):
   mainPkg = packageDetailsMap[mainSub?.package_version_id]
 
   if mainPkg has payg_rates:
-    rate = resolvePaygRatePerKb(mainPkg, usageRecord.visited_mccmnc)
+    rate = resolvePaygRatePerMb(mainPkg, usageRecord.visited_mccmnc)
     if rate is not null:
-      return { classification: 'PAYG', rate_per_kb: rate }
+      return { classification: 'PAYG', rate_per_mb: rate }
 
   # Step 6: 无 PAYG rate → 标记告警，不计费
-  return { classification: 'PAYG_RULE_MISSING', rate_per_kb: null, amount: 0 }
+  return { classification: 'PAYG_RULE_MISSING', rate_per_mb: null, amount: 0 }
 ```
 
 ## 3. PAYG Zone 匹配规则 (specificity)
@@ -83,24 +83,24 @@ function classifyUsage(match, usageRecord, poolState):
   planType = planVersion.type
 
   if planType == 'ONE_TIME':
-    # ONE_TIME: 固定费用，用量不计超额（quota_kb 为总配额）
-    quotaKb = planVersion.quota_kb
-    if quotaKb is NULL: return 'IN_PACKAGE'
-    usedKb = poolState.getUsed(match.sub.subscription_id)
-    if usedKb + usageRecord.total_kb <= quotaKb:
+    # ONE_TIME: 固定费用，用量不计超额（quota_mb 为总配额）
+    quotaMb = planVersion.quota_mb
+    if quotaMb is NULL: return 'IN_PACKAGE'
+    usedMb = poolState.getUsed(match.sub.subscription_id)
+    if usedMb + usageRecord.total_mb <= quotaMb:
       return 'IN_PACKAGE'
     else:
-      overKb = (usedKb + usageRecord.total_kb) - quotaKb
-      return 'OVERAGE', amount = roundAmount(overKb * planVersion.overage_rate_per_kb)
+      overMb = (usedMb + usageRecord.total_mb) - quotaMb
+      return 'OVERAGE', amount = roundAmount(overMb * planVersion.overage_rate_per_mb)
 
   if planType == 'FIXED_BUNDLE':
     # FIXED_BUNDLE: 全局池配额
-    totalQuotaKb = planVersion.total_quota_kb
-    usedKb = poolState.getPoolUsed(match.pkg.package_version_id)
-    remainingKb = max(0, totalQuotaKb - usedKb)
-    overKb = max(0, usageRecord.total_kb - remainingKb)
-    if overKb > 0:
-      return 'OVERAGE', amount = roundAmount(overKb * planVersion.overage_rate_per_kb)
+    totalQuotaMb = planVersion.total_quota_mb
+    usedMb = poolState.getPoolUsed(match.pkg.package_version_id)
+    remainingMb = max(0, totalQuotaMb - usedMb)
+    overMb = max(0, usageRecord.total_mb - remainingMb)
+    if overMb > 0:
+      return 'OVERAGE', amount = roundAmount(overMb * planVersion.overage_rate_per_mb)
     return 'IN_PACKAGE'
 
   # SIM_DEPENDENT_BUNDLE / TIERED_VOLUME_PRICING: V1.1 scope

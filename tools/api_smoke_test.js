@@ -107,6 +107,11 @@ async function main() {
     assert(openapi.includes('/sims:csv:'), 'openapi must include /sims:csv path')
     assert(openapi.includes('/sims:batch-deactivate:'), 'openapi must include /sims:batch-deactivate path')
     assert(openapi.includes('/jobs/{jobId}:cancel:'), 'openapi must include /jobs/{jobId}:cancel path')
+    assert(openapi.includes('/enterprises/{enterpriseId}/dunning:'), 'openapi must include /enterprises/{enterpriseId}/dunning path')
+    assert(
+      openapi.includes('/enterprises/{enterpriseId}/dunning:resolve:'),
+      'openapi must include /enterprises/{enterpriseId}/dunning:resolve path'
+    )
     assert(openapi.includes('/share-links:'), 'openapi must include /share-links path')
     assert(openapi.includes('/s/{code}.json:'), 'openapi must include /s/{code}.json path')
     assert(openapi.includes('/s/{code}:'), 'openapi must include /s/{code} path')

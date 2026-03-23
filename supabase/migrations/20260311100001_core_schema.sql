@@ -313,6 +313,16 @@ create table if not exists package_versions (
   unique (package_id, version)
 );
 
+alter table if exists package_versions
+  add column if not exists price_plan_version_id uuid references price_plan_versions(price_plan_version_id),
+  add column if not exists carrier_id uuid,
+  add column if not exists service_type service_type not null default 'DATA',
+  add column if not exists apn text,
+  add column if not exists roaming_profile jsonb,
+  add column if not exists throttling_policy jsonb,
+  add column if not exists control_policy jsonb,
+  add column if not exists commercial_terms jsonb;
+
 create table if not exists subscriptions (
   subscription_id uuid primary key default gen_random_uuid(),
   enterprise_id uuid not null references tenants(tenant_id),

@@ -10,6 +10,7 @@ import { runDunningCheck } from './services/dunning.js'
 import { runReconciliation } from './services/reconciliation.js'
 import { runAlertEvaluation } from './services/alerting.js'
 import { retryWebhookDelivery } from './services/webhook.js'
+import { executeScheduledCancels } from './services/subscription.js'
 
 const supabase = createSupabaseRestClient({ useServiceRole: true })
 const wxClient = createWxzhonggengClient()
@@ -79,6 +80,7 @@ const DUNNING_CHECK_CRON = process.env.DUNNING_CHECK_CRON || '30 2 * * *'
 const ALERT_EVAL_CRON = process.env.ALERT_EVAL_CRON || '*/15 * * * *'
 const WEBHOOK_DELIVERY_CRON = process.env.WEBHOOK_DELIVERY_CRON || '*/1 * * * *'
 const TEST_EXPIRY_CHECK_CRON = process.env.TEST_EXPIRY_CHECK_CRON || '0 3 * * *'
+const SUBSCRIPTION_CANCEL_CRON = process.env.SUBSCRIPTION_CANCEL_CRON || '*/5 * * * *'
 const WEBHOOK_DELIVERY_BATCH_LIMIT = resolveNumber(process.env.WEBHOOK_DELIVERY_BATCH_LIMIT, 50)
 const ALERT_WINDOW_MINUTES = resolveNumber(process.env.ALERT_WINDOW_MINUTES, 60)
 const ALERT_SUPPRESS_MINUTES = resolveNumber(process.env.ALERT_SUPPRESS_MINUTES, 30)
@@ -110,6 +112,7 @@ console.log(`Dunning Check Schedule: ${DUNNING_CHECK_CRON}`)
 console.log(`Alert Evaluation Schedule: ${ALERT_EVAL_CRON}`)
 console.log(`Webhook Delivery Schedule: ${WEBHOOK_DELIVERY_CRON}`)
 console.log(`Test Expiry Check Schedule: ${TEST_EXPIRY_CHECK_CRON}`)
+console.log(`Subscription Cancel Schedule: ${SUBSCRIPTION_CANCEL_CRON}`)
 
 // --- Usage Sync Task ---
 async function syncUsageTask() {
@@ -438,6 +441,23 @@ async function testExpiryCheckTask() {
   }
 }
 
+// --- Subscription Cancel Schedule Task ---
+async function subscriptionCancelTask() {
+  const traceId = `worker-subscription-cancel-${Date.now()}`
+  try {
+    const result = await executeScheduledCancels({ supabase })
+    if (result.ok && result.value.processed > 0) {
+      console.log(`[${traceId}] Executed ${result.value.processed} scheduled cancels:`, result.value.results)
+    }
+  } catch (err) {
+    if (String(err?.message || '').includes('subscription_cancel_schedules')) {
+      console.log(`[${traceId}] subscription_cancel_schedules table not found (migration may not be run), skipping.`)
+    } else {
+      console.error(`[${traceId}] Subscription cancel task failed:`, err)
+    }
+  }
+}
+
 // --- Job Processor ---
 async function processJobs() {
   try {
@@ -669,6 +689,7 @@ scheduleCron('DUNNING_CHECK_CRON', DUNNING_CHECK_CRON, dunningCheckTask)
 scheduleCron('ALERT_EVAL_CRON', ALERT_EVAL_CRON, alertEvaluationTask)
 scheduleCron('WEBHOOK_DELIVERY_CRON', WEBHOOK_DELIVERY_CRON, webhookDeliveryTask)
 scheduleCron('TEST_EXPIRY_CHECK_CRON', TEST_EXPIRY_CHECK_CRON, testExpiryCheckTask)
+scheduleCron('SUBSCRIPTION_CANCEL_CRON', SUBSCRIPTION_CANCEL_CRON, subscriptionCancelTask)
 
 // Polling for jobs
 let isProcessing = false

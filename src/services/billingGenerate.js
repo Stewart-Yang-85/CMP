@@ -34,14 +34,23 @@ function addDays(date, days) {
   return d
 }
 
-async function loadEnterpriseList(supabase, enterpriseId) {
+async function loadEnterpriseList(supabase, enterpriseId, resellerId) {
   if (enterpriseId) {
     const rows = await supabase.select(
       'tenants',
       `select=tenant_id,parent_id,name&tenant_id=eq.${encodeURIComponent(enterpriseId)}&tenant_type=eq.ENTERPRISE&limit=1`
     )
     const row = Array.isArray(rows) ? rows[0] : null
-    return row ? [row] : []
+    if (!row) return []
+    if (resellerId && String(row.parent_id || '') !== String(resellerId)) return []
+    return [row]
+  }
+  if (resellerId) {
+    const rows = await supabase.select(
+      'tenants',
+      `select=tenant_id,parent_id,name&parent_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.ENTERPRISE`
+    )
+    return Array.isArray(rows) ? rows : []
   }
   const rows = await supabase.select('tenants', 'select=tenant_id,parent_id,name&tenant_type=eq.ENTERPRISE')
   return Array.isArray(rows) ? rows : []
@@ -97,7 +106,7 @@ function aggregateLineItems({ lineItems, sims, packages, departments }) {
       } else {
         current.usageCharge += Number(item.amount ?? 0)
       }
-      current.usageKb += Number(item.metadata?.chargedKb ?? 0)
+      current.usageKb += Number(item.metadata?.chargedMb ?? 0)
       if (pkgId) current.packageVersionId = pkgId
     }
     simMap.set(simId, current)
@@ -171,7 +180,7 @@ export async function runBillingGenerate({
     return toError(400, 'BAD_REQUEST', 'period must be YYYY-MM.')
   }
   const { start, endExclusive, endInclusive } = parsePeriod(period)
-  const enterprises = await loadEnterpriseList(supabase, enterpriseId)
+  const enterprises = await loadEnterpriseList(supabase, enterpriseId, resellerId ?? null)
   if (!enterprises.length) {
     return toError(404, 'RESOURCE_NOT_FOUND', 'No enterprises found to bill.')
   }

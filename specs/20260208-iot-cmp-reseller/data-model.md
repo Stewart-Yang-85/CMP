@@ -398,6 +398,7 @@ sim_cards ──1:N──> rating_results
 | total_data_usage_kb | bigint | NOT NULL, default 0 | 累计数据用量 (KB) |
 | imei | varchar(15) | — | 绑定 IMEI |
 | imei_lock_enabled | boolean | NOT NULL, default false | 是否启用 IMEI 锁定 |
+| remark | text | — | [V1.1] 备注，标识主要用途（如「研发工程师测试用 SIM」） |
 | upstream_status | text | — | 上游供应商同步状态 |
 | upstream_status_updated_at | timestamptz | — | 上游状态更新时间 |
 | upstream_info | jsonb | — | 上游供应商扩展信息 |
@@ -434,6 +435,7 @@ sim_cards ──1:N──> rating_results
 | eid | text | NOT NULL | 设备 eID |
 | imei | varchar(15) | — | 设备 IMEI |
 | imei_lock_enabled | boolean | NOT NULL, default false | 是否启用 IMEI 锁定 |
+| remark | text | — | [V1.1] 备注，标识主要用途（如「研发工程师测试用 eSIM」） |
 | supplier_id | uuid | NOT NULL, FK→suppliers | 供应商归属 |
 | operator_id | uuid | NOT NULL, FK→operators | 运营商归属 |
 | smdp_system_id | uuid | NOT NULL, FK→smdp_systems | SM-DP+ 系统 |
@@ -504,11 +506,11 @@ sim_cards ──1:N──> rating_results
 | monthly_fee | numeric(12,2) | NOT NULL, default 0 | 月租费 |
 | deactivated_monthly_fee | numeric(12,2) | NOT NULL, default 0 | 停机保号费 |
 | one_time_fee | numeric(12,2) | — | 一次性费用 |
-| quota_kb | bigint | — | 配额 (KB) |
+| quota_mb | bigint | — | 配额 (MB) |
 | validity_days | int | — | 有效期 (天) |
-| per_sim_quota_kb | bigint | — | 每 SIM 配额 |
-| total_quota_kb | bigint | — | 总池配额 |
-| overage_rate_per_kb | numeric(18,8) | — | 套外单价 |
+| per_sim_quota_mb | bigint | — | 每 SIM 配额 (MB) |
+| total_quota_mb | bigint | — | 总池配额 (MB) |
+| overage_rate_per_mb | numeric(18,8) | — | 套外单价 (currency/MB) |
 | tiers | jsonb | — | 阶梯费率 |
 | payg_rates | jsonb | — | PAYG 费率 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
@@ -518,9 +520,9 @@ sim_cards ──1:N──> rating_results
 **`tiers` JSONB 结构**:
 ```json
 [
-  { "thresholdKb": 1048576, "ratePerKb": 0.01 },
-  { "thresholdKb": 5242880, "ratePerKb": 0.008 },
-  { "thresholdKb": null, "ratePerKb": 0.005 }
+  { "fromMb": 0, "toMb": 1024, "ratePerMb": 10.24 },
+  { "fromMb": 1024, "toMb": 5120, "ratePerMb": 8.192 },
+  { "fromMb": 5120, "toMb": null, "ratePerMb": 5.12 }
 ]
 ```
 
@@ -530,12 +532,12 @@ sim_cards ──1:N──> rating_results
   {
     "zoneCode": "ZONE_EU",
     "countries": ["208-01", "262-*", "234-*"],
-    "ratePerKb": 0.005
+    "ratePerMb": 5.12
   },
   {
     "zoneCode": "ZONE_REST",
     "countries": ["*"],
-    "ratePerKb": 0.02
+    "ratePerMb": 20.48
   }
 ]
 ```
@@ -564,7 +566,7 @@ sim_cards ──1:N──> rating_results
 | roaming_profile_id | uuid | NOT NULL, FK→roaming_profiles | 所属 Profile 快照 |
 | mcc | char(3) | NOT NULL | 移动国家代码 |
 | mnc | varchar(3) | NOT NULL | 移动网络代码（2~3 位数字或 `*`） |
-| rate_per_kb | numeric(18,8) | NOT NULL | 单价（currency/KB） |
+| rate_per_mb | numeric(18,8) | NOT NULL | 单价（currency/MB） |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
 | | | UNIQUE(roaming_profile_id, mcc, mnc) | 同一快照内 MCC+MNC 唯一 |
@@ -647,7 +649,7 @@ sim_cards ──1:N──> rating_results
 | customer_id | uuid | NOT NULL, FK→customers | 企业 |
 | name | text | NOT NULL | 展示名称（允许重复） |
 | test_period_days | int | — | 测试期天数 |
-| test_quota_kb | bigint | — | 测试流量配额（KB） |
+| test_quota_mb | bigint | — | 测试流量配额（MB） |
 | test_expiry_condition | text | — | PERIOD_ONLY / QUOTA_ONLY / PERIOD_OR_QUOTA |
 | test_expiry_action | text | — | ACTIVATED / DEACTIVATED |
 | commitment_period_months | int | — | 承诺期（月） |
@@ -826,8 +828,8 @@ sim_cards ──1:N──> rating_results
 | matched_package_version_id | uuid | FK→package_versions | 匹配产品包版本 |
 | matched_price_plan_id | uuid | FK→price_plans | 匹配资费快照 |
 | classification | text | NOT NULL | 分类 |
-| charged_kb | bigint | — | 计费流量 |
-| rate_per_kb | numeric(18,8) | — | 单价 |
+| charged_mb | numeric(18,6) | — | 计费流量 (MB) |
+| rate_per_mb | numeric(18,8) | — | 单价 (currency/MB) |
 | amount | numeric(12,2) | NOT NULL, default 0 | 金额 |
 | currency | text | — | 币种 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |

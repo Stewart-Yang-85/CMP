@@ -106,6 +106,25 @@ async function detectSimResellerColumn(supabase) {
   }
 }
 
+/**
+ * Resolve auth.resellerId (may be resellers.id or tenants.tenant_id) to both IDs.
+ * tenants.parent_id uses tenant_id; reseller_suppliers and sims.reseller_id use resellers.id.
+ */
+async function resolveResellerIdentity(supabase, rawResellerId) {
+  if (!rawResellerId || !/^[0-9a-f-]{36}$/i.test(String(rawResellerId))) return null
+  const id = String(rawResellerId).trim()
+  const rows = await supabase.select(
+    'resellers',
+    `select=id,tenant_id&or=(id.eq.${encodeURIComponent(id)},tenant_id.eq.${encodeURIComponent(id)})&limit=1`
+  )
+  const row = Array.isArray(rows) && rows[0] ? rows[0] : null
+  if (!row) return null
+  return {
+    resellerId: row.id ? String(row.id) : null,
+    tenantId: row.tenant_id ? String(row.tenant_id) : null,
+  }
+}
+
 export function registerSimPhase4Routes({ app, prefix, deps }) {
   const {
     createSupabaseRestClient,
@@ -136,7 +155,10 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       return null
     }
     if (roleScope === 'platform' || role === 'platform_admin') return { scope: 'platform' }
-    if (roleScope === 'reseller' && role && resellerSalesRoles.has(role)) return { scope: 'reseller' }
+    if (roleScope === 'reseller' && role && resellerSalesRoles.has(role)) {
+      const rid = req?.cmpAuth?.resellerId ?? req?.tenantScope?.resellerId ?? null
+      return { scope: 'reseller', resellerId: rid ? String(rid) : null }
+    }
     if (roleScope === 'customer') return { scope: 'customer' }
     if (roleScope === 'department') return { scope: 'department' }
     sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
@@ -150,7 +172,12 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       return null
     }
     if (roleScope === 'platform' || role === 'platform_admin') return { scope: 'platform' }
-    if (roleScope === 'reseller' && role && resellerSalesRoles.has(role)) return { scope: 'reseller' }
+    if (roleScope === 'reseller' && role && resellerSalesRoles.has(role)) {
+      const rid = req?.cmpAuth?.resellerId ?? req?.tenantScope?.resellerId ?? null
+      return { scope: 'reseller', resellerId: rid ? String(rid) : null }
+    }
+    if (roleScope === 'customer') return { scope: 'customer' }
+    if (roleScope === 'department') return { scope: 'department' }
     sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
     return null
   }
@@ -168,6 +195,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     let enterpriseId = null
     let departmentId = null
     let resellerId = null
+    let resellerTenantIdForCsv = null
     const roleScope = getRoleScope(req)
     const role = req?.cmpAuth?.role ? String(req.cmpAuth.role) : null
 
@@ -178,10 +206,28 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       if (enterpriseIdQuery && !isValidUuid(enterpriseIdQuery)) {
         return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
       }
-      resellerId = resellerIdQuery
+      if (resellerIdQuery) {
+        const resolved = await resolveResellerIdentity(supabase, resellerIdQuery)
+        if (resolved) {
+          resellerId = resolved.resellerId
+          resellerTenantIdForCsv = resolved.tenantId
+        } else {
+          resellerId = resellerIdQuery
+          resellerTenantIdForCsv = resellerIdQuery
+        }
+      }
       enterpriseId = enterpriseIdQuery
     } else if (roleScope === 'reseller') {
-      resellerId = req?.cmpAuth?.resellerId ? String(req.cmpAuth.resellerId) : null
+      const raw = req?.cmpAuth?.resellerId ? String(req.cmpAuth.resellerId) : null
+      if (raw) {
+        const resolved = await resolveResellerIdentity(supabase, raw)
+        if (resolved) {
+          resellerId = resolved.resellerId
+          resellerTenantIdForCsv = resolved.tenantId
+        } else {
+          resellerId = raw
+        }
+      }
       if (enterpriseIdQuery) {
         if (!isValidUuid(enterpriseIdQuery)) {
           return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
@@ -280,13 +326,14 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     const includeResellerInventory = !enterpriseId && roleScope === 'reseller' && !!resellerId
     const hasSimResellerColumn = await detectSimResellerColumn(supabase)
     let resellerEnterpriseIds = null
-    let resellerSupplierIds = null
-    if (!enterpriseId && resellerId && (roleScope === 'platform' || roleScope === 'reseller' || role === 'platform_admin')) {
-      const resellerRows = await supabase.select('tenants', `select=tenant_id&parent_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.ENTERPRISE`)
+    let resellerSupplierIdsCsv = null
+    const tenantIdForCsvEnterprises = resellerTenantIdForCsv || resellerId
+    if (!enterpriseId && resellerId && tenantIdForCsvEnterprises && (roleScope === 'platform' || roleScope === 'reseller' || role === 'platform_admin')) {
+      const resellerRows = await supabase.select('tenants', `select=tenant_id&parent_id=eq.${encodeURIComponent(tenantIdForCsvEnterprises)}&tenant_type=eq.ENTERPRISE`)
       resellerEnterpriseIds = (Array.isArray(resellerRows) ? resellerRows : []).map((t) => String(t.tenant_id))
-      if (!hasSimResellerColumn) {
+      if (!hasSimResellerColumn && resellerId) {
         const resellerSupplierRows = await supabase.select('reseller_suppliers', `select=supplier_id&reseller_id=eq.${encodeURIComponent(resellerId)}`)
-        resellerSupplierIds = Array.from(new Set(
+        resellerSupplierIdsCsv = Array.from(new Set(
           (Array.isArray(resellerSupplierRows) ? resellerSupplierRows : [])
             .map((row) => (row?.supplier_id ? String(row.supplier_id) : ''))
             .filter(Boolean)
@@ -299,32 +346,31 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     if (!enterpriseId && resellerEnterpriseIds) {
       if (resellerId) {
         if (hasSimResellerColumn) {
+          const resellerIdValues = [resellerId]
+          if (resellerTenantIdForCsv && resellerTenantIdForCsv !== resellerId) resellerIdValues.push(resellerTenantIdForCsv)
+          const resellerIdFilter = resellerIdValues.length > 1
+            ? `reseller_id=in.(${resellerIdValues.map((id) => encodeURIComponent(id)).join(',')})`
+            : `reseller_id=eq.${encodeURIComponent(resellerId)}`
           if (resellerEnterpriseIds.length) {
-            filters.push(`or=(enterprise_id.in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')}),reseller_id.eq.${encodeURIComponent(resellerId)})`)
+            filters.push(`or=(enterprise_id.in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')}),${resellerIdFilter})`)
           } else {
-            filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
+            filters.push(resellerIdFilter)
           }
         } else {
-          const parts = []
-          if (resellerEnterpriseIds.length) {
-            parts.push(`enterprise_id.in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`)
-          }
-          if (resellerSupplierIds?.length) {
-            parts.push(`supplier_id.in.(${resellerSupplierIds.map((id) => encodeURIComponent(id)).join(',')})`)
-          } else if (includeResellerInventory && !resellerEnterpriseIds.length) {
-            res.setHeader('Content-Type', 'text/csv; charset=utf-8')
-            res.setHeader('Content-Disposition', 'attachment; filename="sims.csv"')
-            res.send(`${headers.map(escapeCsv).join(',')}\n`)
-            return
-          }
-          if (parts.length > 1) {
-            filters.push(`or=(${parts.join(',')})`)
-          } else if (parts.length === 1) {
-            filters.push(parts[0])
+          const rsIds = resellerSupplierIdsCsv || []
+          if (resellerEnterpriseIds.length > 0 && rsIds.length === 0) {
+            filters.push(`enterprise_id=in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`)
+          } else if (resellerEnterpriseIds.length > 0 && rsIds.length > 0) {
+            const assignedFilter = `enterprise_id.in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`
+            const unassignedFilter = `and(enterprise_id.is.null,supplier_id.in.(${rsIds.map((id) => encodeURIComponent(id)).join(',')}))`
+            filters.push(`or=(${assignedFilter},${unassignedFilter})`)
+          } else if (rsIds.length > 0) {
+            filters.push(`and(enterprise_id.is.null,supplier_id.in.(${rsIds.map((id) => encodeURIComponent(id)).join(',')}))`)
           } else {
+            const csvHeaders = ['simId', 'iccid', 'imsi', 'msisdn', 'status', 'lifecycleSubStatus', 'upstreamStatus', 'upstreamStatusUpdatedAt', 'formFactor', 'activationCode', ...(includeSensitive ? ['supplierId', 'supplierName', 'operatorId', 'operatorName', 'mcc', 'mnc'] : []), 'apn', ...(includeSensitive ? ['resellerId', 'resellerName'] : []), 'enterpriseId', 'enterpriseName', 'departmentId', 'departmentName', 'activationDate', 'totalUsageBytes', 'imei']
             res.setHeader('Content-Type', 'text/csv; charset=utf-8')
             res.setHeader('Content-Disposition', 'attachment; filename="sims.csv"')
-            res.send(`${headers.map(escapeCsv).join(',')}\n`)
+            res.send(`${csvHeaders.map(escapeCsv).join(',')}\n`)
             return
           }
         }
@@ -856,15 +902,32 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     }
     let enterpriseId = getEnterpriseIdFromReq(req)
     let resellerId = null
+    let resellerTenantId = null
     if (roleScope === 'reseller') {
-      resellerId = auth?.resellerId ? String(auth.resellerId) : null
+      const raw = auth?.resellerId ? String(auth.resellerId) : null
+      if (raw) {
+        const resolved = await resolveResellerIdentity(supabase, raw)
+        if (resolved) {
+          resellerId = resolved.resellerId
+          resellerTenantId = resolved.tenantId
+        }
+      }
       if (enterpriseIdQuery) {
         enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, enterpriseIdQuery)
         if (!enterpriseId) return
       }
     } else if (roleScope === 'platform') {
       if (enterpriseIdQuery) enterpriseId = enterpriseIdQuery
-      if (resellerIdQuery) resellerId = resellerIdQuery
+      if (resellerIdQuery) {
+        const resolved = await resolveResellerIdentity(supabase, resellerIdQuery)
+        if (resolved) {
+          resellerId = resolved.resellerId
+          resellerTenantId = resolved.tenantId
+        } else {
+          resellerId = resellerIdQuery
+          resellerTenantId = resellerIdQuery
+        }
+      }
     }
     const departmentId = roleScope === 'department' ? getDepartmentIdFromReq(req) : await resolveDepartmentForEnterprise(req, res, supabase, enterpriseId, departmentIdQuery)
     if (departmentIdQuery && roleScope !== 'department' && departmentIdQuery && !departmentId) return
@@ -873,8 +936,9 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     const hasSimResellerColumn = await detectSimResellerColumn(supabase)
     let resellerEnterpriseIds = null
     let resellerSupplierIds = null
-    if (!enterpriseId && resellerId) {
-      const resellerRows = await supabase.select('tenants', `select=tenant_id&parent_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.ENTERPRISE`)
+    const tenantIdForEnterprises = resellerTenantId || resellerId
+    if (!enterpriseId && resellerId && tenantIdForEnterprises) {
+      const resellerRows = await supabase.select('tenants', `select=tenant_id&parent_id=eq.${encodeURIComponent(tenantIdForEnterprises)}&tenant_type=eq.ENTERPRISE`)
       resellerEnterpriseIds = (Array.isArray(resellerRows) ? resellerRows : []).map((t) => String(t.tenant_id))
       if (!hasSimResellerColumn) {
         const resellerSupplierRows = await supabase.select('reseller_suppliers', `select=supplier_id&reseller_id=eq.${encodeURIComponent(resellerId)}`)
@@ -891,25 +955,25 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     if (!enterpriseId && resellerEnterpriseIds) {
       if (resellerId) {
         if (hasSimResellerColumn) {
+          const resellerIdValues = [resellerId]
+          if (resellerTenantId && resellerTenantId !== resellerId) resellerIdValues.push(resellerTenantId)
+          const resellerIdFilter = resellerIdValues.length > 1
+            ? `reseller_id=in.(${resellerIdValues.map((id) => encodeURIComponent(id)).join(',')})`
+            : `reseller_id=eq.${encodeURIComponent(resellerId)}`
           if (resellerEnterpriseIds.length) {
-            filters.push(`or=(enterprise_id.in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')}),reseller_id.eq.${encodeURIComponent(resellerId)})`)
+            filters.push(`or=(enterprise_id.in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')}),${resellerIdFilter})`)
           } else {
-            filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
+            filters.push(resellerIdFilter)
           }
         } else {
-          const parts = []
-          if (resellerEnterpriseIds.length) {
-            parts.push(`enterprise_id.in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`)
-          }
-          if (resellerSupplierIds?.length) {
-            parts.push(`supplier_id.in.(${resellerSupplierIds.map((id) => encodeURIComponent(id)).join(',')})`)
-          } else if (includeResellerInventory && !resellerEnterpriseIds.length) {
-            return res.json({ items: [], total: 0, page, pageSize: limit })
-          }
-          if (parts.length > 1) {
-            filters.push(`or=(${parts.join(',')})`)
-          } else if (parts.length === 1) {
-            filters.push(parts[0])
+          if (resellerEnterpriseIds.length > 0 && (!resellerSupplierIds || resellerSupplierIds.length === 0)) {
+            filters.push(`enterprise_id=in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`)
+          } else if (resellerEnterpriseIds.length > 0 && resellerSupplierIds && resellerSupplierIds.length > 0) {
+            const assignedFilter = `enterprise_id.in.(${resellerEnterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`
+            const unassignedFilter = `and(enterprise_id.is.null,supplier_id.in.(${resellerSupplierIds.map((id) => encodeURIComponent(id)).join(',')}))`
+            filters.push(`or=(${assignedFilter},${unassignedFilter})`)
+          } else if (resellerSupplierIds && resellerSupplierIds.length > 0) {
+            filters.push(`and(enterprise_id.is.null,supplier_id.in.(${resellerSupplierIds.map((id) => encodeURIComponent(id)).join(',')}))`)
           } else {
             return res.json({ items: [], total: 0, page, pageSize: limit })
           }
@@ -1090,46 +1154,46 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     let resellerName = null
 
     if (sim.enterprise_id) {
-      const { data: entRows } = await supabase.select('tenants', `select=tenant_id,name,parent_id&tenant_id=eq.${sim.enterprise_id}`)
+      const entRows = await supabase.select('tenants', `select=tenant_id,name,parent_id&tenant_id=eq.${sim.enterprise_id}`)
       const ent = Array.isArray(entRows) ? entRows[0] : null
       if (ent) {
         enterpriseName = ent.name
         if (roleScope === 'reseller') {
           const authResellerId = auth.resellerId ? String(auth.resellerId) : null
           if (String(ent.parent_id) !== authResellerId) {
-            return sendError(res, 403, 'FORBIDDEN', 'Access denied.')
+            return sendError(res, 403, 'FORBIDDEN', 'SIM enterprise does not belong to your reseller.')
           }
         }
         resellerId = ent.parent_id
         if (resellerId) {
-          const { data: resRows } = await supabase.select('tenants', `select=name&tenant_id=eq.${resellerId}`)
+          const resRows = await supabase.select('tenants', `select=name&tenant_id=eq.${resellerId}`)
           if (Array.isArray(resRows) && resRows[0]) {
             resellerName = resRows[0].name
           }
         }
       } else if (roleScope === 'reseller') {
-        return sendError(res, 403, 'FORBIDDEN', 'Access denied.')
+        return sendError(res, 403, 'FORBIDDEN', 'SIM enterprise not found in tenant hierarchy.')
       }
     } else {
       if (roleScope === 'reseller') {
-        return sendError(res, 403, 'FORBIDDEN', 'Access denied (SIM not assigned to enterprise).')
+        return sendError(res, 403, 'FORBIDDEN', 'SIM is not assigned to any enterprise.')
       }
     }
 
     if (roleScope === 'customer' || roleScope === 'department') {
-      if (String(sim.enterprise_id) !== String(userEnterpriseId)) {
-        return sendError(res, 403, 'FORBIDDEN', 'Access denied.')
+      if (!sim.enterprise_id || !userEnterpriseId || String(sim.enterprise_id) !== String(userEnterpriseId)) {
+        return sendError(res, 403, 'FORBIDDEN', 'SIM does not belong to your enterprise.')
       }
       if (roleScope === 'department') {
         const userDeptId = getDepartmentIdFromReq(req)
         if (sim.department_id && String(sim.department_id) !== String(userDeptId)) {
-          return sendError(res, 403, 'FORBIDDEN', 'Access denied.')
+          return sendError(res, 403, 'FORBIDDEN', 'SIM does not belong to your department.')
         }
       }
     }
 
     if (sim.department_id) {
-      const { data: deptRows } = await supabase.select('tenants', `select=name&tenant_id=eq.${sim.department_id}`)
+      const deptRows = await supabase.select('tenants', `select=name&tenant_id=eq.${sim.department_id}`)
       if (Array.isArray(deptRows) && deptRows[0]) departmentName = deptRows[0].name
     }
 

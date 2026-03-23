@@ -64,6 +64,13 @@ create table if not exists customers (
   unique (reseller_id, name)
 );
 
+-- Ensure tenant_id columns exist (may be missing from legacy 0035 schema)
+alter table if exists resellers
+  add column if not exists tenant_id uuid references tenants(tenant_id) unique;
+
+alter table if exists customers
+  add column if not exists tenant_id uuid references tenants(tenant_id) unique;
+
 -- from 0031: only the unique index is useful (ALTER columns already in CREATE above)
 create unique index if not exists idx_customers_api_key on customers(api_key);
 

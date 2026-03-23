@@ -228,7 +228,23 @@ graph TD
     style SPI fill:#ff6b6b
 ```
 
-### 3.3 数据同步
+### 3.3 RBAC 权限配置（当前实现）
+
+权限按 `roleScope`（platform/reseller/customer/department）分配，定义于 `defaultPermissionsByRoleScope`（`src/app.js`、`src/middleware/rbac.ts`）。请求路径由 `resolvePermissionForRequest` 映射为权限码，`permissionGuard` 校验用户是否具备该权限。
+
+| 权限码 | 说明 | 典型路径 |
+|:-------|:-----|:---------|
+| bills.list | 账单列表 | GET /v1/bills |
+| bills.read | 账单详情 | GET /v1/bills/{id} |
+| bills.export | 账单导出 | GET /v1/bills:csv |
+| bills.mark_paid | 标记已付 | POST /v1/bills/{id}:mark-paid |
+| bills.adjust | 调账 | POST /v1/bills/{id}:adjust |
+
+**禁止 enterprise 用户访问 bills 模块**：从 `customer` 和 `department` 的 `defaultPermissionsByRoleScope` 中移除 `bills.list`、`bills.read`、`bills.export`、`bills.mark_paid`、`bills.adjust` 即可。platform_admin 与 platform scope 拥有全量权限，不受此配置限制。
+
+**V1.1 规划**：Phase 23 将实现 RBAC 数据库驱动配置（roles/permissions/role_permissions 三表），支持 reseller_admin、reseller_sales_director、reseller_sales、reseller_finance、customer_admin、customer_ops 六种角色的权限按表动态配置。
+
+### 3.4 数据同步
 
 | 源 | 目标 | 同步方式 | 频率 |
 |:---|:-----|:---------|:-----|
@@ -239,7 +255,7 @@ graph TD
 | sim_cards 状态变更 | sim_state_history | 触发器/应用层 | 实时 |
 | Dunning 检测 | dunning_records + dunning_actions | Cron 轮询 | 每日 |
 
-### 3.4 领域模型 / ER 图
+### 3.5 领域模型 / ER 图
 
 > 包含所有核心实体及其关系，新增表以 NEW 标注
 
@@ -431,7 +447,7 @@ erDiagram
     }
 ```
 
-### 3.5 Schema 定义
+### 3.6 Schema 定义
 
 > 仅包含本次新增表和字段变更，已有表结构参见 [data-model.md](./data-model.md) §4
 
@@ -1250,7 +1266,7 @@ graph TD
     F --> J{"配额剩余?"}
     H --> J
     J -->|"有配额"| K["扣减配额 In-Profile"]
-    J -->|"配额耗尽"| L["按 overageRatePerKb 套外计费"]
+    J -->|"配额耗尽"| L["按 overageRatePerMb 套外计费"]
     I --> M["按 PAYG paygRates 独立计费"]
     M --> N["触发异常漫游告警"]
 
@@ -1307,7 +1323,7 @@ sequenceDiagram
 | subscriptions.subscription_kind | 读 | 区分 MAIN/ADD_ON |
 | package_versions.roaming_profile | 读 | 区域覆盖匹配 |
 | price_plan_versions.payg_rates | 读 | PAYG 费率查询 |
-| price_plan_versions.overage_rate_per_kb | 读 | 套外单价 |
+| price_plan_versions.overage_rate_per_mb | 读 | 套外单价 |
 | rating_results.classification | 写 | IN_PROFILE/OVERAGE/OUT_OF_PROFILE |
 | alerts.* | 写 | Out-of-Profile 时触发告警 |
 

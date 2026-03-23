@@ -36,11 +36,11 @@ function normalizePaygRates(paygRates, meta) {
     if (!rate) continue
     const zoneCode = String(rate.zoneCode || '').trim()
     const countries = Array.isArray(rate.countries) ? rate.countries.map((c) => String(c).trim()).filter(Boolean) : []
-    const ratePerKb = toNumber(rate.ratePerKb)
-    if (!zoneCode || !countries.length || ratePerKb === null || ratePerKb < 0) {
-      return { ok: false, message: 'paygRates must include zoneCode, countries[], and ratePerKb >= 0.' }
+    const ratePerMb = toNumber(rate.ratePerMb)
+    if (!zoneCode || !countries.length || ratePerMb === null || ratePerMb < 0) {
+      return { ok: false, message: 'paygRates must include zoneCode, countries[], and ratePerMb >= 0.' }
     }
-    zones[zoneCode] = { mccmnc: countries, ratePerKb }
+    zones[zoneCode] = { mccmnc: countries, ratePerMb }
   }
   return { ok: true, value: { zones, meta } }
 }
@@ -53,7 +53,7 @@ function denormalizePaygRates(paygRates) {
     out.push({
       zoneCode,
       countries: Array.isArray(zone.mccmnc) ? zone.mccmnc : [],
-      ratePerKb: zone.ratePerKb ?? 0,
+      ratePerMb: zone.ratePerMb ?? 0,
     })
   }
   return out
@@ -77,9 +77,9 @@ function normalizeCommercialTerms(input) {
   if (src.testPeriodDays !== undefined && (testPeriodDays === null || testPeriodDays < 0)) {
     return toError(400, 'BAD_REQUEST', 'commercialTerms.testPeriodDays must be >= 0.')
   }
-  const testQuotaKb = src.testQuotaKb === undefined ? null : toInteger(src.testQuotaKb)
-  if (src.testQuotaKb !== undefined && (testQuotaKb === null || testQuotaKb < 0)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms.testQuotaKb must be >= 0.')
+  const testQuotaMb = src.testQuotaMb === undefined ? null : toInteger(src.testQuotaMb)
+  if (src.testQuotaMb !== undefined && (testQuotaMb === null || testQuotaMb < 0)) {
+    return toError(400, 'BAD_REQUEST', 'commercialTerms.testQuotaMb must be >= 0.')
   }
   const rawExpiryCondition = String(src.testExpiryCondition ?? '').trim()
   if (rawExpiryCondition && !['PERIOD_ONLY', 'QUOTA_ONLY', 'PERIOD_OR_QUOTA'].includes(rawExpiryCondition)) {
@@ -101,7 +101,7 @@ function normalizeCommercialTerms(input) {
     ok: true,
     value: {
       ...(testPeriodDays !== null ? { testPeriodDays } : {}),
-      ...(testQuotaKb !== null ? { testQuotaKb } : {}),
+      ...(testQuotaMb !== null ? { testQuotaMb } : {}),
       testExpiryCondition: rawExpiryCondition || 'PERIOD_OR_QUOTA',
       testExpiryAction: rawExpiryAction || 'ACTIVATED',
       ...(commitmentPeriodMonths !== null ? { commitmentPeriodMonths } : {}),
@@ -545,11 +545,11 @@ function validatePayload(payload, options = {}) {
   const monthlyFee = toNumber(payload?.monthlyFee)
   const deactivatedMonthlyFee = toNumber(payload?.deactivatedMonthlyFee)
   const oneTimeFee = toNumber(payload?.oneTimeFee)
-  const quotaKb = toInteger(payload?.quotaKb)
+  const quotaMb = toInteger(payload?.quotaMb)
   const validityDays = toInteger(payload?.validityDays)
-  const perSimQuotaKb = toInteger(payload?.perSimQuotaKb)
-  const totalQuotaKb = toInteger(payload?.totalQuotaKb)
-  const overageRatePerKb = toNumber(payload?.overageRatePerKb)
+  const perSimQuotaMb = toInteger(payload?.perSimQuotaMb)
+  const totalQuotaMb = toInteger(payload?.totalQuotaMb)
+  const overageRatePerMb = toNumber(payload?.overageRatePerMb)
   const commercialTermsNormalized = normalizeCommercialTerms(payload?.commercialTerms)
   if (!commercialTermsNormalized.ok) return commercialTermsNormalized
   const controlPolicyNormalized = normalizeControlPolicy(payload?.controlPolicy)
@@ -559,7 +559,7 @@ function validatePayload(payload, options = {}) {
   if (!carrierServiceNormalized.ok) return carrierServiceNormalized
   if (type === 'ONE_TIME') {
     if (oneTimeFee === null || oneTimeFee < 0) return toError(400, 'BAD_REQUEST', 'oneTimeFee must be >= 0.')
-    if (quotaKb === null || quotaKb < 0) return toError(400, 'BAD_REQUEST', 'quotaKb must be >= 0.')
+    if (quotaMb === null || quotaMb < 0) return toError(400, 'BAD_REQUEST', 'quotaMb must be >= 0.')
     if (validityDays === null || validityDays < 1) return toError(400, 'BAD_REQUEST', 'validityDays must be > 0.')
     const boundary = String(payload?.expiryBoundary || '').trim()
     if (!['CALENDAR_DAY_END', 'DURATION_EXCLUSIVE_END'].includes(boundary)) {
@@ -576,29 +576,29 @@ function validatePayload(payload, options = {}) {
     }
   }
   if (type === 'SIM_DEPENDENT_BUNDLE') {
-    if (perSimQuotaKb === null || perSimQuotaKb < 0) {
-      return toError(400, 'BAD_REQUEST', 'perSimQuotaKb must be >= 0.')
+    if (perSimQuotaMb === null || perSimQuotaMb < 0) {
+      return toError(400, 'BAD_REQUEST', 'perSimQuotaMb must be >= 0.')
     }
   }
   if (type === 'FIXED_BUNDLE') {
-    if (totalQuotaKb === null || totalQuotaKb < 0) {
-      return toError(400, 'BAD_REQUEST', 'totalQuotaKb must be >= 0.')
+    if (totalQuotaMb === null || totalQuotaMb < 0) {
+      return toError(400, 'BAD_REQUEST', 'totalQuotaMb must be >= 0.')
     }
   }
   if (type === 'TIERED_VOLUME_PRICING') {
     const tiers = Array.isArray(payload?.tiers) ? payload.tiers : []
     if (!tiers.length) return toError(400, 'BAD_REQUEST', 'tiers must be provided.')
     for (const tier of tiers) {
-      const fromKb = toInteger(tier?.fromKb)
-      const toKb = toInteger(tier?.toKb)
-      const ratePerKb = toNumber(tier?.ratePerKb)
-      if (fromKb === null || fromKb < 0 || toKb === null || toKb <= fromKb || ratePerKb === null || ratePerKb < 0) {
-        return toError(400, 'BAD_REQUEST', 'tiers must include fromKb < toKb and ratePerKb >= 0.')
+      const fromMb = toInteger(tier?.fromMb)
+      const toMb = toInteger(tier?.toMb)
+      const ratePerMb = toNumber(tier?.ratePerMb)
+      if (fromMb === null || fromMb < 0 || toMb === null || toMb <= fromMb || ratePerMb === null || ratePerMb < 0) {
+        return toError(400, 'BAD_REQUEST', 'tiers must include fromMb < toMb and ratePerMb >= 0.')
       }
     }
   }
-  if (overageRatePerKb !== null && overageRatePerKb < 0) {
-    return toError(400, 'BAD_REQUEST', 'overageRatePerKb must be >= 0.')
+  if (overageRatePerMb !== null && overageRatePerMb < 0) {
+    return toError(400, 'BAD_REQUEST', 'overageRatePerMb must be >= 0.')
   }
   return {
     ok: true,
@@ -612,11 +612,11 @@ function validatePayload(payload, options = {}) {
       monthlyFee,
       deactivatedMonthlyFee,
       oneTimeFee,
-      quotaKb,
+      quotaMb,
       validityDays,
-      perSimQuotaKb,
-      totalQuotaKb,
-      overageRatePerKb,
+      perSimQuotaMb,
+      totalQuotaMb,
+      overageRatePerMb,
       tiers: Array.isArray(payload?.tiers) ? payload.tiers : null,
       paygRates: Array.isArray(payload?.paygRates) ? payload.paygRates : null,
       meta: buildMeta(payload, {
@@ -639,7 +639,7 @@ async function loadPricePlan(supabase, pricePlanId) {
 async function loadLatestVersion(supabase, pricePlanId) {
   const rows = await supabase.select(
     'price_plan_versions',
-    `select=price_plan_version_id,price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_kb,validity_days,per_sim_quota_kb,total_quota_kb,overage_rate_per_kb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc&limit=1`
+    `select=price_plan_version_id,price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc&limit=1`
   )
   return Array.isArray(rows) ? rows[0] : null
 }
@@ -656,11 +656,11 @@ function mapVersionResponse(version) {
     monthlyFee: version.monthly_fee,
     deactivatedMonthlyFee: version.deactivated_monthly_fee,
     oneTimeFee: version.one_time_fee,
-    quotaKb: version.quota_kb,
+    quotaMb: version.quota_mb,
     validityDays: version.validity_days,
-    perSimQuotaKb: version.per_sim_quota_kb,
-    totalQuotaKb: version.total_quota_kb,
-    overageRatePerKb: version.overage_rate_per_kb,
+    perSimQuotaMb: version.per_sim_quota_mb,
+    totalQuotaMb: version.total_quota_mb,
+    overageRatePerMb: version.overage_rate_per_mb,
     tiers: version.tiers ?? null,
     paygRates: denormalizePaygRates(version.payg_rates),
     commercialTerms: meta?.commercialTerms ?? null,
@@ -689,11 +689,11 @@ export async function createPricePlan({ supabase, enterpriseId, payload, audit }
     monthlyFee,
     deactivatedMonthlyFee,
     oneTimeFee,
-    quotaKb,
+    quotaMb,
     validityDays,
-    perSimQuotaKb,
-    totalQuotaKb,
-    overageRatePerKb,
+    perSimQuotaMb,
+    totalQuotaMb,
+    overageRatePerMb,
     tiers,
     paygRates,
     meta,
@@ -730,11 +730,11 @@ export async function createPricePlan({ supabase, enterpriseId, payload, audit }
         monthly_fee: monthlyFee ?? 0,
         deactivated_monthly_fee: deactivatedMonthlyFee ?? 0,
         one_time_fee: oneTimeFee ?? null,
-        quota_kb: quotaKb ?? null,
+        quota_mb: quotaMb ?? null,
         validity_days: validityDays ?? null,
-        per_sim_quota_kb: perSimQuotaKb ?? null,
-        total_quota_kb: totalQuotaKb ?? null,
-        overage_rate_per_kb: overageRatePerKb ?? null,
+        per_sim_quota_mb: perSimQuotaMb ?? null,
+        total_quota_mb: totalQuotaMb ?? null,
+        overage_rate_per_mb: overageRatePerMb ?? null,
         tiers: tiers ?? null,
         payg_rates: paygNormalize.value,
       },
@@ -787,7 +787,7 @@ export async function listPricePlans({ supabase, enterpriseId, type, status, pag
     const idFilter = ids.map((id) => encodeURIComponent(id)).join(',')
     const versionRows = await supabase.select(
       'price_plan_versions',
-      `select=price_plan_version_id,price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_kb,validity_days,per_sim_quota_kb,total_quota_kb,overage_rate_per_kb,tiers,payg_rates,created_at&price_plan_id=in.(${idFilter})&order=version.desc`
+      `select=price_plan_version_id,price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=in.(${idFilter})&order=version.desc`
     )
     versions = Array.isArray(versionRows) ? versionRows : []
   }
@@ -829,7 +829,7 @@ export async function getPricePlanDetail({ supabase, pricePlanId }) {
   if (!plan) return toError(404, 'NOT_FOUND', 'Price plan not found.')
   const versions = await supabase.select(
     'price_plan_versions',
-    `select=price_plan_version_id,price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_kb,validity_days,per_sim_quota_kb,total_quota_kb,overage_rate_per_kb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc`
+    `select=price_plan_version_id,price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc`
   )
   const list = Array.isArray(versions) ? versions : []
   const currentVersion = list.length ? list[0] : null
@@ -885,11 +885,11 @@ export async function createPricePlanVersion({ supabase, pricePlanId, payload, a
     monthlyFee,
     deactivatedMonthlyFee,
     oneTimeFee,
-    quotaKb,
+    quotaMb,
     validityDays,
-    perSimQuotaKb,
-    totalQuotaKb,
-    overageRatePerKb,
+    perSimQuotaMb,
+    totalQuotaMb,
+    overageRatePerMb,
     tiers,
     paygRates,
     meta,
@@ -908,11 +908,11 @@ export async function createPricePlanVersion({ supabase, pricePlanId, payload, a
       monthly_fee: monthlyFee ?? 0,
       deactivated_monthly_fee: deactivatedMonthlyFee ?? 0,
       one_time_fee: oneTimeFee ?? null,
-      quota_kb: quotaKb ?? null,
+      quota_mb: quotaMb ?? null,
       validity_days: validityDays ?? null,
-      per_sim_quota_kb: perSimQuotaKb ?? null,
-      total_quota_kb: totalQuotaKb ?? null,
-      overage_rate_per_kb: overageRatePerKb ?? null,
+      per_sim_quota_mb: perSimQuotaMb ?? null,
+      total_quota_mb: totalQuotaMb ?? null,
+      overage_rate_per_mb: overageRatePerMb ?? null,
       tiers: tiers ?? null,
       payg_rates: paygNormalize.value,
     },

@@ -51,14 +51,27 @@ function addDays(date: Date, days: number) {
   return d
 }
 
-async function loadEnterpriseList(supabase: SupabaseClient, enterpriseId?: string | null) {
+async function loadEnterpriseList(
+  supabase: SupabaseClient,
+  enterpriseId?: string | null,
+  resellerId?: string | null
+) {
   if (enterpriseId) {
     const rows = await supabase.select(
       'tenants',
       `select=tenant_id,parent_id,name&tenant_id=eq.${encodeURIComponent(enterpriseId)}&tenant_type=eq.ENTERPRISE&limit=1`
     )
     const row = Array.isArray(rows) ? (rows[0] as Record<string, any>) : null
-    return row ? [row] : []
+    if (!row) return []
+    if (resellerId && String(row.parent_id || '') !== String(resellerId)) return []
+    return [row]
+  }
+  if (resellerId) {
+    const rows = await supabase.select(
+      'tenants',
+      `select=tenant_id,parent_id,name&parent_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.ENTERPRISE`
+    )
+    return Array.isArray(rows) ? (rows as Record<string, any>[]) : []
   }
   const rows = await supabase.select('tenants', 'select=tenant_id,parent_id,name&tenant_type=eq.ENTERPRISE')
   return Array.isArray(rows) ? (rows as Record<string, any>[]) : []
@@ -124,7 +137,7 @@ function aggregateLineItems({
       } else {
         current.usageCharge += Number(item.amount ?? 0)
       }
-      current.usageKb += Number(item.metadata?.chargedKb ?? 0)
+      current.usageKb += Number(item.metadata?.chargedMb ?? 0)
       if (pkgId) current.packageVersionId = pkgId
     }
     simMap.set(simId, current)
@@ -209,7 +222,7 @@ export async function runBillingGenerate({
     return toError(400, 'BAD_REQUEST', 'period must be YYYY-MM.')
   }
   const { start, endExclusive, endInclusive } = parsePeriod(period)
-  const enterprises = await loadEnterpriseList(supabase, enterpriseId ?? null)
+  const enterprises = await loadEnterpriseList(supabase, enterpriseId ?? null, resellerId ?? null)
   if (!enterprises.length) {
     return toError(404, 'RESOURCE_NOT_FOUND', 'No enterprises found to bill.')
   }

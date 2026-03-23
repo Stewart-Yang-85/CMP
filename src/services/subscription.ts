@@ -306,6 +306,7 @@ export async function switchSubscription({
   supabase,
   enterpriseId,
   iccid,
+  fromSubscriptionId,
   newPackageVersionId,
   effectiveStrategy,
   tenantFilter,
@@ -314,6 +315,7 @@ export async function switchSubscription({
   supabase: SupabaseClient
   enterpriseId: string
   iccid: unknown
+  fromSubscriptionId?: unknown
   newPackageVersionId: unknown
   effectiveStrategy?: unknown
   tenantFilter: string
@@ -328,7 +330,7 @@ export async function switchSubscription({
   }
   const pkgId = String(newPackageVersionId || '').trim()
   if (!isValidUuid(pkgId)) {
-    return toError(400, 'BAD_REQUEST', 'newPackageVersionId is required and must be a valid uuid.')
+    return toError(400, 'BAD_REQUEST', 'toPackageVersionId is required and must be a valid uuid.')
   }
   const sim = await loadSimByIccid(supabase, iccidValue, tenantFilter)
   if (!sim) {
@@ -351,6 +353,9 @@ export async function switchSubscription({
   const from = Array.isArray(current) ? (current[0] as Record<string, unknown>) : null
   if (!from?.subscription_id) {
     return toError(404, 'SUBSCRIPTION_NOT_FOUND', 'No active MAIN subscription.')
+  }
+  if (fromSubscriptionId && String(from.subscription_id) !== String(fromSubscriptionId).trim()) {
+    return toError(400, 'BAD_REQUEST', 'fromSubscriptionId does not match the current MAIN subscription for this SIM.')
   }
   const pkg = await loadPackageVersion(supabase, pkgId)
   if (!pkg || String(pkg.status || '').toUpperCase() !== 'PUBLISHED') {

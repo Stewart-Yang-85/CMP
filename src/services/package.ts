@@ -87,20 +87,20 @@ function normalizeCommercialTerms(input: unknown): ServiceResult<Record<string, 
   }
   const src = input as any
   const testPeriodDaysRaw = src.testPeriodDays
-  const testQuotaKbRaw = src.testQuotaKb
+  const testQuotaMbRaw = src.testQuotaMb
   const commitmentPeriodMonthsRaw = src.commitmentPeriodMonths
   const testExpiryConditionRaw = src.testExpiryCondition
   const testExpiryActionRaw = src.testExpiryAction
   const testPeriodDays = testPeriodDaysRaw === undefined ? undefined : toInteger(testPeriodDaysRaw)
-  const testQuotaKb = testQuotaKbRaw === undefined ? undefined : toInteger(testQuotaKbRaw)
+  const testQuotaMb = testQuotaMbRaw === undefined ? undefined : toInteger(testQuotaMbRaw)
   const commitmentPeriodMonths = commitmentPeriodMonthsRaw === undefined ? undefined : toInteger(commitmentPeriodMonthsRaw)
   const testExpiryCondition = testExpiryConditionRaw === undefined ? undefined : String(testExpiryConditionRaw).trim().toUpperCase()
   const testExpiryAction = testExpiryActionRaw === undefined ? undefined : String(testExpiryActionRaw).trim().toUpperCase()
   if (testPeriodDays !== undefined && (testPeriodDays === null || testPeriodDays < 0)) {
     return toError(400, 'BAD_REQUEST', 'commercialTerms.testPeriodDays must be a non-negative integer.')
   }
-  if (testQuotaKb !== undefined && (testQuotaKb === null || testQuotaKb < 0)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms.testQuotaKb must be a non-negative integer.')
+  if (testQuotaMb !== undefined && (testQuotaMb === null || testQuotaMb < 0)) {
+    return toError(400, 'BAD_REQUEST', 'commercialTerms.testQuotaMb must be a non-negative integer.')
   }
   if (commitmentPeriodMonths !== undefined && (commitmentPeriodMonths === null || commitmentPeriodMonths < 0)) {
     return toError(400, 'BAD_REQUEST', 'commercialTerms.commitmentPeriodMonths must be a non-negative integer.')
@@ -117,7 +117,7 @@ function normalizeCommercialTerms(input: unknown): ServiceResult<Record<string, 
     ok: true,
     value: {
       ...(testPeriodDays !== undefined ? { testPeriodDays } : {}),
-      ...(testQuotaKb !== undefined ? { testQuotaKb } : {}),
+      ...(testQuotaMb !== undefined ? { testQuotaMb } : {}),
       ...(testExpiryCondition !== undefined ? { testExpiryCondition } : {}),
       ...(testExpiryAction !== undefined ? { testExpiryAction } : {}),
       ...(commitmentPeriodMonths !== undefined ? { commitmentPeriodMonths } : {}),
@@ -666,15 +666,13 @@ export async function createCarrierService({
 }): Promise<ServiceResult<Record<string, unknown>>> {
   const normalized = await validateCarrierServiceModule({ supabase, payload })
   if (!normalized.ok) return normalized
-  const enterpriseIdResult = normalizeOptionalTenantId(payload?.enterpriseId, 'enterpriseId')
-  if (!enterpriseIdResult.ok) return enterpriseIdResult
   const resellerIdResult = normalizeOptionalTenantId(payload?.resellerId, 'resellerId')
   if (!resellerIdResult.ok) return resellerIdResult
   const carrierServiceConfig = normalized.value.carrierServiceConfig
   const rows = await supabase.insert(
     'carrier_service_modules',
     {
-      enterprise_id: enterpriseIdResult.value,
+      enterprise_id: null,
       reseller_id: resellerIdResult.value,
       supplier_id: (carrierServiceConfig as any).supplierId,
       operator_id: (carrierServiceConfig as any).operatorId,
@@ -687,7 +685,7 @@ export async function createCarrierService({
   await writeAuditLog(supabase, {
     actor_user_id: audit?.actorUserId ?? null,
     actor_role: audit?.actorRole ?? null,
-    tenant_id: enterpriseIdResult.value ?? null,
+    tenant_id: null,
     action: 'CARRIER_SERVICE_CREATED',
     target_type: 'CARRIER_SERVICE',
     target_id: (created as any).carrier_service_id,

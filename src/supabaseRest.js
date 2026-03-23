@@ -82,6 +82,12 @@ function mapSupabaseError(status, text) {
     const label = field ? `${field} not found.` : 'resource not found.'
     return makeClientError(404, 'RESOURCE_NOT_FOUND', label, body)
   }
+  if (code === '23505' || message.includes('duplicate key value violates unique constraint')) {
+    const dupMatch = details.match(/Key \(([^)]+)\)=\(([^)]+)\) already exists/)
+    const dupField = dupMatch ? dupMatch[1] : null
+    const label = dupField ? `${dupField} already exists.` : 'duplicate record.'
+    return makeClientError(409, 'DUPLICATE', label, body)
+  }
   if (message.includes('invalid input syntax for type uuid')) {
     return makeClientError(400, 'BAD_REQUEST', 'invalid uuid.', body)
   }

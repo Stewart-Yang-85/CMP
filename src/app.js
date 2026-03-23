@@ -602,6 +602,8 @@ async function hasPermission(req, permission) {
   const roleScope = getRoleScope(req)
   const role = req?.cmpAuth?.role ? String(req.cmpAuth.role) : null
   if (roleScope === 'platform' || role === 'platform_admin') return true
+  // Reseller 出账：当前仅 reseller_admin；后续可改为 DB RBAC 的 billing.generate 权限集
+  if (permission === 'billing.generate' && roleScope === 'reseller' && role === 'reseller_admin') return true
   const perms = await getEffectivePermissions(req)
   return perms.includes(permission)
 }
@@ -629,6 +631,9 @@ function resolvePermissionForRequest(req) {
   if (path.startsWith('/v1/subscriptions') || path.startsWith('/subscriptions')) {
     if (method === 'POST') return 'subscriptions.create'
     if (method === 'GET') return 'subscriptions.read'
+  }
+  if (method === 'POST' && (path.endsWith('/billing:generate') || path.endsWith('/v1/billing:generate'))) {
+    return 'billing.generate'
   }
   if (/\/bills\/[^/]+:mark-paid$/.test(path)) return 'bills.mark_paid'
   if (/\/bills\/[^/]+:adjust$/.test(path)) return 'bills.adjust'
@@ -2132,21 +2137,60 @@ export function createApp() {
     }
 
     app.post(`${prefix}/billing:generate`, async (req, res) => {
-      const auth = ensurePlatformAdmin(req, res)
-      if (!auth) return
+      const authCtx = getAuthContext(req)
+      if (!authCtx.roleScope && !authCtx.role) {
+        return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
+      }
+      const isPlatform = authCtx.roleScope === 'platform' || authCtx.role === 'platform_admin'
+      const isResellerAdmin = authCtx.roleScope === 'reseller' && authCtx.role === 'reseller_admin'
+      if (!isPlatform && !isResellerAdmin) {
+        return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
+      }
+
       const period = req.body?.period ? String(req.body.period) : null
-      const enterpriseId = req.body?.enterpriseId ? String(req.body.enterpriseId) : null
+      const enterpriseIdRaw = req.body?.enterpriseId != null && req.body?.enterpriseId !== ''
+        ? String(req.body.enterpriseId)
+        : null
       if (!period) {
         return sendError(res, 400, 'BAD_REQUEST', 'period is required.')
       }
-      const payload = {
-        period,
-        enterpriseId,
-        traceId: getTraceId(res),
-        actorUserId: auth.userId ?? null,
-      }
       const traceId = getTraceId(res)
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId })
+
+      let payload = null
+      let actorUserId = authCtx.userId ?? null
+      if (isPlatform) {
+        payload = {
+          period,
+          enterpriseId: enterpriseIdRaw,
+          resellerId: null,
+          traceId,
+          actorUserId,
+          actorRole: authCtx.role ?? 'platform_admin',
+        }
+      } else {
+        const resellerId = authCtx.resellerId ? String(authCtx.resellerId) : null
+        if (!resellerId) {
+          return sendError(res, 403, 'FORBIDDEN', 'resellerId is required for reseller billing.')
+        }
+        let enterpriseId = null
+        if (enterpriseIdRaw) {
+          if (!isValidUuid(enterpriseIdRaw)) {
+            return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+          }
+          enterpriseId = await resolveEnterpriseForResellerScope(req, res, supabase, enterpriseIdRaw)
+          if (!enterpriseId) return
+        }
+        payload = {
+          period,
+          enterpriseId,
+          resellerId,
+          traceId,
+          actorUserId,
+          actorRole: authCtx.role ?? 'reseller_admin',
+        }
+      }
+
       const jobs = await supabase.insert('jobs', {
         job_type: 'BILLING_GENERATE',
         status: 'QUEUED',
@@ -2154,10 +2198,10 @@ export function createApp() {
         progress_total: 0,
         payload,
         request_id: JSON.stringify(payload),
-        actor_user_id: auth.userId ?? null,
+        actor_user_id: actorUserId,
       })
       const jobId = Array.isArray(jobs) ? jobs[0]?.job_id : null
-      res.status(202).json({ jobId, period, status: 'QUEUED' })
+      res.status(202).json({ jobId, period, status: 'QUEUED', enterpriseId: payload.enterpriseId ?? null, resellerId: payload.resellerId ?? null })
     })
     app.get(`${prefix}/bills`, async (req, res) => {
       const enterpriseId = getEnterpriseIdFromReq(req)
@@ -2943,16 +2987,20 @@ export function createApp() {
       }
       const enterpriseId = getEnterpriseIdFromReq(req)
       if (!(await ensureDepartmentSimAccess(req, res, supabase, sim.iccid, enterpriseId))) return
+
+      const { page, pageSize, offset } = parsePagination(req.query ?? {}, { defaultPage: 1, defaultPageSize: 20, maxPageSize: 1000 })
+
       const startDay = startOfDayUtc(startDate)
       const endDay = startOfDayUtc(endDate)
       const tenantFilter = enterpriseId ? `&enterprise_id=eq.${encodeURIComponent(enterpriseId)}` : ''
-      const rows = await supabase.select(
+      const baseFilter = `iccid=eq.${encodeURIComponent(sim.iccid)}${tenantFilter}&usage_day=gte.${encodeURIComponent(startDay.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(endDay.toISOString().slice(0, 10))}`
+      const { data, total } = await supabase.selectWithCount(
         'usage_daily_summary',
-        `select=usage_day,uplink_kb,downlink_kb,total_kb,created_at&iccid=eq.${encodeURIComponent(sim.iccid)}${tenantFilter}&usage_day=gte.${encodeURIComponent(startDay.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(endDay.toISOString().slice(0, 10))}&order=usage_day.asc`
+        `select=usage_day,uplink_kb,downlink_kb,total_kb,created_at&${baseFilter}&order=usage_day.asc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
       )
 
-      const data = Array.isArray(rows) ? rows : []
-      const out = data.map((r) => {
+      const rawRows = Array.isArray(data) ? data : []
+      const items = rawRows.map((r) => {
         const day = new Date(`${r.usage_day}T00:00:00.000Z`)
         const next = addDaysUtc(day, 1)
         return {
@@ -2965,7 +3013,12 @@ export function createApp() {
         }
       })
 
-      res.json(out)
+      res.json({
+        items,
+        page,
+        pageSize,
+        total: typeof total === 'number' ? total : items.length,
+      })
     })
 
     app.get(`${prefix}/enterprises/:enterpriseId/usage`, async (req, res) => {
@@ -3461,11 +3514,22 @@ export function createApp() {
       sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
       return null
     }
+    const resolveResellerIdentity = async (supabase, rawResellerId) => {
+      if (!rawResellerId || !/^[0-9a-f-]{36}$/i.test(String(rawResellerId))) return null
+      const id = String(rawResellerId).trim()
+      const rows = await supabase.select(
+        'resellers',
+        `select=id,tenant_id&or=(id.eq.${encodeURIComponent(id)},tenant_id.eq.${encodeURIComponent(id)})&limit=1`
+      )
+      const row = Array.isArray(rows) && rows[0] ? rows[0] : null
+      if (!row) return null
+      return { resellerId: row.id ? String(row.id) : null, tenantId: row.tenant_id ? String(row.tenant_id) : null }
+    }
     const resolveEnterpriseForReseller = async (req, res, supabase, enterpriseId) => {
       const auth = getAuth(req)
       if (auth.roleScope !== 'reseller') return enterpriseId
-      const resellerId = auth.resellerId
-      if (!resellerId) {
+      const rawResellerId = auth.resellerId
+      if (!rawResellerId) {
         sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
         return null
       }
@@ -3473,9 +3537,11 @@ export function createApp() {
         sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required for reseller scope.')
         return null
       }
+      const resolved = await resolveResellerIdentity(supabase, rawResellerId)
+      const resellerTenantId = resolved?.tenantId || rawResellerId
       const rows = await supabase.select('tenants', `select=tenant_id,parent_id,tenant_type&tenant_id=eq.${encodeURIComponent(enterpriseId)}&tenant_type=eq.ENTERPRISE&limit=1`)
       const row = Array.isArray(rows) ? rows[0] : null
-      if (!row || String(row.parent_id || '') !== String(resellerId)) {
+      if (!row || String(row.parent_id || '') !== String(resellerTenantId)) {
         sendError(res, 403, 'FORBIDDEN', 'enterpriseId is out of reseller scope.')
         return null
       }
@@ -4141,16 +4207,19 @@ export function createApp() {
         return sendError(res, 400, 'BAD_REQUEST', 'startDate and endDate are required and must be valid date-time.')
       }
 
+      const { page, pageSize, offset } = parsePagination(req.query ?? {}, { defaultPage: 1, defaultPageSize: 20, maxPageSize: 1000 })
+
       const startDay = startOfDayUtc(startDate)
       const endDay = startOfDayUtc(endDate)
       const tenantFilter = enterpriseId ? `&enterprise_id=eq.${encodeURIComponent(enterpriseId)}` : ''
-      const rows = await supabase.select(
+      const baseFilter = `iccid=eq.${encodeURIComponent(iccid)}${tenantFilter}&usage_day=gte.${encodeURIComponent(startDay.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(endDay.toISOString().slice(0, 10))}`
+      const { data, total } = await supabase.selectWithCount(
         'usage_daily_summary',
-        `select=usage_day,uplink_kb,downlink_kb,total_kb,created_at&iccid=eq.${encodeURIComponent(iccid)}${tenantFilter}&usage_day=gte.${encodeURIComponent(startDay.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(endDay.toISOString().slice(0, 10))}&order=usage_day.asc`
+        `select=usage_day,uplink_kb,downlink_kb,total_kb,created_at&${baseFilter}&order=usage_day.asc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
       )
 
-      const data = Array.isArray(rows) ? rows : []
-      const out = data.map((r) => {
+      const rawRows = Array.isArray(data) ? data : []
+      const items = rawRows.map((r) => {
         const day = new Date(`${r.usage_day}T00:00:00.000Z`)
         const next = addDaysUtc(day, 1)
         return {
@@ -4163,7 +4232,12 @@ export function createApp() {
         }
       })
 
-      res.json(out)
+      res.json({
+        items,
+        page,
+        pageSize,
+        total: typeof total === 'number' ? total : items.length,
+      })
     })
 
     app.get(`${prefix}/sims/:iccid/balance`, async (req, res) => {
@@ -4231,11 +4305,24 @@ export function createApp() {
       const query = req.query ?? {}
       let enterpriseId = query.enterpriseId ? String(query.enterpriseId).trim() : null
       if (roleScope === 'reseller') {
-        if (!enterpriseId || !isValidUuid(enterpriseId)) {
+        if (enterpriseId && isValidUuid(enterpriseId)) {
+          enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, enterpriseId)
+          if (!enterpriseId) return
+        } else if (!enterpriseId) {
+          const idField = parsed.field === 'sim_id' ? 'sim_id' : 'iccid'
+          const simRows = await supabase.select(
+            'sims',
+            `select=enterprise_id&${idField}=eq.${encodeURIComponent(parsed.value)}&limit=1`
+          )
+          const sim = Array.isArray(simRows) ? simRows[0] : null
+          if (!sim || !sim.enterprise_id) {
+            return sendError(res, 404, 'RESOURCE_NOT_FOUND', `sim ${parsed.value} not found.`)
+          }
+          enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, String(sim.enterprise_id))
+          if (!enterpriseId) return
+        } else {
           return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
         }
-        enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, enterpriseId)
-        if (!enterpriseId) return
       } else if (roleScope === 'platform') {
         const fromReq = getEnterpriseIdFromReq(req)
         enterpriseId = enterpriseId || (fromReq ? String(fromReq) : null)

@@ -31,18 +31,18 @@ function normalizeRoamingEntry(raw) {
   if (!raw || typeof raw !== 'object') return { ok: false, message: 'mccmncList entry must be an object.' }
   const mcc = String(raw.mcc ?? '').trim()
   const mnc = String(raw.mnc ?? '').trim()
-  const rateInput = raw.ratePerKb
+  const rateInput = raw.ratePerMb
   const normalized = normalizeMccMnc(`${mcc}-${mnc}`)
   if (!normalized) return { ok: false, message: `Invalid mcc/mnc value: ${mcc}-${mnc}` }
   if (rateInput === undefined || rateInput === null || String(rateInput).trim() === '') {
-    return { ok: false, message: `ratePerKb is required for ${mcc}-${mnc}` }
+    return { ok: false, message: `ratePerMb is required for ${mcc}-${mnc}` }
   }
   const rateValue = Number(rateInput)
   if (!Number.isFinite(rateValue) || rateValue < 0) {
-    return { ok: false, message: `ratePerKb must be a non-negative number for ${mcc}-${mnc}` }
+    return { ok: false, message: `ratePerMb must be a non-negative number for ${mcc}-${mnc}` }
   }
   const [normalizedMcc, normalizedMnc] = normalized.split('-')
-  return { ok: true, value: { mcc: normalizedMcc, mnc: normalizedMnc, ratePerKb: rateValue } }
+  return { ok: true, value: { mcc: normalizedMcc, mnc: normalizedMnc, ratePerMb: rateValue } }
 }
 
 function normalizeRoamingEntryList(list) {
@@ -69,7 +69,7 @@ function normalizeStoredRoamingEntries(rawList) {
       entryId,
       mcc: parsed.value.mcc,
       mnc: parsed.value.mnc,
-      ratePerKb: parsed.value.ratePerKb,
+      ratePerMb: parsed.value.ratePerMb,
       isDeleted: Boolean(raw?.isDeleted),
       updatedAt: String(raw?.updatedAt ?? '').trim() || now,
     })
@@ -817,14 +817,14 @@ export async function patchRoamingProfileEntries({
         const patch = normalizeRoamingEntry({
           mcc: operation?.mcc ?? current.mcc,
           mnc: operation?.mnc ?? current.mnc,
-          ratePerKb: operation?.ratePerKb ?? current.ratePerKb,
+          ratePerMb: operation?.ratePerMb ?? current.ratePerMb,
         })
         if (!patch.ok) return toError(400, 'BAD_REQUEST', patch.message)
         entries[index] = {
           ...current,
           mcc: patch.value.mcc,
           mnc: patch.value.mnc,
-          ratePerKb: patch.value.ratePerKb,
+          ratePerMb: patch.value.ratePerMb,
           isDeleted: false,
           updatedAt: now,
         }
@@ -835,7 +835,7 @@ export async function patchRoamingProfileEntries({
           entryId: String(operation?.entryId ?? '').trim() || `${patch.value.mcc}-${patch.value.mnc}`,
           mcc: patch.value.mcc,
           mnc: patch.value.mnc,
-          ratePerKb: patch.value.ratePerKb,
+          ratePerMb: patch.value.ratePerMb,
           isDeleted: false,
           updatedAt: now,
         })

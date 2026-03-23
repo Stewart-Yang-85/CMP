@@ -1,0 +1,79 @@
+{
+  "_meta": {
+    "description": "Mock data for billing Golden Case integration tests (T036-T040)",
+    "enterpriseId": "88962922-f9e3-42a1-bc86-d1708ed70f7a",
+    "supplierId": "a0000000-0000-0000-0000-000000000001",
+    "billPeriod": "2025-01",
+    "periodStart": "2025-01-01",
+    "periodEnd": "2025-02-01"
+  },
+  "sims": [
+    { "sim_id": "s0000000-0000-0000-0000-000000000001", "iccid": "89860000000000000000", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "status": "ACTIVATED" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000002", "iccid": "89860000000000000001", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "status": "ACTIVATED" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000003", "iccid": "89860000000000000002", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "status": "ACTIVATED" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000004", "iccid": "89860000000000000003", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "status": "ACTIVATED" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000005", "iccid": "89860000000000000004", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "status": "ACTIVATED" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000006", "iccid": "89860000000000000005", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "status": "ACTIVATED" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000007", "iccid": "89860000000000000006", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "status": "ACTIVATED" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000008", "iccid": "89860000000000000007", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "status": "ACTIVATED" }
+  ],
+  "subscriptions": [
+    { "subscription_id": "sub-001", "sim_id": "s0000000-0000-0000-0000-000000000001", "package_version_id": "pkgv-golden-001", "subscription_kind": "MAIN", "state": "ACTIVE", "effective_at": "2024-12-01T00:00:00Z", "expires_at": null },
+    { "subscription_id": "sub-002", "sim_id": "s0000000-0000-0000-0000-000000000002", "package_version_id": "pkgv-golden-001", "subscription_kind": "MAIN", "state": "ACTIVE", "effective_at": "2024-12-01T00:00:00Z", "expires_at": null },
+    { "subscription_id": "sub-003", "sim_id": "s0000000-0000-0000-0000-000000000003", "package_version_id": "pkgv-golden-001", "subscription_kind": "MAIN", "state": "ACTIVE", "effective_at": "2024-12-01T00:00:00Z", "expires_at": null },
+    { "subscription_id": "sub-004", "sim_id": "s0000000-0000-0000-0000-000000000004", "package_version_id": "pkgv-golden-001", "subscription_kind": "MAIN", "state": "ACTIVE", "effective_at": "2024-12-01T00:00:00Z", "expires_at": null },
+    { "subscription_id": "sub-005", "sim_id": "s0000000-0000-0000-0000-000000000005", "package_version_id": "pkgv-golden-001", "subscription_kind": "MAIN", "state": "ACTIVE", "effective_at": "2024-12-01T00:00:00Z", "expires_at": null },
+    { "subscription_id": "sub-006", "sim_id": "s0000000-0000-0000-0000-000000000006", "package_version_id": "pkgv-golden-001", "subscription_kind": "MAIN", "state": "ACTIVE", "effective_at": "2024-12-01T00:00:00Z", "expires_at": null },
+    { "subscription_id": "sub-007", "sim_id": "s0000000-0000-0000-0000-000000000007", "package_version_id": "pkgv-golden-001", "subscription_kind": "MAIN", "state": "ACTIVE", "effective_at": "2024-12-01T00:00:00Z", "expires_at": null },
+    { "subscription_id": "sub-008", "sim_id": "s0000000-0000-0000-0000-000000000008", "package_version_id": "pkgv-golden-001", "subscription_kind": "MAIN", "state": "ACTIVE", "effective_at": "2024-12-01T00:00:00Z", "expires_at": null }
+  ],
+  "usage_daily_summary": [
+    { "sim_id": "s0000000-0000-0000-0000-000000000001", "iccid": "89860000000000000000", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "supplier_id": "a0000000-0000-0000-0000-000000000001", "usage_day": "2025-01-15", "visited_mccmnc": "234-15", "total_kb": 102400, "input_ref": "golden:U-01" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000002", "iccid": "89860000000000000001", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "supplier_id": "a0000000-0000-0000-0000-000000000001", "usage_day": "2025-01-15", "visited_mccmnc": "208-01", "total_kb": 102400, "input_ref": "golden:U-02" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000003", "iccid": "89860000000000000002", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "supplier_id": "a0000000-0000-0000-0000-000000000001", "usage_day": "2025-01-15", "visited_mccmnc": "262-02", "total_kb": 102400, "input_ref": "golden:U-03" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000004", "iccid": "89860000000000000003", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "supplier_id": "a0000000-0000-0000-0000-000000000001", "usage_day": "2025-01-15", "visited_mccmnc": "208-01", "total_kb": 102400, "input_ref": "golden:U-04" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000005", "iccid": "89860000000000000004", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "supplier_id": "a0000000-0000-0000-0000-000000000001", "usage_day": "2025-01-15", "visited_mccmnc": "424-02", "total_kb": 10240, "input_ref": "golden:U-05" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000006", "iccid": "89860000000000000005", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "supplier_id": "a0000000-0000-0000-0000-000000000001", "usage_day": "2025-01-15", "visited_mccmnc": "999-99", "total_kb": 10240, "input_ref": "golden:U-06" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000007", "iccid": "89860000000000000006", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "supplier_id": "a0000000-0000-0000-0000-000000000001", "usage_day": "2025-01-15", "visited_mccmnc": "234-15", "total_kb": 10240, "input_ref": "golden:U-07" },
+    { "sim_id": "s0000000-0000-0000-0000-000000000008", "iccid": "89860000000000000007", "enterprise_id": "88962922-f9e3-42a1-bc86-d1708ed70f7a", "supplier_id": "a0000000-0000-0000-0000-000000000001", "usage_day": "2025-01-15", "visited_mccmnc": "424-02", "total_kb": 10240, "input_ref": "golden:U-08" }
+  ],
+  "package_versions": [
+    {
+      "package_version_id": "pkgv-golden-001",
+      "package_id": "pkg-golden-001",
+      "price_plan_id": "pp-golden-001",
+      "price_plan_version_id": "ppv-golden-001",
+      "status": "PUBLISHED",
+      "roaming_profile": {
+        "type": "MCCMNC_ALLOWLIST",
+        "mccmnc": ["234-015", "234-15", "208-01", "262-02"]
+      },
+      "packages": { "name": "Golden Test Package" }
+    }
+  ],
+  "price_plan_versions": [
+    {
+      "price_plan_version_id": "ppv-golden-001",
+      "price_plan_id": "pp-golden-001",
+      "version": 1,
+      "monthly_fee": 0,
+      "deactivated_monthly_fee": 0,
+      "total_quota_mb": 409600,
+      "overage_rate_per_mb": 0.01,
+      "payg_rates": {
+        "zones": {
+          "SAUDI": { "mccmnc": ["424-02"], "ratePerMb": 0.02 }
+        }
+      }
+    }
+  ],
+  "price_plans": [
+    {
+      "price_plan_id": "pp-golden-001",
+      "type": "FIXED_BUNDLE",
+      "currency": "USD",
+      "first_cycle_proration": "NONE"
+    }
+  ],
+  "sim_state_history": []
+}

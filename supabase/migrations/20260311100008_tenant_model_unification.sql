@@ -18,6 +18,16 @@
 --   DROP VIEW IF EXISTS customer_view, reseller_view CASCADE;
 
 -- ============================================================
+-- 0. Ensure tenant_id columns exist (may be missing from legacy 0035 schema)
+-- ============================================================
+
+alter table if exists resellers
+  add column if not exists tenant_id uuid references tenants(tenant_id) unique;
+
+alter table if exists customers
+  add column if not exists tenant_id uuid references tenants(tenant_id) unique;
+
+-- ============================================================
 -- 1. Status sync trigger: customers → tenants
 -- ============================================================
 -- Mapping: ACTIVE→ACTIVE, OVERDUE→SUSPENDED, TERMINATED→INACTIVE

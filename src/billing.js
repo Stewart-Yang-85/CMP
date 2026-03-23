@@ -143,7 +143,7 @@ function resolvePaygRatePerKb(mainPkg, visitedMccMnc) {
       else score = 3
       if (score > bestScore) {
         bestScore = score
-        bestRate = Number(zone.ratePerKb)
+        bestRate = Number(zone.ratePerMb)
       }
     }
   }
@@ -216,14 +216,14 @@ function isSubscriptionActiveInPeriod(sub, rangeStart, rangeEnd) {
 
 function resolveQuotaKb(pricePlan) {
   if (!pricePlan) return null
-  const quotaKb = Number(pricePlan.quota_kb ?? pricePlan.per_sim_quota_kb ?? null)
-  if (Number.isNaN(quotaKb) || quotaKb === null) return null
-  return quotaKb
+  const quotaMb = Number(pricePlan.quota_mb ?? pricePlan.per_sim_quota_mb ?? null)
+  if (Number.isNaN(quotaMb) || quotaMb === null) return null
+  return quotaMb
 }
 
 function resolveOverageRatePerKb(pricePlan) {
   if (!pricePlan) return null
-  const rate = Number(pricePlan.overage_rate_per_kb ?? null)
+  const rate = Number(pricePlan.overage_rate_per_mb ?? null)
   if (Number.isNaN(rate) || rate === null) return null
   return rate
 }
@@ -256,25 +256,25 @@ function calculateTieredCharge(usageKb, tiers) {
   if (!list.length) return 0
   const sorted = list
     .map((t) => ({
-      fromKb: Number(t?.fromKb),
-      toKb: Number(t?.toKb),
-      ratePerKb: Number(t?.ratePerKb),
+      fromMb: Number(t?.fromMb),
+      toMb: Number(t?.toMb),
+      ratePerMb: Number(t?.ratePerMb),
     }))
-    .filter((t) => Number.isFinite(t.fromKb) && Number.isFinite(t.toKb) && t.toKb > t.fromKb && Number.isFinite(t.ratePerKb) && t.ratePerKb >= 0)
-    .sort((a, b) => a.fromKb - b.fromKb)
+    .filter((t) => Number.isFinite(t.fromMb) && Number.isFinite(t.toMb) && t.toMb > t.fromMb && Number.isFinite(t.ratePerMb) && t.ratePerMb >= 0)
+    .sort((a, b) => a.fromMb - b.fromMb)
   if (!sorted.length) return 0
   let remaining = Math.max(0, usageKb)
   let total = 0
   for (const tier of sorted) {
     if (remaining <= 0) break
-    const tierSize = Math.max(0, tier.toKb - tier.fromKb)
+    const tierSize = Math.max(0, tier.toMb - tier.fromMb)
     const charged = Math.min(remaining, tierSize)
-    total += charged * tier.ratePerKb
+    total += charged * tier.ratePerMb
     remaining -= charged
   }
   if (remaining > 0) {
     const last = sorted[sorted.length - 1]
-    total += remaining * last.ratePerKb
+    total += remaining * last.ratePerMb
   }
   return roundAmount(total)
 }
@@ -342,7 +342,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
     const idFilter = uniquePlanIds.map((id) => encodeURIComponent(id)).join(',')
     const rows = await supabase.select(
       'price_plan_versions',
-      `select=price_plan_version_id,price_plan_id,version,payg_rates,monthly_fee,deactivated_monthly_fee,quota_kb,per_sim_quota_kb,total_quota_kb,overage_rate_per_kb,tiers&price_plan_id=in.(${idFilter})&order=version.desc`
+      `select=price_plan_version_id,price_plan_id,version,payg_rates,monthly_fee,deactivated_monthly_fee,quota_mb,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers&price_plan_id=in.(${idFilter})&order=version.desc`
     )
     const versions = Array.isArray(rows) ? rows : []
     for (const version of versions) {
@@ -360,7 +360,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
       const idFilter = missing.map((id) => encodeURIComponent(id)).join(',')
       const rows = await supabase.select(
         'price_plan_versions',
-        `select=price_plan_version_id,price_plan_id,version,payg_rates,monthly_fee,deactivated_monthly_fee,quota_kb,per_sim_quota_kb,total_quota_kb,overage_rate_per_kb,tiers&price_plan_version_id=in.(${idFilter})`
+        `select=price_plan_version_id,price_plan_id,version,payg_rates,monthly_fee,deactivated_monthly_fee,quota_mb,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers&price_plan_version_id=in.(${idFilter})`
       )
       const versions = Array.isArray(rows) ? rows : []
       for (const version of versions) {
@@ -488,20 +488,20 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
     const planType = resolvePlanType(planRow)
     const currency = resolvePlanCurrency(planRow)
     const counts = packageCounts.get(packageVersionId) || { activated: 0, deactivated: 0 }
-    let totalQuotaKb = null
+    let totalQuotaMb = null
     if (planType === 'SIM_DEPENDENT_BUNDLE') {
-      const perSim = Number(pricePlanVersion?.per_sim_quota_kb ?? 0)
-      totalQuotaKb = Number.isFinite(perSim) ? perSim * counts.activated : null
+      const perSim = Number(pricePlanVersion?.per_sim_quota_mb ?? 0)
+      totalQuotaMb = Number.isFinite(perSim) ? perSim * counts.activated : null
     } else if (planType === 'FIXED_BUNDLE') {
-      totalQuotaKb = Number(pricePlanVersion?.total_quota_kb ?? null)
+      totalQuotaMb = Number(pricePlanVersion?.total_quota_mb ?? null)
     } else {
-      totalQuotaKb = resolveQuotaKb(pricePlanVersion)
+      totalQuotaMb = resolveQuotaKb(pricePlanVersion)
     }
     packagePool.set(packageVersionId, {
       planType,
       currency,
-      totalQuotaKb,
-      overageRatePerKb: resolveOverageRatePerKb(pricePlanVersion),
+      totalQuotaMb,
+      overageRatePerMb: resolveOverageRatePerKb(pricePlanVersion),
       tiers: pricePlanVersion?.tiers ?? null,
       pricePlanVersionId: pricePlanVersion?.price_plan_version_id ?? null,
       pricePlanId,
@@ -606,15 +606,15 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
           } else if (planType === 'SIM_DEPENDENT_BUNDLE' || planType === 'FIXED_BUNDLE') {
             const usageKey = String(matchedPackageVersionId)
             const usedKb = Number(poolUsageByPackage.get(usageKey) || 0)
-            const totalQuotaKb = pool?.totalQuotaKb
-            if (totalQuotaKb === null || !Number.isFinite(totalQuotaKb)) {
+            const totalQuotaMb = pool?.totalQuotaMb
+            if (totalQuotaMb === null || !Number.isFinite(totalQuotaMb)) {
               chargeType = 'IN_PACKAGE'
               deductFromPackageVersionId = matchedPackageVersionId
               poolUsageByPackage.set(usageKey, usedKb + totalKb)
             } else {
-              const remainingKb = Math.max(0, totalQuotaKb - usedKb)
+              const remainingKb = Math.max(0, totalQuotaMb - usedKb)
               const overKb = Math.max(0, totalKb - remainingKb)
-              const overageRate = pool?.overageRatePerKb ?? 0
+              const overageRate = pool?.overageRatePerMb ?? 0
               chargeType = overKb > 0 ? 'OVERAGE' : 'IN_PACKAGE'
               rateApplied = overKb > 0 ? overageRate : null
               chargeAmount = overKb > 0 ? roundAmount(overKb * overageRate) : 0
@@ -624,15 +624,15 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
             currency = pool?.currency ?? currencyFallback
           } else {
             const pricePlan = match.pkg?.resolved_price_plan_version ?? match.pkg?.price_plan_versions ?? null
-            const quotaKb = resolveQuotaKb(pricePlan)
+            const quotaMb = resolveQuotaKb(pricePlan)
             const usageKey = `${sim.sim_id}:${matchedPackageVersionId || 'unknown'}`
             const usedKb = Number(usageByPackage.get(usageKey) || 0)
-            if (quotaKb === null) {
+            if (quotaMb === null) {
               chargeType = 'IN_PACKAGE'
               deductFromPackageVersionId = matchedPackageVersionId
               usageByPackage.set(usageKey, usedKb + totalKb)
             } else {
-              const remainingKb = Math.max(0, quotaKb - usedKb)
+              const remainingKb = Math.max(0, quotaMb - usedKb)
               const overKb = Math.max(0, totalKb - remainingKb)
               const overageRate = resolveOverageRatePerKb(pricePlan) ?? 0
               chargeType = overKb > 0 ? 'OVERAGE' : 'IN_PACKAGE'
@@ -675,8 +675,8 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
           matched_package_version_id: matchedPackageVersionId,
           matched_price_plan_version_id: matchedPricePlanVersionId,
           classification: chargeType,
-          charged_kb: Math.max(0, Math.floor(totalKb)),
-          rate_per_kb: rateApplied,
+          charged_mb: Math.max(0, Math.floor(totalKb)),
+          rate_per_mb: rateApplied,
           amount: chargeAmount,
           currency,
         })
@@ -693,8 +693,8 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
               chargeType,
               inProfile,
               visitedMccMnc,
-              chargedKb: totalKb,
-              ratePerKb: rateApplied,
+              chargedMb: totalKb,
+              ratePerMb: rateApplied,
               matchedPackageVersionId,
               matchedSubscriptionId,
               deductFromPackageVersionId,
@@ -722,7 +722,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
         description: `Tiered Usage - ${packageVersionId}`,
         currency: pool.currency,
         chargeType: 'TIERED_VOLUME',
-        chargedKb: Number(usedKb || 0),
+        chargedMb: Number(usedKb || 0),
         matchedPackageVersionId: packageVersionId,
         pricePlanVersionId: pool.pricePlanVersionId ?? null,
       },

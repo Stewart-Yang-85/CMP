@@ -50,6 +50,8 @@ tags:
     description: Reseller management
   - name: Enterprises
     description: Enterprise tenant management
+  - name: Dunning
+    description: Overdue / credit control summary and manual resolve (US7)
   - name: Departments
     description: Department management within enterprises
   - name: Suppliers
@@ -296,6 +298,58 @@ components:
           type: string
           enum: [ACTIVE, INACTIVE, SUSPENDED]
         changedAt:
+          type: string
+          format: date-time
+    EnterpriseDunningSummary:
+      type: object
+      description: Live summary from getEnterpriseDunningSummary (overdue bills + policy-derived status).
+      properties:
+        enterpriseId:
+          type: string
+          format: uuid
+        dunningStatus:
+          type: string
+          enum: [NORMAL, OVERDUE_WARNING, SUSPENDED, SERVICE_INTERRUPTED]
+        overdueAmount:
+          type: number
+        oldestOverdueBillId:
+          type: string
+          format: uuid
+          nullable: true
+        oldestOverduePeriod:
+          type: string
+          nullable: true
+          description: YYYY-MM of oldest overdue bill period
+        daysOverdue:
+          type: integer
+        gracePeriodDays:
+          type: integer
+        nextAction:
+          type: string
+          nullable: true
+          description: e.g. OVERDUE_REMINDER, MANUAL_REVIEW, or null when NORMAL
+        nextActionDate:
+          type: string
+          format: date-time
+          nullable: true
+        autoSuspendEnabled:
+          type: boolean
+        lateFeeAmount:
+          type: number
+          description: Estimated late fee from configured rule (when policy enabled).
+    EnterpriseDunningResolveResponse:
+      type: object
+      properties:
+        enterpriseId:
+          type: string
+          format: uuid
+        dunningStatus:
+          type: string
+          example: NORMAL
+        enterpriseStatus:
+          type: string
+          nullable: true
+        resolvedAt:
           type: string
           format: date-time
     Department:
@@ -1552,6 +1606,22 @@ components:
       items:
         $ref: '#/components/schemas/DataUsageRecord'
 
+    SimUsageRecordPaginatedResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DataUsageRecord'
+        page:
+          type: integer
+          default: 1
+        pageSize:
+          type: integer
+          default: 20
+        total:
+          type: integer
+
     AdminApiClientListItem:
       type: object
       properties:
@@ -2108,6 +2178,43 @@ components:
         changed:
           type: boolean
 
+    BillingGenerateRequest:
+      type: object
+      required: [period]
+      properties:
+        period:
+          type: string
+          description: Billing period (YYYY-MM), e.g. "2026-02"
+          example: "2026-02"
+        enterpriseId:
+          type: string
+          format: uuid
+          description: |
+            Optional. Platform admin if omitted bills all enterprises.
+            Reseller admin if omitted bills all enterprises under JWT resellerId (parent_id match).
+            If set for reseller admin, must be a child enterprise of that reseller.
+    BillingGenerateResponse:
+      type: object
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        period:
+          type: string
+        status:
+          type: string
+          enum: [QUEUED]
+        enterpriseId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Echo of scoped enterprise when single-enterprise job; null when platform all-enterprises or reseller batch-all.
+        resellerId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Set when job enqueued by reseller admin (JWT reseller scope).
+
     BillingMarkPaidRequest:
       type: object
       properties:
@@ -2348,10 +2455,38 @@ components:
           type: string
           format: date-time
           nullable: true
+        packageName:
+          type: string
+          nullable: true
+        firstSubscribedAt:
+          type: string
+          format: date-time
+          nullable: true
+        iccid:
+          type: string
+          nullable: true
+    SubscriptionListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Subscription'
+        total:
+          type: integer
+        page:
+          type: integer
+        pageSize:
+          type: integer
     SubscriptionCreateRequest:
       type: object
       required: [iccid, packageVersionId]
       properties:
+        enterpriseId:
+          type: string
+          format: uuid
+          description: |
+            Enterprise scope. Required for admin key and reseller. For customer, optional (omit or provide correct value).
         iccid:
           type: string
           pattern: '^[0-9]{18,20}$'
@@ -2383,6 +2518,11 @@ components:
       type: object
       required: [iccid, fromSubscriptionId, toPackageVersionId]
       properties:
+        enterpriseId:
+          type: string
+          format: uuid
+          description: |
+            Enterprise scope. Required for admin key and reseller. For customer, optional (omit or provide correct value).
         iccid:
           type: string
           pattern: '^[0-9]{18,20}$'
@@ -2408,25 +2548,41 @@ components:
     SubscriptionCancelRequest:
       type: object
       properties:
+        enterpriseId:
+          type: string
+          format: uuid
+          description: |
+            Enterprise scope. Required for admin key and reseller. For customer, optional (omit or provide correct value).
         immediate:
           type: boolean
     SubscriptionCancelResponse:
       type: object
       properties:
-        success:
+        subscriptionId:
+          type: string
+        state:
+          type: string
+        scheduled:
           type: boolean
+          description: true when cancel was queued for ACTIVE subscription
+        scheduledExecuteAt:
+          type: string
+          format: date-time
+          description: When the cancel will execute (for scheduled cancels)
         expiresAt:
           type: string
           format: date-time
+        message:
+          type: string
 
     PricePlanTier:
       type: object
       properties:
-        fromKb:
+        fromMb:
           type: integer
-        toKb:
+        toMb:
           type: integer
-        ratePerKb:
+        ratePerMb:
           type: number
 
     PaygRate:
@@ -2438,7 +2594,7 @@ components:
           type: array
           items:
             type: string
-        ratePerKb:
+        ratePerMb:
           type: number
 
     CommercialTerms:
@@ -2446,7 +2602,7 @@ components:
       properties:
         testPeriodDays:
           type: integer
-        testQuotaKb:
+        testQuotaMb:
           type: integer
         testExpiryCondition:
           type: string
@@ -2590,8 +2746,6 @@ components:
       properties:
         carrierServiceConfig:
           $ref: '#/components/schemas/CarrierServiceConfig'
-        enterpriseId:
-          type: string
         resellerId:
           type: string
 
@@ -2667,20 +2821,9 @@ components:
             firstCycleProration: NONE
             prorationRounding: ROUND_HALF_UP
             oneTimeFee: 29.9
-            quotaKb: 15728640
+            quotaMb: 15728640
             validityDays: 45
             expiryBoundary: CALENDAR_DAY_END
-            commercialTerms:
-              testPeriodDays: 7
-              testQuotaKb: 1048576
-              testExpiryCondition: PERIOD_OR_QUOTA
-              testExpiryAction: ACTIVATED
-            controlPolicy:
-              enabled: true
-              cutoffPolicyId: 11111111-1111-1111-1111-111111111111
-              cutoffThresholdMb: 512
-            carrierServiceConfig:
-              roamingProfileVersionId: 55555555-5555-5555-5555-555555555555
         simDependentBundleWithPolicies:
           value:
             name: SIM Bundle A
@@ -2692,20 +2835,7 @@ components:
             prorationRounding: ROUND_HALF_UP
             monthlyFee: 10
             deactivatedMonthlyFee: 1
-            perSimQuotaKb: 1048576
-            commercialTerms:
-              testPeriodDays: 15
-              testQuotaKb: 2097152
-              testExpiryCondition: PERIOD_OR_QUOTA
-              testExpiryAction: ACTIVATED
-              commitmentPeriodMonths: 6
-            controlPolicy:
-              enabled: true
-              cutoffPolicyId: 11111111-1111-1111-1111-111111111111
-              throttlingPolicyId: 22222222-2222-2222-2222-222222222222
-              cutoffThresholdMb: 1024
-            carrierServiceConfig:
-              roamingProfileVersionId: 55555555-5555-5555-5555-555555555555
+            perSimQuotaMb: 1048576
         fixedBundleWithPolicies:
           value:
             name: Fixed Bundle
@@ -2717,21 +2847,8 @@ components:
             prorationRounding: ROUND_HALF_UP
             monthlyFee: 150
             deactivatedMonthlyFee: 10
-            totalQuotaKb: 157286400
-            overageRatePerKb: 0.00007
-            commercialTerms:
-              testPeriodDays: 15
-              testQuotaKb: 2097152
-              testExpiryCondition: PERIOD_OR_QUOTA
-              testExpiryAction: ACTIVATED
-              commitmentPeriodMonths: 6
-            controlPolicy:
-              enabled: true
-              cutoffPolicyId: 11111111-1111-1111-1111-111111111111
-              throttlingPolicyId: 22222222-2222-2222-2222-222222222222
-              cutoffThresholdMb: 1024
-            carrierServiceConfig:
-              roamingProfileVersionId: 55555555-5555-5555-5555-555555555555
+            totalQuotaMb: 157286400
+            overageRatePerMb: 0.00007
         tieredPricingWithPolicies:
           value:
             name: Tiered Pricing
@@ -2744,29 +2861,16 @@ components:
             monthlyFee: 8
             deactivatedMonthlyFee: 1
             tiers:
-              - fromKb: 0
-                toKb: 1073741824
-                ratePerKb: 0.001
-              - fromKb: 1073741824
-                toKb: 5368709120
-                ratePerKb: 0.0006
-            commercialTerms:
-              testPeriodDays: 15
-              testQuotaKb: 2097152
-              testExpiryCondition: PERIOD_OR_QUOTA
-              testExpiryAction: ACTIVATED
-              commitmentPeriodMonths: 6
-            controlPolicy:
-              enabled: true
-              cutoffPolicyId: 11111111-1111-1111-1111-111111111111
-              throttlingPolicyId: 22222222-2222-2222-2222-222222222222
-              cutoffThresholdMb: 1024
-            carrierServiceConfig:
-              roamingProfileVersionId: 55555555-5555-5555-5555-555555555555
+              - fromMb: 0
+                toMb: 1073741824
+                ratePerMb: 0.001
+              - fromMb: 1073741824
+                toMb: 5368709120
+                ratePerMb: 0.0006
 
     PricePlanCreateCommon:
       type: object
-      required: [name, price_plan_type, serviceType, currency, billingCycleType, firstCycleProration, prorationRounding, commercialTerms, controlPolicy, carrierServiceConfig]
+      required: [name, price_plan_type, serviceType, currency, billingCycleType, firstCycleProration, prorationRounding]
       properties:
         name:
           type: string
@@ -2791,27 +2895,19 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PaygRate'
-        commercialTerms:
-          $ref: '#/components/schemas/CommercialTerms'
-        controlPolicy:
-          $ref: '#/components/schemas/ControlPolicy'
-        carrierServiceConfig:
-          $ref: '#/components/schemas/CarrierServiceConfig'
-        carrierService:
-          $ref: '#/components/schemas/CarrierServiceConfig'
 
     PricePlanCreateOneTime:
       allOf:
         - $ref: '#/components/schemas/PricePlanCreateCommon'
         - type: object
-          required: [price_plan_type, oneTimeFee, quotaKb, validityDays, expiryBoundary]
+          required: [price_plan_type, oneTimeFee, quotaMb, validityDays, expiryBoundary]
           properties:
             price_plan_type:
               type: string
               enum: [ONE_TIME]
             oneTimeFee:
               type: number
-            quotaKb:
+            quotaMb:
               type: integer
             validityDays:
               type: integer
@@ -2823,7 +2919,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/PricePlanCreateCommon'
         - type: object
-          required: [price_plan_type, monthlyFee, deactivatedMonthlyFee, perSimQuotaKb]
+          required: [price_plan_type, monthlyFee, deactivatedMonthlyFee, perSimQuotaMb]
           properties:
             price_plan_type:
               type: string
@@ -2832,16 +2928,16 @@ components:
               type: number
             deactivatedMonthlyFee:
               type: number
-            perSimQuotaKb:
+            perSimQuotaMb:
               type: integer
-            overageRatePerKb:
+            overageRatePerMb:
               type: number
 
     PricePlanCreateFixedBundle:
       allOf:
         - $ref: '#/components/schemas/PricePlanCreateCommon'
         - type: object
-          required: [price_plan_type, monthlyFee, deactivatedMonthlyFee, totalQuotaKb]
+          required: [price_plan_type, monthlyFee, deactivatedMonthlyFee, totalQuotaMb]
           properties:
             price_plan_type:
               type: string
@@ -2850,9 +2946,9 @@ components:
               type: number
             deactivatedMonthlyFee:
               type: number
-            totalQuotaKb:
+            totalQuotaMb:
               type: integer
-            overageRatePerKb:
+            overageRatePerMb:
               type: number
 
     PricePlanCreateTieredPricing:
@@ -2904,15 +3000,15 @@ components:
           type: number
         oneTimeFee:
           type: number
-        quotaKb:
+        quotaMb:
           type: integer
         validityDays:
           type: integer
-        perSimQuotaKb:
+        perSimQuotaMb:
           type: integer
-        totalQuotaKb:
+        totalQuotaMb:
           type: integer
-        overageRatePerKb:
+        overageRatePerMb:
           type: number
         tiers:
           type: array
@@ -3013,86 +3109,39 @@ components:
           value:
             price_plan_type: ONE_TIME
             oneTimeFee: 29.9
-            quotaKb: 15728640
+            quotaMb: 15728640
             validityDays: 45
             expiryBoundary: CALENDAR_DAY_END
-            commercialTerms:
-              testPeriodDays: 15
-              testQuotaKb: 2097152
-              testExpiryCondition: PERIOD_OR_QUOTA
-              testExpiryAction: ACTIVATED
-            controlPolicy:
-              enabled: true
-              cutoffPolicyId: 11111111-1111-1111-1111-111111111111
-              cutoffThresholdMb: 1024
-            carrierServiceConfig:
-              roamingProfileVersionId: 55555555-5555-5555-5555-555555555555
         simDependentBundle:
           value:
             price_plan_type: SIM_DEPENDENT_BUNDLE
             monthlyFee: 12
             deactivatedMonthlyFee: 1
-            perSimQuotaKb: 2097152
-            overageRatePerKb: 0.00009
-            commercialTerms:
-              testPeriodDays: 15
-              testQuotaKb: 2097152
-              testExpiryCondition: PERIOD_OR_QUOTA
-              testExpiryAction: ACTIVATED
-            controlPolicy:
-              enabled: true
-              cutoffPolicyId: 11111111-1111-1111-1111-111111111111
-              throttlingPolicyId: 22222222-2222-2222-2222-222222222222
-              cutoffThresholdMb: 1024
-            carrierServiceConfig:
-              roamingProfileVersionId: 55555555-5555-5555-5555-555555555555
+            perSimQuotaMb: 2097152
+            overageRatePerMb: 0.00009
         fixedBundle:
           value:
             price_plan_type: FIXED_BUNDLE
             monthlyFee: 150
             deactivatedMonthlyFee: 10
-            totalQuotaKb: 157286400
-            overageRatePerKb: 0.00007
-            commercialTerms:
-              testPeriodDays: 15
-              testQuotaKb: 2097152
-              testExpiryCondition: PERIOD_OR_QUOTA
-              testExpiryAction: ACTIVATED
-            controlPolicy:
-              enabled: true
-              cutoffPolicyId: 11111111-1111-1111-1111-111111111111
-              throttlingPolicyId: 22222222-2222-2222-2222-222222222222
-              cutoffThresholdMb: 1024
-            carrierServiceConfig:
-              roamingProfileVersionId: 55555555-5555-5555-5555-555555555555
+            totalQuotaMb: 157286400
+            overageRatePerMb: 0.00007
         tieredPricing:
           value:
             price_plan_type: TIERED_PRICING
             monthlyFee: 8
             deactivatedMonthlyFee: 1
             tiers:
-              - fromKb: 0
-                toKb: 1073741824
-                ratePerKb: 0.001
-              - fromKb: 1073741824
-                toKb: 5368709120
-                ratePerKb: 0.0006
-            commercialTerms:
-              testPeriodDays: 15
-              testQuotaKb: 2097152
-              testExpiryCondition: PERIOD_OR_QUOTA
-              testExpiryAction: ACTIVATED
-            controlPolicy:
-              enabled: true
-              cutoffPolicyId: 11111111-1111-1111-1111-111111111111
-              throttlingPolicyId: 22222222-2222-2222-2222-222222222222
-              cutoffThresholdMb: 1024
-            carrierServiceConfig:
-              roamingProfileVersionId: 55555555-5555-5555-5555-555555555555
+              - fromMb: 0
+                toMb: 1073741824
+                ratePerMb: 0.001
+              - fromMb: 1073741824
+                toMb: 5368709120
+                ratePerMb: 0.0006
 
     PricePlanVersionCreateCommon:
       type: object
-      required: [price_plan_type, commercialTerms, controlPolicy, carrierServiceConfig]
+      required: [price_plan_type]
       properties:
         price_plan_type:
           type: string
@@ -3104,27 +3153,19 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/PaygRate'
-        commercialTerms:
-          $ref: '#/components/schemas/CommercialTerms'
-        controlPolicy:
-          $ref: '#/components/schemas/ControlPolicy'
-        carrierServiceConfig:
-          $ref: '#/components/schemas/CarrierServiceConfig'
-        carrierService:
-          $ref: '#/components/schemas/CarrierServiceConfig'
 
     PricePlanVersionCreateOneTime:
       allOf:
         - $ref: '#/components/schemas/PricePlanVersionCreateCommon'
         - type: object
-          required: [price_plan_type, oneTimeFee, quotaKb, validityDays, expiryBoundary]
+          required: [price_plan_type, oneTimeFee, quotaMb, validityDays, expiryBoundary]
           properties:
             price_plan_type:
               type: string
               enum: [ONE_TIME]
             oneTimeFee:
               type: number
-            quotaKb:
+            quotaMb:
               type: integer
             validityDays:
               type: integer
@@ -3136,7 +3177,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/PricePlanVersionCreateCommon'
         - type: object
-          required: [price_plan_type, monthlyFee, deactivatedMonthlyFee, perSimQuotaKb]
+          required: [price_plan_type, monthlyFee, deactivatedMonthlyFee, perSimQuotaMb]
           properties:
             price_plan_type:
               type: string
@@ -3145,16 +3186,16 @@ components:
               type: number
             deactivatedMonthlyFee:
               type: number
-            perSimQuotaKb:
+            perSimQuotaMb:
               type: integer
-            overageRatePerKb:
+            overageRatePerMb:
               type: number
 
     PricePlanVersionCreateFixedBundle:
       allOf:
         - $ref: '#/components/schemas/PricePlanVersionCreateCommon'
         - type: object
-          required: [price_plan_type, monthlyFee, deactivatedMonthlyFee, totalQuotaKb]
+          required: [price_plan_type, monthlyFee, deactivatedMonthlyFee, totalQuotaMb]
           properties:
             price_plan_type:
               type: string
@@ -3163,9 +3204,9 @@ components:
               type: number
             deactivatedMonthlyFee:
               type: number
-            totalQuotaKb:
+            totalQuotaMb:
               type: integer
-            overageRatePerKb:
+            overageRatePerMb:
               type: number
 
     PricePlanVersionCreateTieredPricing:
@@ -3209,7 +3250,7 @@ components:
 
     RoamingRateEntry:
       type: object
-      required: [mcc, mnc, ratePerKb]
+      required: [mcc, mnc, ratePerMb]
       properties:
         mcc:
           type: string
@@ -3219,7 +3260,7 @@ components:
           type: string
           pattern: '^(\d{2,3}|\*)$'
           example: '00'
-        ratePerKb:
+        ratePerMb:
           type: number
           minimum: 0
           example: 0.0008
@@ -3540,10 +3581,10 @@ components:
         mccmncList:
           - mcc: '460'
             mnc: '00'
-            ratePerKb: 0.0008
+            ratePerMb: 0.0008
           - mcc: '460'
             mnc: '*'
-            ratePerKb: 0.0012
+            ratePerMb: 0.0012
 
     ApnProfileCreateResponse:
       type: object
@@ -3745,10 +3786,10 @@ components:
         mccmncList:
           - mcc: '454'
             mnc: '12'
-            ratePerKb: 0.0015
+            ratePerMb: 0.0015
           - mcc: '454'
             mnc: '*'
-            ratePerKb: 0.0018
+            ratePerMb: 0.0018
 
     RoamingProfileVersionDeriveRequest:
       type: object
@@ -3774,7 +3815,7 @@ components:
         mnc:
           type: string
           pattern: '^(\d{2,3}|\*)$'
-        ratePerKb:
+        ratePerMb:
           type: number
           minimum: 0
         isDeleted:
@@ -3800,7 +3841,7 @@ components:
         mnc:
           type: string
           pattern: '^(\d{2,3}|\*)$'
-        ratePerKb:
+        ratePerMb:
           type: number
           minimum: 0
       description: UPSERT 可按 entryId 或 mcc+mnc 定位并更新，未命中时新增；DELETE 将目标行标记为 isDeleted=true。
@@ -4754,6 +4795,59 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+    patch:
+      tags: [Resellers]
+      summary: Update Reseller
+      parameters:
+        - name: resellerId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResellerUpdateRequest'
+      responses:
+        '200':
+          description: Reseller updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResellerUpdateResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                missingDisplayName:
+                  value:
+                    code: "VALIDATION_ERROR"
+                    message: "displayName is required."
+                    traceId: "req_123456789"
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Reseller not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Duplicate reseller name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /resellers/{resellerId}/users/{userId}/assign-enterprises:
     post:
       tags: [Users]
@@ -4810,59 +4904,6 @@ paths:
                 $ref: '#/components/schemas/Error'
         '404':
           description: Reseller or user not found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-    patch:
-      tags: [Resellers]
-      summary: Update Reseller
-      parameters:
-        - name: resellerId
-          in: path
-          required: true
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ResellerUpdateRequest'
-      responses:
-        '200':
-          description: Reseller updated
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ResellerUpdateResponse'
-        '400':
-          description: Validation error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-              examples:
-                missingDisplayName:
-                  value:
-                    code: "VALIDATION_ERROR"
-                    message: "displayName is required."
-                    traceId: "req_123456789"
-        '403':
-          description: Forbidden
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '404':
-          description: Reseller not found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '409':
-          description: Duplicate reseller name
           content:
             application/json:
               schema:
@@ -5127,6 +5168,107 @@ paths:
                 $ref: '#/components/schemas/Error'
         '404':
           description: Enterprise not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /enterprises/{enterpriseId}/dunning:
+    get:
+      tags: [Enterprises, Dunning]
+      summary: Get enterprise dunning summary
+      description: >
+        Returns overdue totals, derived dunning status, and late-fee estimate.
+        **Auth:** `platform` / `platform_admin`, or reseller role in
+        `reseller_admin` / `reseller_sales` / `reseller_sales_director` (enterprise must be in reseller scope).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: enterpriseId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Dunning summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnterpriseDunningSummary'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Enterprise not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /enterprises/{enterpriseId}/dunning:resolve:
+    post:
+      tags: [Enterprises, Dunning]
+      summary: Resolve dunning (credit control clear)
+      description: >
+        Clears non-NORMAL `dunning_records` when there are **no** overdue bills (PUBLISHED/OVERDUE with due_date passed).
+        **Auth:** `platform` / `platform_admin`, or `reseller_admin` (enterprise must be in reseller scope).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: enterpriseId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        description: >
+          **服务端不读取任何 body 字段**，仅使用路径上的 `enterpriseId`。
+          在 Swagger 中可留空，或发送 `{}`。
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              description: No request properties; send `{}` if your client requires a JSON body.
+            example: {}
+      responses:
+        '200':
+          description: Dunning resolved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnterpriseDunningResolveResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Enterprise not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Enterprise still has overdue bills
           content:
             application/json:
               schema:
@@ -7600,30 +7742,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
-  /sims/{iccid}/plan:
-    put:
-      tags: [SIMs]
-      summary: Change Rate Plan
-      parameters:
-        - name: iccid
-          in: path
-          required: true
-          schema:
-            type: string
-            pattern: '^[0-9]{18,20}$'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SimPlanChange'
-      responses:
-        '200':
-          description: Plan change scheduled
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SimPlanChangeResponse'
   /sims/{iccid}/subscriptions:
     get:
       tags: [SIMs]
@@ -7684,13 +7802,29 @@ paths:
           schema:
             type: string
             format: date-time
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            description: Alias for pageSize
       responses:
         '200':
-          description: Usage records
+          description: Usage records (paginated)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/SimUsageRecordListResponse'
+                $ref: '#/components/schemas/SimUsageRecordPaginatedResponse'
 
   /sims/{iccid}/balance:
     get:
@@ -7817,10 +7951,77 @@ paths:
         '503':
           description: Service is not ready
   /subscriptions:
+    get:
+      tags: [Subscriptions]
+      summary: List Subscriptions
+      description: List subscriptions for the enterprise, with optional filters.
+      parameters:
+        - name: enterpriseId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: |
+            Filter by enterprise. Required for reseller and platform (X-API-Key). For platform JWT with enterprise scope, may be omitted. For customer, do not pass or must match token (otherwise 403).
+        - name: iccid
+          in: query
+          schema:
+            type: string
+            pattern: '^[0-9]{18,20}$'
+          description: Filter by SIM ICCID
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, ACTIVE, CANCELLED, EXPIRED]
+          description: Filter by subscription state
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [MAIN, ADD_ON]
+          description: Filter by subscription kind
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Subscriptions list
+          headers:
+            X-Filters:
+              description: Summary of applied filters
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubscriptionListResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '400':
+          description: Bad request (e.g. missing enterpriseId for reseller)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
     post:
       tags: [Subscriptions]
       summary: Create Subscription
-      description: Create MAIN or ADD_ON subscription for a SIM.
+      description: |
+        Unified interface for 4 subscription capabilities: 1) 立即订阅 MAIN, 2) 下周期订阅 MAIN, 4) 立即订阅 ADD_ON, 5) 下周期订阅 ADD_ON.
+        - **Admin key / Reseller**: `enterpriseId` required.
+        - **Customer**: `enterpriseId` optional (omit or provide correct value).
       requestBody:
         required: true
         content:
@@ -7829,18 +8030,37 @@ paths:
               $ref: '#/components/schemas/SubscriptionCreateRequest'
             examples:
               immediateMain:
-                summary: Immediate MAIN subscription
+                summary: "1) 立即订阅 MAIN"
                 value:
+                  enterpriseId: "88962922-f9e3-42a1-bc86-d1708ed70f7a"
                   iccid: "89860012345678901234"
                   packageVersionId: "pkgv_123"
                   kind: "MAIN"
-                  effectiveAt: "2026-02-01T00:00:00Z"
-              nextCycleAddOn:
-                summary: Next-cycle ADD_ON subscription
+                  effectiveAt: "2026-03-12T08:00:00Z"
+              nextCycleMain:
+                summary: "2) 下周期订阅 MAIN"
                 value:
+                  enterpriseId: "88962922-f9e3-42a1-bc86-d1708ed70f7a"
+                  iccid: "89860012345678901234"
+                  packageVersionId: "pkgv_123"
+                  kind: "MAIN"
+                  effectiveAt: "2026-04-01T00:00:00Z"
+              immediateAddOn:
+                summary: "4) 立即订阅 ADD_ON"
+                value:
+                  enterpriseId: "88962922-f9e3-42a1-bc86-d1708ed70f7a"
                   iccid: "89860012345678901234"
                   packageVersionId: "pkgv_456"
                   kind: "ADD_ON"
+                  effectiveAt: "2026-03-12T08:00:00Z"
+              nextCycleAddOn:
+                summary: "5) 下周期订阅 ADD_ON"
+                value:
+                  enterpriseId: "88962922-f9e3-42a1-bc86-d1708ed70f7a"
+                  iccid: "89860012345678901234"
+                  packageVersionId: "pkgv_456"
+                  kind: "ADD_ON"
+                  effectiveAt: "2026-04-01T00:00:00Z"
       responses:
         '200':
           description: Subscription created
@@ -7882,7 +8102,10 @@ paths:
     post:
       tags: [Subscriptions]
       summary: Switch MAIN Subscription
-      description: Expire current MAIN subscription and schedule next-cycle subscription.
+      description: |
+        Convenience API for MAIN switch = cancel current MAIN + next-cycle subscribe new MAIN (atomic).
+        - **Admin key / Reseller**: `enterpriseId` required.
+        - **Customer**: `enterpriseId` optional (omit or provide correct value).
       requestBody:
         required: true
         content:
@@ -7891,10 +8114,11 @@ paths:
               $ref: '#/components/schemas/SubscriptionSwitchRequest'
             examples:
               switchMain:
-                summary: Switch MAIN to a new packageVersion next cycle
+                summary: MAIN switch (cancel + next-cycle subscribe)
                 value:
+                  enterpriseId: "88962922-f9e3-42a1-bc86-d1708ed70f7a"
                   iccid: "89860012345678901234"
-                  fromSubscriptionId: "sub_abc"
+                  fromSubscriptionId: "0218a05b-8e13-4b03-b0b7-8aa97a63cbab"
                   toPackageVersionId: "pkgv_def"
       responses:
         '200':
@@ -7930,14 +8154,30 @@ paths:
   /subscriptions/{subscriptionId}:cancel:
     post:
       tags: [Subscriptions]
-      summary: Cancel Subscription
-      description: Cancel an existing subscription immediately or at month end.
+      summary: Cancel Subscription (3) 取消 MAIN
+      description: |
+        Cancel an existing subscription.
+        - **PENDING**: Can cancel immediately.
+        - **ACTIVE**: Cannot cancel immediately; use immediate=false to queue cancel at end of cycle (MAIN) or expires_at (ADD_ON).
+        - **Admin key / Reseller**: enterpriseId required (query or body).
+        - **Customer**: enterpriseId optional (omit or provide correct value).
       parameters:
         - name: subscriptionId
           in: path
           required: true
           schema:
             type: string
+        - name: enterpriseId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Enterprise scope (alternative to body.enterpriseId)
+        - name: immediate
+          in: query
+          schema:
+            type: boolean
+          description: true=immediate cancel, false=end of month
       requestBody:
         required: false
         content:
@@ -7948,10 +8188,12 @@ paths:
               cancelImmediate:
                 summary: Cancel immediately
                 value:
+                  enterpriseId: "88962922-f9e3-42a1-bc86-d1708ed70f7a"
                   immediate: true
               cancelEndOfMonth:
                 summary: Cancel at end of month
                 value:
+                  enterpriseId: "88962922-f9e3-42a1-bc86-d1708ed70f7a"
                   immediate: false
       responses:
         '200':
@@ -7974,6 +8216,104 @@ paths:
                 $ref: '#/components/schemas/Error'
         '403':
           description: Subscription does not belong to your enterprise
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '400':
+          description: ACTIVE subscription cannot be cancelled immediately (use immediate=false)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Cancel already scheduled for this subscription
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /subscriptions/{subscriptionId}:
+    get:
+      tags: [Subscriptions]
+      summary: Get Subscription
+      description: Get subscription details by ID.
+      parameters:
+        - name: subscriptionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: enterpriseId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: |
+            Enterprise scope. Required for reseller and platform (X-API-Key). For platform JWT with enterprise scope, may be omitted. For customer, do not pass or must match token (otherwise 403).
+      responses:
+        '200':
+          description: Subscription details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Subscription not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Subscription does not belong to your enterprise
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /billing:generate:
+    post:
+      tags: [Billing]
+      summary: Trigger Billing Generation
+      description: |
+        Queues a BILLING_GENERATE job for worker processing.
+        **Platform admin**: may omit enterpriseId to bill all enterprises, or set one enterprise.
+        **Reseller admin**: JWT must include resellerId; may omit enterpriseId to bill all child enterprises,
+        or set enterpriseId (must be under that reseller). Permission `billing.generate`; other reseller roles are denied until extended via RBAC.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BillingGenerateRequest'
+      responses:
+        '202':
+          description: Job queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingGenerateResponse'
+        '400':
+          description: Missing period
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden (not platform admin or reseller_admin / out of scope)
           content:
             application/json:
               schema:
@@ -8482,20 +8822,9 @@ paths:
                   firstCycleProration: NONE
                   prorationRounding: ROUND_HALF_UP
                   oneTimeFee: 29.9
-                  quotaKb: 15728640
+                  quotaMb: 15728640
                   validityDays: 45
                   expiryBoundary: CALENDAR_DAY_END
-                  commercialTerms:
-                    testPeriodDays: 15
-                    testQuotaKb: 2097152
-                    testExpiryCondition: PERIOD_OR_QUOTA
-                    testExpiryAction: ACTIVATED
-                  controlPolicy:
-                    enabled: true
-                    cutoffPolicyId: 11111111-1111-1111-1111-111111111111
-                    cutoffThresholdMb: 1024
-                  carrierServiceConfig:
-                    roamingProfileVersionId: 55555555-5555-5555-5555-555555555555
               simDependentBundle:
                 value:
                   price_plan_type: SIM_DEPENDENT_BUNDLE
@@ -8507,21 +8836,8 @@ paths:
                   prorationRounding: ROUND_HALF_UP
                   monthlyFee: 12
                   deactivatedMonthlyFee: 1
-                  perSimQuotaKb: 2097152
-                  overageRatePerKb: 0.00009
-                  commercialTerms:
-                    testPeriodDays: 15
-                    testQuotaKb: 2097152
-                    testExpiryCondition: PERIOD_OR_QUOTA
-                    testExpiryAction: ACTIVATED
-                    commitmentPeriodMonths: 6
-                  controlPolicy:
-                    enabled: true
-                    cutoffPolicyId: 11111111-1111-1111-1111-111111111111
-                    throttlingPolicyId: 22222222-2222-2222-2222-222222222222
-                    cutoffThresholdMb: 1024
-                  carrierServiceConfig:
-                    roamingProfileVersionId: 55555555-5555-5555-5555-555555555555
+                  perSimQuotaMb: 2097152
+                  overageRatePerMb: 0.00009
               fixedBundle:
                 value:
                   price_plan_type: FIXED_BUNDLE
@@ -8533,19 +8849,8 @@ paths:
                   prorationRounding: ROUND_HALF_UP
                   monthlyFee: 150
                   deactivatedMonthlyFee: 10
-                  totalQuotaKb: 157286400
-                  overageRatePerKb: 0.00007
-                  commercialTerms:
-                    testPeriodDays: 15
-                    testQuotaKb: 2097152
-                    testExpiryCondition: PERIOD_OR_QUOTA
-                    testExpiryAction: ACTIVATED
-                  controlPolicy:
-                    enabled: true
-                    cutoffPolicyId: 11111111-1111-1111-1111-111111111111
-                    cutoffThresholdMb: 1024
-                  carrierServiceConfig:
-                    roamingProfileVersionId: 55555555-5555-5555-5555-555555555555
+                  totalQuotaMb: 157286400
+                  overageRatePerMb: 0.00007
               tieredPricing:
                 value:
                   price_plan_type: TIERED_PRICING
@@ -8558,23 +8863,12 @@ paths:
                   monthlyFee: 8
                   deactivatedMonthlyFee: 1
                   tiers:
-                    - fromKb: 0
-                      toKb: 1073741824
-                      ratePerKb: 0.001
-                    - fromKb: 1073741824
-                      toKb: 5368709120
-                      ratePerKb: 0.0006
-                  commercialTerms:
-                    testPeriodDays: 15
-                    testQuotaKb: 2097152
-                    testExpiryCondition: PERIOD_OR_QUOTA
-                    testExpiryAction: ACTIVATED
-                  controlPolicy:
-                    enabled: true
-                    cutoffPolicyId: 11111111-1111-1111-1111-111111111111
-                    cutoffThresholdMb: 1024
-                  carrierServiceConfig:
-                    roamingProfileVersionId: 55555555-5555-5555-5555-555555555555
+                    - fromMb: 0
+                      toMb: 1073741824
+                      ratePerMb: 0.001
+                    - fromMb: 1073741824
+                      toMb: 5368709120
+                      ratePerMb: 0.0006
       responses:
         '201':
           description: Price plan created
@@ -8596,7 +8890,7 @@ paths:
                 missingTypeRequiredField:
                   value:
                     error: BAD_REQUEST
-                    message: perSimQuotaKb must be >= 0.
+                    message: perSimQuotaMb must be >= 0.
     get:
       tags: [PricePlans]
       summary: List Price Plans
@@ -8649,10 +8943,10 @@ paths:
                           status: DRAFT
                           monthlyFee: 10
                           deactivatedMonthlyFee: 1
-                          perSimQuotaKb: 1048576
+                          perSimQuotaMb: 1048576
                           commercialTerms:
                             testPeriodDays: 15
-                            testQuotaKb: 2097152
+                            testQuotaMb: 2097152
                             testExpiryCondition: PERIOD_OR_QUOTA
                             testExpiryAction: ACTIVATED
                             commitmentPeriodMonths: 6
@@ -8704,10 +8998,10 @@ paths:
                       status: DRAFT
                       monthlyFee: 10
                       deactivatedMonthlyFee: 1
-                      perSimQuotaKb: 1048576
+                      perSimQuotaMb: 1048576
                       commercialTerms:
                         testPeriodDays: 15
-                        testQuotaKb: 2097152
+                        testQuotaMb: 2097152
                         testExpiryCondition: PERIOD_OR_QUOTA
                         testExpiryAction: ACTIVATED
                         commitmentPeriodMonths: 6
@@ -8729,10 +9023,10 @@ paths:
                         status: DRAFT
                         monthlyFee: 10
                         deactivatedMonthlyFee: 1
-                        perSimQuotaKb: 1048576
+                        perSimQuotaMb: 1048576
                         commercialTerms:
                           testPeriodDays: 15
-                          testQuotaKb: 2097152
+                          testQuotaMb: 2097152
                           testExpiryCondition: PERIOD_OR_QUOTA
                           testExpiryAction: ACTIVATED
                           commitmentPeriodMonths: 6
@@ -8876,7 +9170,7 @@ paths:
                         cutoffThresholdMb: 10240
                       commercialTerms:
                         testPeriodDays: 30
-                        testQuotaKb: 524288
+                        testQuotaMb: 524288
                         testExpiryCondition: PERIOD_OR_QUOTA
                         testExpiryAction: DEACTIVATED
                         commitmentPeriodMonths: 12
@@ -9371,7 +9665,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/RoamingProfileCreateResponse'
         '400':
-          description: 请求参数错误（如 mcc 为空、mnc 格式非法、ratePerKb 非法）
+          description: 请求参数错误（如 mcc 为空、mnc 格式非法、ratePerMb 非法）
           content:
             application/json:
               schema:
@@ -10265,6 +10559,7 @@ paths:
 
   /bills/{billId}:mark-paid:
     post:
+      tags: [Billing]
       summary: Mark Bill as Paid
       parameters:
         - name: billId
@@ -10288,6 +10583,7 @@ paths:
 
   /bills/{billId}:adjust:
     post:
+      tags: [Billing]
       summary: Create Adjustment Note
       parameters:
         - name: billId

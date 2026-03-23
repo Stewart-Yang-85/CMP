@@ -15,6 +15,7 @@ export function registerPackageRoutes({ app, prefix, deps }) {
     ensureResellerAdmin,
     ensureResellerSales,
     resolveEnterpriseForReseller,
+    getEnterpriseIdFromReq,
     isValidUuid,
   } = deps
 
@@ -75,9 +76,15 @@ export function registerPackageRoutes({ app, prefix, deps }) {
   })
 
   app.get(`${prefix}/enterprises/:enterpriseId/packages`, async (req, res) => {
-    const auth = ensureResellerSales(req, res)
-    if (!auth) return
     const enterpriseIdParam = String(req.params.enterpriseId || '').trim()
+    const roleScope = req?.cmpAuth?.roleScope
+    const tokenEnterpriseId = getEnterpriseIdFromReq(req)
+    let auth = null
+    if ((roleScope === 'customer' || roleScope === 'department') && tokenEnterpriseId && enterpriseIdParam === tokenEnterpriseId) {
+      auth = { ...req.cmpAuth, scope: roleScope }
+    }
+    if (!auth) auth = ensureResellerSales(req, res)
+    if (!auth) return
     if (!isValidUuid(enterpriseIdParam)) {
       return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
     }
@@ -86,6 +93,10 @@ export function registerPackageRoutes({ app, prefix, deps }) {
     if (auth.scope === 'reseller') {
       enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, enterpriseIdParam)
       if (!enterpriseId) return
+    } else if (auth.scope === 'customer' || auth.scope === 'department') {
+      if (enterpriseIdParam !== getEnterpriseIdFromReq(req)) {
+        return sendError(res, 403, 'FORBIDDEN', 'enterpriseId is out of your scope.')
+      }
     }
     const { status, page, pageSize } = req.query ?? {}
     const result = await listPackages({ supabase, enterpriseId, status, page, pageSize })

@@ -13,14 +13,6 @@ async function ensureSupplier(supabase, name) {
   return Array.isArray(created) ? created[0] : null
 }
 
-async function ensureCarrier(supabase, mcc, mnc, name = null) {
-  const rows = await supabase.select('carriers', `select=carrier_id,mcc,mnc,name&mcc=eq.${encodeURIComponent(mcc)}&mnc=eq.${encodeURIComponent(mnc)}&limit=1`)
-  const existing = Array.isArray(rows) ? rows[0] : null
-  if (existing) return existing
-  const created = await supabase.insert('carriers', { mcc, mnc, name })
-  return Array.isArray(created) ? created[0] : null
-}
-
 async function ensureBusinessOperator(supabase, mcc, mnc, name = null) {
   const rows = await supabase.select(
     'business_operators',
@@ -32,29 +24,22 @@ async function ensureBusinessOperator(supabase, mcc, mnc, name = null) {
   return Array.isArray(created) ? created[0] : null
 }
 
-async function ensureSupplierCarrierLink(supabase, supplierId, carrierId) {
-  const rows = await supabase.select(
-    'supplier_carriers',
-    `select=supplier_id,carrier_id&supplier_id=eq.${encodeURIComponent(supplierId)}&carrier_id=eq.${encodeURIComponent(carrierId)}&limit=1`
-  )
-  const existing = Array.isArray(rows) ? rows[0] : null
-  if (existing) return existing
-  const created = await supabase.insert('supplier_carriers', { supplier_id: supplierId, carrier_id: carrierId })
-  return Array.isArray(created) ? created[0] : null
-}
-
-async function ensureOperator(supabase, supplierId, carrierId, name = null) {
+async function ensureOperator(supabase, supplierId, businessOperatorId, name = null) {
   const rows = await supabase.select(
     'operators',
-    `select=operator_id,supplier_id,carrier_id&supplier_id=eq.${encodeURIComponent(supplierId)}&carrier_id=eq.${encodeURIComponent(carrierId)}&limit=1`
+    `select=operator_id,supplier_id,business_operator_id&supplier_id=eq.${encodeURIComponent(supplierId)}&business_operator_id=eq.${encodeURIComponent(businessOperatorId)}&limit=1`
   )
   const existing = Array.isArray(rows) ? rows[0] : null
   if (existing) return existing
-  const created = await supabase.insert('operators', { supplier_id: supplierId, carrier_id: carrierId, name })
+  const created = await supabase.insert('operators', {
+    supplier_id: supplierId,
+    business_operator_id: businessOperatorId,
+    name,
+  })
   return Array.isArray(created) ? created[0] : null
 }
 
-async function ensureSim(supabase, iccid, primaryImsi, msisdn, supplierId, carrierId, operatorId) {
+async function ensureSim(supabase, iccid, primaryImsi, msisdn, supplierId, operatorId) {
   const rows = await supabase.select('sims', `select=sim_id,iccid,primary_imsi,msisdn,operator_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
   const existing = Array.isArray(rows) ? rows[0] : null
   if (existing) {
@@ -72,7 +57,6 @@ async function ensureSim(supabase, iccid, primaryImsi, msisdn, supplierId, carri
     primary_imsi: primaryImsi,
     msisdn,
     supplier_id: supplierId,
-    carrier_id: carrierId,
     operator_id: operatorId,
     status: 'INVENTORY'
   })
@@ -83,11 +67,9 @@ async function main() {
   const supabase = createSupabaseRestClient({ useServiceRole: true })
   const supplier = await ensureSupplier(supabase, 'WXZHONGGENG')
   if (!supplier) throw new Error('Failed to ensure supplier WXZHONGGENG')
-  const carrier = await ensureCarrier(supabase, '204', '08', 'MCC 204 MNC 08')
-  if (!carrier) throw new Error('Failed to ensure carrier 204/08')
-  await ensureBusinessOperator(supabase, '204', '08', 'MCC 204 MNC 08')
-  await ensureSupplierCarrierLink(supabase, supplier.supplier_id, carrier.carrier_id)
-  const operator = await ensureOperator(supabase, supplier.supplier_id, carrier.carrier_id, carrier.name)
+  const bo = await ensureBusinessOperator(supabase, '204', '08', 'MCC 204 MNC 08')
+  if (!bo) throw new Error('Failed to ensure business_operator 204/08')
+  const operator = await ensureOperator(supabase, supplier.supplier_id, bo.operator_id, bo.name)
   if (!operator) throw new Error('Failed to ensure operator link')
 
   const sims = [
@@ -183,7 +165,7 @@ async function main() {
     const imsi = toStr(entry.imsi)
     const msisdn = toStr(entry.msisdn)
     if (!iccid) continue
-    const sim = await ensureSim(supabase, iccid, imsi, msisdn, supplier.supplier_id, carrier.carrier_id, operator.operator_id)
+    const sim = await ensureSim(supabase, iccid, imsi, msisdn, supplier.supplier_id, operator.operator_id)
     if (!sim) throw new Error(`Failed to ensure sim ${iccid}`)
     results.push({ iccid, simId: sim.sim_id })
   }

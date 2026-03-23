@@ -1137,7 +1137,7 @@ export async function batchDeactivateSims({
   }
   const { data, total } = await supabase.selectWithCount(
     'sims',
-    `select=sim_id,iccid,status,activation_date,enterprise_id,supplier_id&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&status=eq.ACTIVATED`
+    `select=sim_id,iccid,status,activation_date,enterprise_id,supplier_id&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&status=in.(ACTIVATED,TEST_READY)`
   )
   const sims = Array.isArray(data) ? data : []
   const totalRows = Number(total ?? sims.length)

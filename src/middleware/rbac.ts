@@ -178,7 +178,7 @@ async function getEffectivePermissions(auth: AuthContext) {
   const role = auth.role ? String(auth.role) : null
   if (role) {
     const rolePermissions = await resolveRolePermissions(role, roleScope)
-    if (rolePermissions !== null) return rolePermissions
+    if (rolePermissions !== null && rolePermissions.length > 0) return rolePermissions
   }
   const defaults = roleScope && defaultPermissionsByRoleScope[roleScope] ? defaultPermissionsByRoleScope[roleScope] : []
   return defaults.slice()

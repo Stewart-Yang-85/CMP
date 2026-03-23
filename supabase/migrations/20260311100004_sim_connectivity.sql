@@ -114,6 +114,14 @@ create table if not exists operators (
   updated_at timestamptz not null default current_timestamp
 );
 
+alter table if exists operators
+  add column if not exists carrier_id uuid references public_infos(public_info_id),
+  add column if not exists business_operator_id uuid references business_operators(operator_id),
+  add column if not exists name text,
+  add column if not exists status text not null default 'ACTIVE',
+  add column if not exists created_at timestamptz not null default current_timestamp,
+  add column if not exists updated_at timestamptz not null default current_timestamp;
+
 -- Unique index on (supplier_id, business_operator_id) where not null (from 0042/0044)
 create unique index if not exists idx_operators_supplier_business_operator_unique
   on operators(supplier_id, business_operator_id)

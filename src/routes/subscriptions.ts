@@ -124,11 +124,13 @@ export function registerSubscriptionRoutes({ app, prefix, deps }: { app: any; pr
         return sendError(res, 401, 'UNAUTHORIZED', 'Enterprise token required.')
       }
     }
+    const newPackageVersionId = body.toPackageVersionId ?? body.newPackageVersionId
     const result = await switchSubscription({
       supabase,
       enterpriseId,
       iccid: body.iccid,
-      newPackageVersionId: body.newPackageVersionId,
+      fromSubscriptionId: body.fromSubscriptionId,
+      newPackageVersionId,
       effectiveStrategy: body.effectiveStrategy,
       tenantFilter: buildSimTenantFilter(req, enterpriseId),
       audit,
@@ -171,11 +173,12 @@ export function registerSubscriptionRoutes({ app, prefix, deps }: { app: any; pr
         return sendError(res, 401, 'UNAUTHORIZED', 'Enterprise token required.')
       }
     }
+    const immediate = (body.immediate !== undefined && body.immediate !== null) ? body.immediate : query.immediate
     const result = await cancelSubscription({
       supabase,
       enterpriseId,
       subscriptionId: req.params.subscriptionId,
-      immediate: query.immediate,
+      immediate,
       audit,
     })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)

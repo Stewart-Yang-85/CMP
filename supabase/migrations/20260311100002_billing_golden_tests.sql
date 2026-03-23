@@ -208,7 +208,16 @@ begin
       current_timestamp
     )
     returning bill_id into v_bill_id;
+  else
+    update bills
+    set status = 'PUBLISHED',
+        total_amount = v_total,
+        paid_at = null,
+        published_at = coalesce(published_at, current_timestamp)
+    where bill_id = v_bill_id;
   end if;
+
+  delete from bill_line_items where bill_id = v_bill_id;
 
   insert into bill_line_items (bill_id, item_type, amount, metadata)
   select
@@ -429,11 +438,17 @@ declare
   v_list jsonb;
   v_total int;
   v_items jsonb;
-  v_first jsonb;
+  v_golden_item jsonb;
   v_bill_id uuid;
   v_bill jsonb;
+  v_enterprise_id uuid;
 begin
-  v_list := list_bills('2026-02', null, null, null, 20, 0);
+  select tenant_id into v_enterprise_id
+  from tenants
+  where code = 'ENT_GOLDEN'
+  limit 1;
+
+  v_list := list_bills('2026-02', null, null, null, 100, 0);
   if v_list is null then
     raise exception 'bills api assertion failed: list_bills returned null';
   end if;
@@ -448,20 +463,24 @@ begin
     raise exception 'bills api assertion failed: items not array';
   end if;
 
-  v_first := v_items->0;
-  if v_first is null then
-    raise exception 'bills api assertion failed: first item missing';
+  select elem into v_golden_item
+  from jsonb_array_elements(v_items) as elem
+  where (elem->>'enterpriseId')::uuid = v_enterprise_id
+  limit 1;
+
+  if v_golden_item is null then
+    raise exception 'bills api assertion failed: golden bill not found in list for ENT_GOLDEN %', v_enterprise_id;
   end if;
 
-  if (v_first->>'period') <> '2026-02' then
-    raise exception 'bills api assertion failed: period % <> 2026-02', v_first->>'period';
+  if (v_golden_item->>'period') <> '2026-02' then
+    raise exception 'bills api assertion failed: period % <> 2026-02', v_golden_item->>'period';
   end if;
 
-  if (v_first->>'totalAmount')::numeric(12, 2) <> 512.0 then
-    raise exception 'bills api assertion failed: totalAmount % <> 512.0', v_first->>'totalAmount';
+  if (v_golden_item->>'totalAmount')::numeric(12, 2) <> 512.0 then
+    raise exception 'bills api assertion failed: totalAmount % <> 512.0', v_golden_item->>'totalAmount';
   end if;
 
-  v_bill_id := (v_first->>'billId')::uuid;
+  v_bill_id := (v_golden_item->>'billId')::uuid;
   v_bill := get_bill(v_bill_id);
   if v_bill is null then
     raise exception 'bills api assertion failed: get_bill returned null';
