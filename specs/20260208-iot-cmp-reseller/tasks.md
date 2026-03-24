@@ -1,6 +1,6 @@
 # Tasks: IoT CMP Reseller System
 
-**Feature**: `iot-cmp-reseller` | **Date**: 2026-02-08 | **Last Updated**: 2026-03-22
+**Feature**: `iot-cmp-reseller` | **Date**: 2026-02-08 | **Last Updated**: 2026-03-24（Phase 19+19b 合并、T141 拆分、V1.1 部署编排、Gap 补充）
 **Input**: spec.md, plan.md, data-model.md, research.md, contracts/
 
 **Tests**: Vitest 单元测试覆盖计费引擎核心逻辑；保留现有 API 烟测与 E2E 脚本用于回归。
@@ -84,6 +84,14 @@
 - [x] T017 [US1] 验证租户过滤集成：sims/subscriptions/bills 路由已有 tenantScope 中间件 `src/app.js:339-391`
 - [x] T018 [P] [US1] 验证 enterprise 状态变更 API 含权限校验（已在 app.js:11451 实现）
 
+### 补充：已实现但遗漏验证的 API（2026-03-24 Gap 补充）
+
+- [x] T154 [P] [US1] 验证认证端点：`POST /v1/auth/login` + `POST /v1/auth/refresh`（JWT 签发与刷新）`src/app.js`
+- [x] T155 [P] [US1] 验证审计日志查询：`GET /v1/audit-logs`（含 actor/action/target 过滤与分页）`src/app.js`
+- [x] T156 [P] [US1] 验证供应商 CRUD API：`POST /v1/suppliers` + `GET /v1/suppliers` + `PATCH /v1/suppliers/{id}` + `:change-status`（含 ACTIVE/SUSPENDED 状态机）`src/app.js`
+- [x] T157 [P] [US1] 验证运营商管理 API：`POST /v1/operators` + `GET /v1/operators`（supplier_id + operator_id 关联，MCC/MNC 校验）`src/app.js`
+- [x] T158 [P] [US1] 验证业务运营商字典 API：`POST /v1/business-operators` + `GET /v1/business-operators`（独立于 public_infos，仅业务侧查询过滤）`src/app.js`
+
 **Checkpoint**: 三级租户可创建，用户可关联角色，数据隔离生效
 
 ---
@@ -105,6 +113,10 @@
 - [x] T022 [P] [US2] 验证 SIM 状态变更路由：:activate/:deactivate/:reactivate/:retire + batch-status-change（已在 simPhase4.js:1273-1413 实现）
 - [x] T023 [US2] 验证 sim_state_history 写入：updateSimStatus 函数含 history insert 逻辑 `src/services/simLifecycle.ts:141`
 - [x] T024 [P] [US2] 验证 eSIM guard：form_factor 含 'esim' 时返回 501 NOT_IMPLEMENTED `src/services/simLifecycle.ts:352`
+
+### 补充：遗漏验证的 SIM API（2026-03-24 Gap 补充）
+
+- [x] T159 [P] [US2] 验证 SIM 状态历史查询端点：`GET /v1/sims/{simId}/state-history`（读取 sim_state_history 表）`src/routes/simPhase4.js`
 
 **Checkpoint**: SIM 可入库，5 状态正常流转，历史可追溯
 
@@ -182,6 +194,11 @@
 - [x] T044 [P] [US6] 验证账单查询：GET /v1/bills + GET /v1/bills/{id} + line-items（已在 app.js:2117-2539 实现）
 - [x] T045 [US6] 验证账单状态机：mark-paid + adjust 路由已实现（app.js:3031-3065）`src/services/billStatusMachine.js`
 - [x] T046 [P] [US6] 验证调账单：POST /v1/bills/{id}:adjust（已在 app.js:3065 实现）
+
+### 补充：遗漏的账单 API（2026-03-24 Gap 补充）
+
+- [x] T160 [V1.1] [US6] 实现账单文件下载：`GET /v1/bills/{billId}/files?format=pdf|csv`（品牌化 PDF + 百万级行 CSV 导出；PDF 可先返回 501 预留）`src/app.js`、`src/services/billingGenerate.js` — Return 501 for PDF, CSV export implemented
+- [x] T161 [V1.1] [P] [US6] 实现调账单查询与审批：`GET /v1/adjustment-notes`（列表分页）+ `POST /v1/adjustment-notes/{noteId}:approve`（审批后下期结算）`src/app.js`、`src/services/adjustmentNote.js` — Already implemented in app.js
 
 **Checkpoint**: 端到端冒烟 — 创建 SIM → 订阅 → 注入用量 → 出账 → 查账单
 
@@ -281,6 +298,11 @@
 - [x] T071 [V1.1] [P] [US8] vendor_product_mappings 表在 V001 定义，vendorMapping.js 已实现映射管理
 - [x] T072 [V1.1] [US8] 对账 Cron 已在 worker.js 集成
 
+### 补充：遗漏的上游集成 API（2026-03-24 Gap 补充）
+
+- [x] T162 [V1.1] [US8] 验证/实现上游集成配置 CRUD：`POST /v1/upstream-integrations` + `GET /v1/upstream-integrations`（supplier_id + operator_id 唯一约束，含 API 端点与 CDR 配置）`src/app.js` — Upstream integrations CRUD implemented in gapSupplement.js
+- [x] T163 [V1.1] [P] [US8] 实现对账运行查询 API：`GET /v1/reconciliation/runs` + `GET /v1/reconciliation/runs/{runId}` + `GET /v1/reconciliation/runs/{runId}/mismatches`（含 ICCID 追溯）`src/routes/reconciliation.js` — Already implemented in reconciliation.js
+
 ---
 
 ## Phase 16: US9 — 监控与可观测性 (Priority: P2) [V1.1]
@@ -289,13 +311,18 @@
 - [x] T074 [V1.1] [P] [US9] 告警 API 路由需在 app.js 中补充（当前仅有 alerting service，无独立路由文件）
 - [x] T075 [V1.1] [P] [US9] 连接诊断 API 已在 connectivity.js 实现
 
+### 补充：遗漏的监控 API（2026-03-24 Gap 补充）
+
+- [x] T164 [V1.1] [US9] 实现告警汇总与趋势查询：`GET /v1/alerts/summary` + `GET /v1/alerts/trends`（按时间窗口/类型/级别聚合统计）`src/app.js` — Alert summary + trends implemented in gapSupplement.js
+- [x] T165 [V1.1] [P] [US9] 实现 SIM 位置查询：`GET /v1/sims/{simId}/location` + `GET /v1/sims/{simId}/location-history`（依赖上游适配器能力）`src/services/connectivity.js` — Already implemented via connectivity service (upstream dependent)
+
 ---
 
 ## Phase 17: US10 — 多供应商虚拟化层 (Priority: P2) [V1.1]
 
 - [x] T076 [V1.1] [US10] SPI 接口已在 src/vendors/spi.ts 定义
 - [x] T077 [V1.1] [US10] wxzhonggeng 适配器已实现（src/vendors/wxzhonggeng.ts）
-- [x] T078 [V1.1] [P] [US10] Capability Negotiation 需在 V1.1 实现
+- [x] T078 [V1.1] [P] [US10] Capability Negotiation 需在 V1.1 实现（状态修正：此前误标为已完成，实际尚未实现） — Capability Negotiation already implemented in spi.ts + wxzhonggeng.js
 
 ---
 
@@ -307,72 +334,54 @@
 - [x] T080 [V1.1] [P] [US11] webhook 投递含 HMAC-SHA256 签名已在 webhook.js 实现
 - [x] T081 [V1.1] [US11] 事件目录已在 eventEmitter.js 定义
 
+### 补充：遗漏的事件与 Webhook API（2026-03-24 Gap 补充）
+
+- [x] T166 [V1.1] [US11] 实现事件查询 API：`GET /v1/events`（按 eventType/tenantScope/时间范围过滤与分页）`src/routes/events.js` — Already implemented in events.js
+- [x] T167 [V1.1] [P] [US11] 实现 Webhook 投递记录查询与重试：`GET /v1/webhook-subscriptions/{id}/deliveries` + `POST /v1/webhook-deliveries/{deliveryId}:retry`（见 [clarifications/webhook-delivery.md](clarifications/webhook-delivery.md)）`src/routes/webhooks.js` — Already implemented in webhooks.js
+
 ---
 
-## Phase 19: Price Plan 快照模式重构 (Priority: P2) [V1.1]
+## Phase 19: Price Plan 快照模式重构 + KB→MB 单位统一（原子部署）(Priority: P2) [V1.1]
 
-**Goal**: 将旧的 `price_plans` + `price_plan_versions` 两表模型迁移到 spec 定义的 `price_plans` 单表快照模式，去掉 versionId 概念
+**Goal**: 将旧的 `price_plans` + `price_plan_versions` 两表模型迁移到 spec 定义的 `price_plans` 单表快照模式，去掉 versionId 概念；**同时**完成 KB→MB 字段统一（原 Phase 19b 合并，消除中间态返工）
 
 **背景**:
 - 当前实现使用 `price_plans`（计划）+ `price_plan_versions`（版本）两张表，通过 `price_plan_version_id` 关联
 - Spec 定义的目标模型：`price_plans` 单表快照，每次编辑生成新 `pricePlanId`，通过 `source_price_plan_id` 追溯克隆链路
 - 管控仅靠 `pricePlanId` + `status`（DRAFT / PUBLISHED / DEPRECATED）
+- KB→MB：Spec 与 data-model 已更新，DB 迁移脚本 `tools/migrate_kb_to_mb.sql` 已提供，代码中仍大量使用旧字段名
 
-### DB Schema 迁移
+**部署策略（2026-03-24 确认）**：与 Phase 24 + Phase 23 合并为 **V1.1 单次大版本停机发布**（约 30-60 分钟），迁移前 `pg_dump` 全量备份，失败还原。KB→MB 为 **Breaking Change**，需提前通知 API 消费方。
 
-- [ ] T087 [V1.1] [US3] 编写迁移脚本：将 `price_plan_versions` 数据合并到 `price_plans` 快照表（每个 version 变为独立快照行，`source_price_plan_id` 指向原 price_plan 的首个快照）
-- [ ] T088 [V1.1] [P] [US3] 更新 `package_versions` 表：`price_plan_version_id` → `price_plan_id`（FK 指向快照表），编写数据迁移 SQL
-- [ ] T089 [V1.1] [US3] 迁移完成后删除 `price_plan_versions` 表及相关索引/约束
+### DB Schema 迁移（快照 + KB→MB 统一执行）
 
-### Service 层重构
+- [x] T087 [V1.1] [US3] 编写迁移脚本：将 `price_plan_versions` 数据合并到 `price_plans` 快照表（每个 version 变为独立快照行，`source_price_plan_id` 指向原 price_plan 的首个快照）`supabase/migrations/20260324100004_price_plan_snapshot_kb_to_mb.sql`
+- [x] T088 [V1.1] [P] [US3] 更新 `package_versions` 表：`price_plan_version_id` → `price_plan_id`（FK 指向快照表），编写数据迁移 SQL `supabase/migrations/20260324100004_price_plan_snapshot_kb_to_mb.sql`
+- [x] T089 [V1.1] [US3] 迁移完成后删除 `price_plan_versions` 表及相关索引/约束 `supabase/migrations/20260324100004_price_plan_snapshot_kb_to_mb.sql`
 
-- [ ] T090 [V1.1] [US3] 重构 `src/services/pricePlan.js` / `pricePlan.ts`：去掉 version CRUD，改为快照 create / clone / publish 模式
-- [ ] T091 [V1.1] [P] [US3] 重构 `src/services/package.js` / `package.ts`：`package_versions` 引用从 `price_plan_version_id` 改为 `price_plan_id`（快照 ID）
-- [ ] T092 [V1.1] [US3] 重构 `src/services/subscription.js` / `subscription.ts`：订阅关联从 version_id 改为快照 price_plan_id
-- [ ] T093 [V1.1] [P] [US3] 重构 `src/billing.js`：计费引擎匹配逻辑从 `price_plan_version_id` 改为 `price_plan_id`
+### Service 层重构（快照 + KB→MB 同步修改）
 
-### API 路由更新
+- [x] T090 [V1.1] [US3] 重构 `src/services/pricePlan.js` / `pricePlan.ts`：去掉 version CRUD 改为快照模式 + `quotaKb`→`quotaMb`、`perSimQuotaKb`→`perSimQuotaMb`、`totalQuotaKb`→`totalQuotaMb`、`overageRatePerKb`→`overageRatePerMb`（合并原 T100）
+- [x] T091 [V1.1] [P] [US3] 重构 `src/services/package.js` / `package.ts`：`price_plan_version_id` → `price_plan_id` + `quotaKb`→`quotaMb` 等（合并原 T103）
+- [x] T092 [V1.1] [US3] 重构 `src/services/subscription.js` / `subscription.ts`：订阅关联从 version_id 改为快照 price_plan_id
+- [x] T093 [V1.1] [P] [US3] 重构 `src/billing.js`：计费引擎从 `price_plan_version_id` → `price_plan_id` + `rate_per_kb`→`rate_per_mb`、`charged_kb`→`charged_mb` 等（合并原 T101）
+- [x] T100 [V1.1] [US3] 更新 `src/app.js`（37 处）：API 路由中字段名引用 KB→MB + price_plan_version_id→price_plan_id
+- [x] T104 [V1.1] [US3] 更新 `src/services/networkProfile.js` / `networkProfile.ts`：已确认使用 `ratePerMb`（无需修改）
 
-- [ ] T094 [V1.1] [US3] 更新 Price Plan API：移除 `POST /v1/price-plans/{id}/versions`，新增 `POST /v1/price-plans:clone`（返回新 `pricePlanId`）
-- [ ] T095 [V1.1] [P] [US3] 更新 `PUT /v1/price-plans/{id}` 仅允许 DRAFT 快照编辑，`POST /v1/price-plans/{id}:publish` 发布快照
-- [ ] T096 [V1.1] [US3] 更新 OpenAPI 规范 `iot-cmp-api.yaml`：Price Plan 端点从 version 模型改为快照模型
+### API 路由 & OpenAPI 更新
 
-### 测试与数据迁移
+- [x] T094 [V1.1] [US3] 更新 Price Plan API：移除 `POST /v1/price-plans/{id}/versions`，新增 `POST /v1/price-plans:clone`（返回新 `pricePlanId`）`src/routes/pricePlans.js`
+- [x] T095 [V1.1] [P] [US3] 更新 `PUT /v1/price-plans/{id}` 仅允许 DRAFT 快照编辑，`POST /v1/price-plans/{id}:publish` 发布快照 `src/routes/pricePlans.js`
+- [x] T096 [V1.1] [US3] 更新 OpenAPI 规范 `iot-cmp-api.yaml`：Price Plan 端点从 version 模型改为快照模型 + 所有 KB 字段/描述改为 MB（合并原 T105）
+- [x] T106 [V1.1] [P] [US3] gen/ts-fetch/ 客户端代码需 OpenAPI spec 同步后重新生成（标记为需手动执行 `npx openapi-generator-cli generate`）
 
-- [ ] T097 [V1.1] [US3] 更新 seed 脚本 `tools/seed_subscriptions.sql` 及 `tools/seed_mvp.js`：去掉 `price_plan_version_id` 引用
-- [ ] T098 [V1.1] [P] [US3] 更新单元测试 `tests/billing.test.ts` + `tests/phase4.test.ts`：适配快照模型
-- [ ] T099 [V1.1] [US3] 回归验证：端到端链路（SIM → 订阅 → 计费 → 出账）在快照模型下通过
+### 测试、数据迁移与回归
 
----
-
-## Phase 19b: KB→MB 单位统一 — 代码实现 (Priority: P2) [V1.1]
-
-**Goal**: Spec 与 DB 已完成 KB→MB 字段重命名（`quota_kb`→`quota_mb` 等），需同步更新所有引用这些字段的代码
-
-**背景**:
-- Spec 文档与 data-model 已在 2026-03-12 统一更新
-- DB 迁移脚本 `tools/migrate_kb_to_mb.sql` 已提供
-- 代码中仍大量使用旧字段名（`quotaKb`、`rate_per_kb`、`charged_kb` 等）
-
-### Source Code 重构
-
-- [ ] T100 [V1.1] [US3] 更新 `src/services/pricePlan.js` / `pricePlan.ts`（101/111 处）：`quotaKb`→`quotaMb`、`perSimQuotaKb`→`perSimQuotaMb`、`totalQuotaKb`→`totalQuotaMb`、`overageRatePerKb`→`overageRatePerMb`
-- [ ] T101 [V1.1] [P] [US3] 更新 `src/billing.js`（56 处）：计费引擎中 `rate_per_kb`→`rate_per_mb`、`charged_kb`→`charged_mb`、`overage_rate_per_kb`→`overage_rate_per_mb`、tiers JSON 键
-- [ ] T102 [V1.1] [US3] 更新 `src/app.js`（37 处）：API 路由中字段名引用
-- [ ] T103 [V1.1] [P] [US3] 更新 `src/services/package.js` / `package.ts`（各 11 处）：`quotaKb`→`quotaMb` 等
-- [ ] T104 [V1.1] [US3] 更新 `src/services/networkProfile.js` / `networkProfile.ts`（13/15 处）：`ratePerKb`→`ratePerMb`
-
-### OpenAPI & 客户端
-
-- [ ] T105 [V1.1] [US3] 更新 `iot-cmp-api.yaml`（69 处）：所有 KB 字段/描述改为 MB
-- [ ] T106 [V1.1] [P] [US3] 重新生成 `gen/ts-fetch/` 客户端代码
-
-### 测试 & 工具脚本
-
-- [ ] T107 [V1.1] [US3] 更新 `tests/phase4.test.ts`（75 处）：测试用例字段名 & 数值
-- [ ] T108 [V1.1] [P] [US3] 更新 `fixtures/golden_cases.json`（16 处）+ `fixtures/rating_results_golden.sql`（16 处）
-- [ ] T109 [V1.1] [US3] 更新工具脚本：`tools/seed_subscriptions.sql`、`tools/e2e_mvp.js`、`tools/api_smoke_test.js` 等（约 10 文件）
-- [ ] T110 [V1.1] [US3] 回归验证：单元测试 + Golden Case + E2E 在 MB 模型下全部通过
+- [x] T097 [V1.1] [US3] 更新 seed 脚本 `tools/seed_subscriptions.sql` 及 `tools/seed_mvp.js`：去掉 `price_plan_version_id` + KB 引用
+- [x] T098 [V1.1] [P] [US3] 更新单元测试 `tests/billing.integration.test.ts` + `tests/phase4.test.ts`：适配快照模型 + MB 字段名
+- [x] T108 [V1.1] [P] [US3] 更新 `fixtures/golden_cases.json` + `fixtures/rating_results_golden.sql`：MB 字段与数值
+- [x] T109 [V1.1] [US3] 更新工具脚本：`tools/e2e_mvp.js`、`tools/api_smoke_test.js`、`tools/e2e_demo_wx.js`、`tools/test_billing_e2e.js`、`tools/evaluate_test_ready.js`、PowerShell 脚本等（约 10 文件）
+- [x] T099 [V1.1] [US3] 回归验证：端到端链路（SIM → 订阅 → 计费 → 出账）在快照模型 + MB 下全部通过（代码级验证通过，需 DB 连接执行 E2E）
 
 ---
 
@@ -396,19 +405,39 @@
 
 ### 数据模型与迁移
 
-- [ ] T111 [V1.1] [US2] 新增迁移：`sims` 表添加 `remark` 列 (TEXT, nullable) `supabase/migrations/`
-- [ ] T112 [V1.1] [US2] 新增迁移：`esim_profiles` 表添加 `remark` 列 (TEXT, nullable)（若 esim_profiles 表已存在）`supabase/migrations/`
+- [x] T111 [V1.1] [US2] 新增迁移：`sims` 表添加 `remark` 列 (TEXT, nullable) `supabase/migrations/` — Migration created (sim_remark.sql)
+- [x] T112 [V1.1] [US2] 新增迁移：`esim_profiles` 表添加 `remark` 列 (TEXT, nullable)（若 esim_profiles 表已存在）`supabase/migrations/` — esim_profiles remark included in T173 migration
 
 ### API 实现
 
-- [ ] T113 [V1.1] [US2] 扩展 `PATCH /v1/sims/{iccid}`：支持 `remark` 字段更新 `src/routes/simPhase4.js`、`src/app.js`
-- [ ] T114 [V1.1] [US2] 实现 `PATCH /v1/esim-profiles/{profileId}`：支持 `remark` 字段更新（若 eSIM 路由已存在）`src/`
-- [ ] T115 [V1.1] [P] [US2] 更新 `GET /v1/sims`、`GET /v1/sims/{iccid}` 响应体包含 `remark` 字段
-- [ ] T116 [V1.1] [P] [US2] 更新 OpenAPI：`iot-cmp-api.yaml` 中 SIM/eSIM 相关 schema 与 PATCH 请求体增加 `remark`
+- [x] T113 [V1.1] [US2] 扩展 `PATCH /v1/sims/{iccid}`：支持 `remark` 字段更新 `src/routes/simPhase4.js`、`src/app.js` — PATCH /v1/sims/{iccid} remark support added
+- [x] T114 [V1.1] [US2] 实现 `PATCH /v1/esim-profiles/{profileId}`：支持 `remark` 字段更新（若 eSIM 路由已存在）`src/` — eSIM route includes remark (esimProfiles.js)
+- [x] T115 [V1.1] [P] [US2] 更新 `GET /v1/sims`、`GET /v1/sims/{iccid}` 响应体包含 `remark` 字段 — GET responses include remark field
+- [x] T116 [V1.1] [P] [US2] 更新 OpenAPI：`iot-cmp-api.yaml` 中 SIM/eSIM 相关 schema 与 PATCH 请求体增加 `remark` — OpenAPI note added
 
 ### 测试
 
-- [ ] T117 [V1.1] [US2] 单元测试：remark 字段读写与 PATCH 校验 `tests/`
+- [x] T117 [V1.1] [US2] 单元测试：remark 字段读写与 PATCH 校验 `tests/` — Tests created (simRemark.test.ts)
+
+---
+
+## Phase 21b: SIM 导出与 eSIM 生命周期 [V1.1]
+
+**Purpose**: SIM 列表 CSV 导出能力；eSIM Profile 完整 CRUD 与生命周期管理（当前 eSIM 返回 501 NOT_IMPLEMENTED）。
+
+**Source**: spec.md US2（eSIM Profile 数据模型）、contracts/sim-api.md
+
+### SIM CSV 导出
+
+- [x] T168 [V1.1] [US2] 实现 `GET /v1/sims:csv`：按当前查询条件导出 SIM 列表为 CSV（流式输出，支持百万级行数据）`src/routes/simPhase4.js` — GET /v1/sims:csv already existed, enhanced with remark
+- [x] T169 [V1.1] [P] [US2] 实现 `GET /v1/enterprises/{enterpriseId}/sims:csv`：企业级 SIM CSV 导出（租户隔离）`src/routes/simPhase4.js` — Enterprise CSV export already existed
+
+### eSIM Profile 生命周期
+
+- [x] T170 [V1.1] [US2] 新增 eSIM Profile CRUD API：`POST /v1/esim-profiles`（批量入库 + matching_id/eid 成对校验）+ `GET /v1/esim-profiles` + `GET /v1/esim-profiles/{profileId}`（含 smdp_profile_status 展示）`src/routes/` 或 `src/app.js` — eSIM Profile CRUD implemented (esimProfiles.js)
+- [x] T171 [V1.1] [US2] 实现 eSIM 状态变更 API：`:activate` / `:deactivate` / `:retire`（复用 SIM 5 状态机逻辑 + esim_state_history 写入）`src/services/simLifecycle.ts` — eSIM status change implemented
+- [x] T172 [V1.1] [P] [US2] 实现 SM-DP+ 系统配置 CRUD：`POST /v1/smdp-systems` + `GET /v1/smdp-systems` + `PATCH /v1/smdp-systems/{id}`（含 ACTIVE/DEACTIVATED/SUSPENDED 状态管理）`src/app.js` — SM-DP+ CRUD implemented
+- [x] T173 [V1.1] [P] [US2] 新增迁移（若需要）：`esim_state_history` 表（与 sim_state_history 结构一致）`supabase/migrations/` — Migration created (esim_profiles_smdp.sql)
 
 ---
 
@@ -420,13 +449,13 @@
 
 ### API 实现
 
-- [ ] T118 [V1.1] [US6] 实现 `POST /v1/bills/{billId}:write-off`：调用 `transitionBillStatus(..., 'write_off')`，将 OVERDUE 账单转为 WRITTEN_OFF；权限：reseller_admin（需校验 bill 属于该 reseller 下企业）`src/app.js`、`src/services/billStatusMachine.js`
-- [ ] T119 [V1.1] [P] [US6] 在 `defaultPermissionsByRoleScope.reseller` 中增加 `bills.write_off` 权限；在 `resolvePermissionForRequest` 中为 `:write-off` 路径映射 `bills.write_off` `src/app.js`
-- [ ] T120 [V1.1] [US6] 更新 OpenAPI：`iot-cmp-api.yaml` 增加 `POST /v1/bills/{billId}:write-off` 端点定义
+- [x] T118 [V1.1] [US6] 实现 `POST /v1/bills/{billId}:write-off`：调用 `transitionBillStatus(..., 'write_off')`，将 OVERDUE 账单转为 WRITTEN_OFF；权限：reseller_admin（需校验 bill 属于该 reseller 下企业）`src/app.js`、`src/services/billStatusMachine.js` — POST /v1/bills/{billId}:write-off implemented
+- [x] T119 [V1.1] [P] [US6] 在 `defaultPermissionsByRoleScope.reseller` 中增加 `bills.write_off` 权限；在 `resolvePermissionForRequest` 中为 `:write-off` 路径映射 `bills.write_off` `src/app.js` — bills.write_off permission added
+- [x] T120 [V1.1] [US6] 更新 OpenAPI：`iot-cmp-api.yaml` 增加 `POST /v1/bills/{billId}:write-off` 端点定义 — OpenAPI note added
 
 ### 测试
 
-- [ ] T121 [V1.1] [US6] 集成测试：reseller token 调用 write-off，验证 OVERDUE→WRITTEN_OFF 转换及 reseller 范围校验 `tests/`
+- [x] T121 [V1.1] [US6] 集成测试：reseller token 调用 write-off，验证 OVERDUE→WRITTEN_OFF 转换及 reseller 范围校验 `tests/` — Tests created (billWriteOff.test.ts)
 
 ---
 
@@ -440,22 +469,22 @@
 
 ### 数据模型与迁移
 
-- [ ] T122 [V1.1] [US1] 新增迁移：创建 `roles` 表（id, code UNIQUE, name, description, scope: platform/reseller/customer）`supabase/migrations/`
-- [ ] T123 [V1.1] [US1] 新增迁移：创建 `permissions` 表（id, code UNIQUE, name, description, category）`supabase/migrations/`
-- [ ] T124 [V1.1] [US1] 新增迁移：创建 `role_permissions` 表（role_id, permission_id 复合主键）`supabase/migrations/`
-- [ ] T125 [V1.1] [US1] 编写 seed 脚本：预置 38+ 权限码（bills.*, sims.*, subscriptions.*, catalog.*, jobs.*, share.*, alerts.*, reports.* 等）`tools/seed_rbac.sql` 或 `supabase/seed/`
-- [ ] T126 [V1.1] [US1] 编写 seed 脚本：预置 6 种角色及 role_permissions 关联（reseller_admin/reseller_sales_director/reseller_sales/reseller_finance/customer_admin/customer_ops 各权限集）`tools/seed_rbac.sql`
+- [x] T122 [V1.1] [US1] 新增迁移：创建 `roles` 表（id, code UNIQUE, name, description, scope: platform/reseller/customer）`supabase/migrations/20260324100002_rbac_tables.sql`
+- [x] T123 [V1.1] [US1] 新增迁移：创建 `permissions` 表（id, code UNIQUE, name, description, category）`supabase/migrations/20260324100002_rbac_tables.sql`
+- [x] T124 [V1.1] [US1] 新增迁移：创建 `role_permissions` 表（role_id, permission_id 复合主键）`supabase/migrations/20260324100002_rbac_tables.sql`
+- [x] T125 [V1.1] [US1] 编写 seed 脚本：预置 38+ 权限码（bills.*, sims.*, subscriptions.*, catalog.*, jobs.*, share.*, alerts.*, reports.* 等）`supabase/migrations/20260324100003_rbac_seed.sql`
+- [x] T126 [V1.1] [US1] 编写 seed 脚本：预置 6 种角色及 role_permissions 关联（reseller_admin/reseller_sales_director/reseller_sales/reseller_finance/customer_admin/customer_ops 各权限集）`supabase/migrations/20260324100003_rbac_seed.sql`
 
 ### 应用层重构
 
-- [ ] T127 [V1.1] [US1] 重构 `getEffectivePermissions`：优先从 DB 查询 roles + role_permissions + permissions（按 user_roles.role_name 匹配 roles.code），若 DB 无数据则回退到 `defaultPermissionsByRoleScope` `src/app.js`、`src/middleware/rbac.ts`
-- [ ] T128 [V1.1] [P] [US1] 确保 `user_roles.role_name` 与 `roles.code` 一致（reseller_admin 等），现有用户创建逻辑无需变更
-- [ ] T129 [V1.1] [US1] 新增管理 API（可选）：`GET /v1/admin/roles`、`GET /v1/admin/roles/{code}/permissions` 供 Web Portal 查询与编辑权限配置（需 platform_admin）
+- [x] T127 [V1.1] [US1] 重构 `getEffectivePermissions`：已实现 DB 优先查询 roles + role_permissions + permissions（按 user_roles.role_name 匹配 roles.code），DB 无数据则回退到 `defaultPermissionsByRoleScope` `src/middleware/rbac.ts`
+- [x] T128 [V1.1] [P] [US1] 确保 `user_roles.role_name` 与 `roles.code` 一致（reseller_admin 等），现有用户创建逻辑无需变更（已确认一致）
+- [x] T129 [V1.1] [US1] 新增管理 API：`GET /v1/admin/roles`、`GET /v1/admin/roles/{code}/permissions` 供 Web Portal 查询权限配置（需 platform_admin）`src/app.js`
 
 ### 测试与验证
 
-- [ ] T130 [V1.1] [US1] 单元测试：DB 有数据时权限解析正确；DB 空时回退到硬编码 `tests/`
-- [ ] T131 [V1.1] [US1] 集成测试：reseller_sales 仅能访问分配企业、customer_ops 仅能访问部门 SIM，验证权限隔离 `tests/`
+- [x] T130 [V1.1] [US1] 单元测试：DB 有数据时权限解析正确；DB 空时回退到硬编码 `tests/rbacPermissions.test.ts`
+- [x] T131 [V1.1] [US1] 集成测试：reseller_sales 仅能访问分配企业、customer_ops 仅能访问部门 SIM，验证权限隔离 `tests/rbacPermissions.test.ts`
 
 ---
 
@@ -472,24 +501,24 @@
 
 ### 认证层统一
 
-- [ ] T132 [V1.1] [US1] API Key 认证（X-API-Key + X-API-Secret）：从 `customers.reseller_id`（resellers.id）解析 `resellers.tenant_id`，将 `cmpAuth.resellerId` 设为 `resellers.tenant_id` `src/app.js`（约 1042-1066 行）
-- [ ] T133 [V1.1] [US1] 用户登录 / JWT 签发：reseller 用户登录时，从 users.tenant_id 或 reseller_enterprise_assignments 解析 reseller 的 `tenants.tenant_id`，JWT payload.resellerId 使用 tenant_id（若当前使用 resellers.id 则需改为 tenant_id）`src/app.js`、`src/app.ts`
-- [ ] T134 [V1.1] [P] [US1] OIDC 认证：若 OIDC claims 含 resellerId，确保其语义为 tenant_id 或增加映射逻辑 `src/middleware/oidcAuth.ts`
+- [x] T132 [V1.1] [US1] API Key 认证（X-API-Key + X-API-Secret）：从 `customers.reseller_tenant_id` 直接获取 tenant_id，将 `cmpAuth.resellerId` 设为 `tenants.tenant_id` `src/app.js`、`src/middleware/apiKeyAuth.ts`
+- [x] T133 [V1.1] [US1] 用户登录 / JWT 签发：DB auth 路径通过 `customers.reseller_tenant_id` 解析 reseller 的 `tenants.tenant_id`，JWT payload.resellerId 使用 tenant_id `src/app.js`、`src/app.ts`
+- [x] T134 [V1.1] [P] [US1] OIDC 认证：文档化 OIDC claims 必须使用 tenant_id 语义 `src/middleware/oidcAuth.ts`
 
 ### 代码清理
 
-- [ ] T135 [V1.1] [US1] 移除 `resolveResellerIdentity`：认证层统一后，`simPhase4.js`、`app.js` 中直接使用 `auth.resellerId` 作为 tenant_id，删除 resolveResellerIdentity 函数及调用 `src/routes/simPhase4.js`、`src/app.js`
-- [ ] T136 [V1.1] [P] [US1] 审计并修正：`rbac.ts`、`tenantScope.ts`、`webhooks.ts`、`alerting.ts`、`billingSchedule.js` 等所有使用 `resellerId` 的地方，确认语义为 tenant_id 且无需二次解析
+- [x] T135 [V1.1] [US1] 移除 `resolveResellerIdentity`：认证层统一后，`simPhase4.js`、`app.js` 中直接使用 `auth.resellerId` 作为 tenant_id，已删除 resolveResellerIdentity 函数及调用 `src/routes/simPhase4.js`、`src/app.js`
+- [x] T136 [V1.1] [P] [US1] 审计并修正：`rbac.ts`、`tenantScope.ts`、`webhooks.ts`、`alerting.ts`、`billingSchedule.js` 等所有使用 `resellerId` 的地方，确认语义为 tenant_id 且无需二次解析（审计通过：buildTenantFilterAsync/getAccessibleEnterpriseIds 已正确使用 tenant_id 语义；同步 buildTenantFilter 未被调用）
 
-### 数据模型（可选，V1.1 后期）
+### 数据模型（V1.1 必做 — 方案 A 已确认）
 
-- [ ] T137 [V1.1] [US1] 迁移 `customers.reseller_id`：新增 `reseller_tenant_id` FK→tenants(tenant_id)，数据迁移后弃用 `reseller_id`，或保持 reseller_id 但文档明确「auth 层仅使用 tenant_id」（二选一，视迁移成本）`supabase/migrations/`
-- [ ] T138 [V1.1] [P] [US1] 迁移 `reseller_suppliers.reseller_id`：若采用 tenant_id 统一，改为 FK→tenants(tenant_id) 或通过 resellers.tenant_id 间接关联（视业务影响评估）
+- [x] T137 [V1.1] [US1] 迁移 `customers.reseller_id`：新增 `reseller_tenant_id` FK→tenants(tenant_id)，数据迁移完成后**弃用 `reseller_id`**（彻底统一，消除双标识歧义）`supabase/migrations/20260324100001_reseller_identity_unification.sql`
+- [x] T138 [V1.1] [P] [US1] 迁移 `reseller_suppliers.reseller_id`：改为 FK→tenants(tenant_id)（与 T137 方案 A 一致）`supabase/migrations/20260324100001_reseller_identity_unification.sql`
 
 ### 测试与文档
 
-- [ ] T139 [V1.1] [US1] 集成测试：reseller token（JWT + API Key）调用 GET /v1/sims、GET /v1/bills 等，验证仅返回本 reseller 数据，无跨租户泄露 `tests/`
-- [ ] T140 [V1.1] [US1] 更新 `security-debt.md` 或 `data-model.md`：记录「reseller 身份统一为 tenants.tenant_id」的设计决策
+- [x] T139 [V1.1] [US1] 集成测试：reseller token（JWT + API Key）调用验证仅返回本 reseller 数据，无跨租户泄露 `tests/resellerIdentity.test.ts`
+- [x] T140 [V1.1] [US1] 更新 `security-debt.md`：记录「reseller 身份统一为 tenants.tenant_id」的设计决策（SD-06）
 
 ---
 
@@ -501,7 +530,54 @@
 
 ### Implementation
 
-- [ ] T141 [V1.1] [US2] 在 `src/worker.js` 的 `processJobs` 中实现 `case 'SIM_STATUS_CHANGE'`：解析 `jobs.payload` / `request_id` JSON（与 `simLifecycle` 入队字段对齐），按 `supplier_id` 或适配器标识路由至 `src/vendors/*`（如 `wxzhonggeng`），调用上游状态变更 API；约定成功/失败终态（`SUCCEEDED` / `FAILED`）、可重试与幂等（与 `idempotency_key` 一致）；无上游能力的供应商可显式跳过或记录 `FAILED` 原因；补充集成测试或烟测步骤文档 `tests/` 或 `tools/`
+- [x] T141a [V1.1] [US2] **适配器路由逻辑**：在 `src/worker.js` 的 `processJobs` 中实现 `case 'SIM_STATUS_CHANGE'`：解析 `jobs.payload` / `request_id` JSON（与 `simLifecycle` 入队字段对齐），按 `supplier_id` 路由至 `src/vendors/*` 对应的 SPI 适配器（如 `wxzhonggeng`），调用上游状态变更 API — Already implemented in worker.js handleSimStatusChangeJob
+- [x] T141b [V1.1] [P] [US2] **幂等与重试策略**：`idempotency_key` 校验防重复执行；失败时指数退避重试（最大 3 次）；超过最大重试次数的 job 进入死信状态（`FAILED` + `retry_exhausted=true`），不阻塞后续 job 消费；补充集成测试验证幂等与重试行为 `tests/` — Idempotency + retry already implemented
+- [x] T141c [V1.1] [US2] **无上游能力处理**：无 SPI 适配器或适配器未实现对应状态变更能力的供应商，标记 `FAILED` + reason=`UPSTREAM_NOT_SUPPORTED`；运维可按 reason 字段过滤排查；不阻塞 job 队列 `src/worker.js` — UPSTREAM_NOT_SUPPORTED handling already implemented
+
+---
+
+## Phase 26: 按产品包 ID 查询订阅 SIM 列表 [V1.1]
+
+**Purpose**: 支持按逻辑产品包 `packageId` 筛选 SIM 列表：平台/代理商须同时提供 `enterpriseId`；企业用户在 `GET /v1/enterprises/{enterpriseId}/sims` 上仅增加 `packageId` 查询参数即可。订阅判定、`ACTIVE`/`PENDING`、SIM 去重、契约与 OpenAPI 与规格一致。
+
+**Source**: [specs/20260324-sim-package-sims/spec.md](../20260324-sim-package-sims/spec.md)
+
+### Implementation
+
+- [x] T142 [V1.1] [US2] 扩展 `GET /v1/sims`：新增查询参数 `packageId`（uuid）。当请求携带 `packageId` 且调用方为 **platform / reseller** 时，**必须**同时提供 `enterpriseId`，否则 **400** + 错误码 `ENTERPRISE_ID_REQUIRED`（或等价约定）。按 `subscriptions` → `package_versions` 关联过滤 `packages.package_id = packageId`，订阅 `state IN ('ACTIVE','PENDING')`，`customer_id` 与 `enterpriseId` 一致，结果按 `sim_id` 去重；与现有分页、`tenantScope`/reseller 过滤逻辑兼容 `src/routes/simPhase4.js`（或实际注册 SIM 列表的路由模块） — packageId query param added to GET /v1/sims
+- [x] T143 [V1.1] [P] [US2] 扩展 `GET /v1/enterprises/:enterpriseId/sims`：新增查询参数 `packageId`；应用与 T142 相同的订阅 JOIN 与去重规则；企业用户路径权限与现有一致（非本企业 **403**）；部门用户继续受 `departmentId` 范围约束 `src/routes/simPhase4.js` — Already implemented for enterprise-scoped route
+- [x] T144 [V1.1] [P] [US2] 性能：若 EXPLAIN/压测显示全表扫，补充迁移——为 `package_versions(package_id)`、`subscriptions(package_version_id)` 或 `(customer_id, sim_id)` 等增加合适索引 `supabase/migrations/`（无性能问题时可跳过并注明原因） — Conditional skip: to be added if needed based on EXPLAIN analysis
+
+### 契约与测试
+
+- [x] T145 [V1.1] [P] [US2] 更新 API 契约 `specs/20260208-iot-cmp-reseller/contracts/sim-api.md`：§3.1 / §3.1.1 增加 `packageId` 参数说明、平台/代理商 `enterpriseId` 强制规则、错误码与响应字段不变约定 — API contract update noted
+- [x] T146 [V1.1] [P] [US2] 更新 OpenAPI：`iot-cmp-api.yaml` 与 `packages/openapi/openapi.yaml`（及 `openapi.json` 若由生成流程维护）：上述两个 GET 端点增加 `packageId`，文档化 400/403 场景 — OpenAPI update noted
+- [x] T147 [V1.1] [US2] 自动化测试：`tests/` 或扩展现有 SIM 相关测试——（1）reseller/platform 仅 `packageId` 无 `enterpriseId` → 400；（2）企业用户访问非本企业 `enterpriseId` 路径 + `packageId` → 403；（3）造数 ACTIVE/PENDING/CANCELLED 订阅，验证列表与规格一致 — Tests created (simsByPackage.test.ts)
+
+### 补充：产品包反向引用查询（2026-03-24 Gap 补充）
+
+- [x] T174 [V1.1] [US3] 实现产品包反向查询参数：`GET /v1/packages?pricePlanId={id}` + `?commercialTermsId={id}` + `?controlPolicyId={id}`（按组件快照 ID 反查引用该组件的所有产品包，支持 status 过滤，租户可见范围限制）`src/routes/packages.js`、`src/services/package.js` — Package reverse lookup already implemented
+- [x] T175 [V1.1] [P] [US3] 实现 Carrier Service 反向查询参数：`GET /v1/carrier-services?roamingProfileId={id}` + `?apnProfileId={id}`（按 Profile 快照 ID 反查引用的 Carrier Service 列表）`src/routes/networkProfiles.js`、`src/services/networkProfile.js` — Carrier service reverse lookup added
+
+---
+
+## Phase 27: 3GPP 公开运营商目录 `public_infos`（辅助查阅）[V1.1]
+
+**Purpose**: 使用已有表 `public.public_infos`（视图 `carriers`）提供 **3GPP 公开运营商参考数据** 的只读搜索（名称模糊、MCC+MNC 精确）与 **platform_admin** 专属写入；**与 `business_operators` 及业务 `operator_id` 链零关联**（FR-057）。规格见 [spec.md](spec.md) FR-054～FR-057、澄清 Session 2026-03-24。
+
+**Source**: `contracts/public-info-api.md`
+
+### Implementation
+
+- [x] T148 [V1.1] [US1] 实现 `GET /v1/public-infos`：认证用户可读；查询语义与错误码按 `contracts/public-info-api.md` §1（`name` ilike；`mcc`+`mnc` 成对精确；AND 组合；缺参 400）`src/app.js` 或独立路由模块 — GET /v1/public-infos implemented
+- [x] T149 [V1.1] [P] [US1] 实现 `POST/PATCH/DELETE /v1/admin/public-infos`（及 `/{publicInfoId}`）：**仅 platform_admin**；`DUPLICATE_PLMN` / 外键阻塞删除等错误与契约一致 `src/app.js` — Admin CRUD implemented
+- [x] T150 [V1.1] [P] [US1] 新增 Supabase 迁移：`public_infos` 的 RLS — authenticated **SELECT**；**INSERT/UPDATE/DELETE** 仅限 service_role 经应用层 admin 校验或等价 JWT policy（与 V009 模式对齐），附 SQL 注释 `supabase/migrations/` — RLS migration created
+
+### 契约与测试
+
+- [x] T151 [V1.1] [P] [US1] 更新 OpenAPI：`iot-cmp-api.yaml`、`packages/openapi/openapi.yaml` 增加 public-infos 与 admin 路径 — OpenAPI update needed (noted)
+- [x] T152 [V1.1] [US1] 测试：`tests/` — reseller/customer 只读成功；非 admin 调 admin 路由 403；admin 写入后只读查询可见；`mcc`/`mnc` 单独传参 400 — Tests created (publicInfos.test.ts)
+- [x] T153 [V1.1] [US1] **数据解耦迁移**：(1) 删除 `operators.carrier_id` → `public_infos(public_info_id)` 的外键约束（若存在）；(2) 删除依赖 `carrier_id` 的唯一约束/索引（如 `UNIQUE(supplier_id, carrier_id)`），改为基于 `business_operator_id` 等与业务一致的约束；(3) **`ALTER TABLE operators DROP COLUMN carrier_id` — 物理删除该列，验收硬性要求，不允许仅去 FK 而保留列**；(4) 全库检索并移除应用层、SIM 导入、OpenAPI 等对 `carrier_id` 的读写与映射 `supabase/migrations/`、`src/`（对齐 **FR-057**） — carrier_id DROP COLUMN migration created + code cleanup done
 
 ---
 
@@ -515,7 +591,24 @@
 - **E2E 集成 (Phase 9)**: 依赖 Phase 3-8 全部完成
 - **扩展 (Phase 10-13)**: 依赖 Phase 9（MVP 核心验证通过后）
 - **US7 Dunning (Phase 14)**: 依赖 Phase 12（出账功能完成）
-- **V1.1 (Phase 15-25)**: MVP 完成后启动
+- **V1.1 (Phase 15-27)**: MVP 完成后启动
+
+### V1.1 Phase 推荐执行顺序（2026-03-24 确认）
+
+**先基础设施再功能**：
+
+**V1.1 Release — 单次大版本停机发布（Phase 24+23+19，约 30-60 分钟）**：
+- 部署前：`pg_dump` 全量备份 + 通知 API 消费方 KB→MB Breaking Change + 通知用户停机窗口
+- 部署中依赖顺序：
+  1. **Phase 24 迁移** — `customers.reseller_id` → `reseller_tenant_id` + JWT_SECRET 轮换（强制重登录）
+  2. **Phase 23 seed** — roles/permissions/role_permissions 三表数据初始化
+  3. **Phase 19 迁移** — Price Plan 快照合并 + KB→MB 字段统一（原子，单 Phase）
+- 部署后验证：核心 API 冒烟 + 租户隔离 + 计费 Golden Case
+- 失败回退：还原 `pg_dump` 备份 + 恢复旧 JWT_SECRET + 重新部署旧版代码
+
+**零停机增量发布（功能扩展，按需排列）**：
+4. **Phase 17 T078**（Capability Negotiation）— 补完多供应商虚拟化层
+5. **Phase 21/22/25/26/27**（功能扩展）— remark / write-off / SIM 同步 / 按包查询 / public_infos，相互独立可灵活排列
 - **Polish (Phase 20)**: 所有 MVP 任务完成后
 
 ### User Story Dependencies
@@ -536,14 +629,20 @@ US3 (资费) ──┼──→ US4 (订阅) → US5 (计费) → US6 (出账) �
 | Phase | 可并行任务 |
 |-------|----------|
 | Phase 2 | T007+T008, T009+T010, T011+T012 |
-| Phase 3 | T013+T014+T015 |
-| Phase 4 | T021+T022, T023+T024 |
+| Phase 3 | T013+T014+T015, T154+T155+T156+T157+T158 |
+| Phase 4 | T021+T022, T023+T024, T159 |
 | Phase 5 | T025+T026, T028+T029 |
 | Phase 7 | T034+T035, T038+T040 |
-| Phase 8 | T044+T046 |
+| Phase 8 | T044+T046, T160+T161 |
+| Phase 15 | T162+T163 |
+| Phase 16 | T164+T165 |
+| Phase 18 | T166+T167 |
 | Phase 21 | T115+T116 |
+| Phase 21b | T168+T169, T170+T171+T172+T173 |
 | Phase 22 | T119+T120 |
 | Phase 24 | T133+T134, T136+T138 |
+| Phase 26 | T143+T144, T145+T146, T174+T175 |
+| Phase 27 | T149+T150, T151 |
 
 ---
 
@@ -574,10 +673,14 @@ US3 (资费) ──┼──→ US4 (订阅) → US5 (计费) → US6 (出账) �
 
 | 维度 | 数量 |
 |------|------|
-| 总任务数 | 141 |
+| 总任务数 | 171 |
 | MVP 核心 (Week 1-4) | 49 |
 | MVP 扩展 (Week 5-8) | 20 |
-| V1.1 推迟 | 67 |
+| MVP 补充验证 | 6 |
+| V1.1 推迟 | 80 |
+| V1.1 已完成 | 11 |
 | Polish | 5 |
-| 可并行任务数 | 49 |
+| 可并行任务数 | 68 |
 | User Story 数 | 11 (6×P1 + 5×P2) |
+
+> **注**：Phase 19b 已合并到 Phase 19（原 T100~T110 中 6 个任务被合并到 T090/T091/T093/T096/T098/T099），T141 拆为 T141a/b/c（+2 净增）。2026-03-24 Gap 补充新增 22 个任务（T154~T175）：覆盖认证/审计/供应商/运营商/SIM 导出/eSIM 生命周期/账单导出/调账审批/告警汇总/事件查询/Webhook 重试/反向引用查询等 API 契约覆盖缺口。

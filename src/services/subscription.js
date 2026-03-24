@@ -118,39 +118,29 @@ async function loadSimByIccid(supabase, iccid, tenantFilter) {
 async function loadPackageVersion(supabase, packageVersionId) {
   const rows = await supabase.select(
     'package_versions',
-    `select=package_version_id,package_id,status,commercial_terms,price_plan_id,price_plan_version_id,effective_from&package_version_id=eq.${encodeURIComponent(packageVersionId)}&limit=1`
+    `select=package_version_id,package_id,status,commercial_terms,price_plan_id,effective_from&package_version_id=eq.${encodeURIComponent(packageVersionId)}&limit=1`
   )
   return Array.isArray(rows) ? rows[0] : null
 }
 
-async function loadPricePlanVersion(supabase, pricePlanVersionId) {
+async function loadPricePlanVersion(supabase, pricePlanId) {
   const rows = await supabase.select(
-    'price_plan_versions',
-    `select=price_plan_version_id,price_plan_id,validity_days,payg_rates&price_plan_version_id=eq.${encodeURIComponent(pricePlanVersionId)}&limit=1`
+    'price_plans',
+    `select=price_plan_id,type,validity_days,payg_rates&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
   )
   const v = Array.isArray(rows) ? rows[0] : null
   if (!v?.price_plan_id) return null
-  const planRows = await supabase.select(
-    'price_plans',
-    `select=price_plan_id,type&price_plan_id=eq.${encodeURIComponent(String(v.price_plan_id))}&limit=1`
-  )
-  const plan = Array.isArray(planRows) ? planRows[0] : null
-  return { version: v, plan }
+  return { version: v, plan: v }
 }
 
 async function loadLatestPricePlanVersionByPlanId(supabase, pricePlanId) {
   const rows = await supabase.select(
-    'price_plan_versions',
-    `select=price_plan_version_id,price_plan_id,validity_days,payg_rates&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc&limit=1`
+    'price_plans',
+    `select=price_plan_id,type,validity_days,payg_rates&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
   )
   const v = Array.isArray(rows) ? rows[0] : null
   if (!v?.price_plan_id) return null
-  const planRows = await supabase.select(
-    'price_plans',
-    `select=price_plan_id,type&price_plan_id=eq.${encodeURIComponent(String(v.price_plan_id))}&limit=1`
-  )
-  const plan = Array.isArray(planRows) ? planRows[0] : null
-  return { version: v, plan }
+  return { version: v, plan: v }
 }
 
 function resolveExpiryBoundary(terms, paygRates) {
@@ -221,9 +211,7 @@ export async function createSubscription({
   let expiresAt = null
   const pp = pkg.price_plan_id
     ? await loadLatestPricePlanVersionByPlanId(supabase, String(pkg.price_plan_id))
-    : pkg.price_plan_version_id
-      ? await loadPricePlanVersion(supabase, String(pkg.price_plan_version_id))
-      : null
+    : null
   if (pp) {
     if (pp?.plan && String(pp.plan.type || '').toUpperCase() === 'ONE_TIME') {
       const expiryBoundary = resolveExpiryBoundary(terms, pp.version?.payg_rates)
@@ -257,6 +245,7 @@ export async function createSubscription({
         iccid: sim.iccid ?? iccidValue,
         simId: sim.sim_id,
         packageVersionId: pkg.package_version_id,
+        pricePlanId: pkg.price_plan_id ?? null,
         kind: subKind,
         state: isImmediate ? 'ACTIVE' : 'PENDING',
         effectiveAt: effectiveIso,
@@ -349,9 +338,7 @@ export async function switchSubscription({
   let expiresAt = null
   const pp = pkg.price_plan_id
     ? await loadLatestPricePlanVersionByPlanId(supabase, String(pkg.price_plan_id))
-    : pkg.price_plan_version_id
-      ? await loadPricePlanVersion(supabase, String(pkg.price_plan_version_id))
-      : null
+    : null
   if (pp) {
     if (pp?.plan && String(pp.plan.type || '').toUpperCase() === 'ONE_TIME') {
       const expiryBoundary = resolveExpiryBoundary(terms, pp.version?.payg_rates)

@@ -42,8 +42,8 @@
 - `resellers` 表：id（系统生成，唯一）、name（非空且全局唯一）、status（ACTIVE/DEACTIVATED/SUSPENDED，默认 ACTIVE）、contact_email、contact_phone、created_by、created_at、updated_at。created_by 保留审计引用（用户被删除不影响记录）。
 - `customers` 表：id、reseller_id (FK)、name、status (active/overdue/terminated)、api_key (UNIQUE)、api_secret_hash (BYTEA)、webhook_url、created_by、created_at、updated_at。UNIQUE(reseller_id, name)。terminated 为终态。
 - `suppliers` 表：id（系统生成，唯一）、name（非空且全局唯一）、status（ACTIVE/SUSPENDED，默认 ACTIVE）、created_by、created_at、updated_at。created_by 保留审计引用（用户被删除不影响记录）。
-- `public_infos` 表：公共信息目录（E.212 MCC+MNC + 国家/频段），用于公共参考与兜底，不参与业务逻辑。
-- `business_operators` 表：业务运营商字典（operator_id、mcc、mnc、name），业务侧查询与过滤使用，不与公共目录强绑定。
+- `public_infos` 表：schema `public` 下**完全独立**的 3GPP 公开参考目录（E.212 MCC+MNC、国家、名称、频段等），**仅供用户查阅**。**不得**与业务运营商主数据、业务 `operator_id` 链路建立任何产品层关联：禁止与 `business_operators` 外键/同步/对照校验；禁止在 SIM、资费、订阅、计费、库存、状态机等流程中读取或 JOIN `public_infos`。与 `business_operators` / `operators.operator_id` **无任何关系**（历史库若存在指向本表的 FK，须在 V1.1 移除，见 FR-057）。
+- `business_operators` 表：业务运营商字典（operator_id、mcc、mnc、name），业务侧查询与过滤与 **`public_infos` 无关**。
 - `operators` 表：供应商-运营商关联（supplier_id + operator_id 唯一），承载供应商可用运营商范围，业务逻辑使用 operator_id。
 
 **RBAC 三表模型**（CMP.xlsx 对齐）：
@@ -84,9 +84,9 @@
 
 **上游主数据**：
 - 供应商：UUID ID、名称、关联运营商（多对多）、禁止创建未关联运营商的供应商、加密存储、变更留痕
-- 业务运营商：`business_operators`（E.212 MCC+MNC + name），业务侧主数据，不依赖公共目录
-- 公共信息目录（public infos）：`public_infos`，系统管理员维护，字段包含国家（英文）、运营商名称（英文）、MCC、MNC、4G/LTE 频段；用于 SIM 归属兜底与能力校验
-- 查询能力：支持按国家精确查询、按 MCC 查询、按 MCC+MNC 组合查询、按运营商名称模糊匹配查询
+- 业务运营商：`business_operators`（E.212 MCC+MNC + name），业务侧主数据；**与 `public_infos` 无关联**（禁止跨表约束与业务互查）
+- 公共信息目录（public infos）：物理表 `public.public_infos`（兼容视图 `carriers`，见迁移 V004）；**仅系统管理员（platform_admin）** 可执行 INSERT/UPDATE（及 DELETE，用于纠错）；**所有其他角色**（含代理商、企业用户）**仅可 SELECT/通过只读 API 查询**，不可写入。
+- 查询能力（面向终端用户）：按运营商**名称**模糊搜索；按 **MCC + MNC** **精确**搜索（可拆分为仅 MCC 筛选若实现需要，以 API 契约为准）；响应字段至少包含：**名称**、**国家**、**MCC**、**MNC**、**频段**（与库中 `lte_bands` 等列对应，可扩展 NR 频段文本）。
 
 **供应商商业模式与业务规则**：
 - 商业模式 a：当供应商即运营商 CMP 时，体系仍显式创建供应商（该运营商）与运营商实体，关系保持一致（UNIQUE(mcc, mnc) 与多对多）
@@ -1039,6 +1039,21 @@
 
 ## Clarifications
 
+### Session 2026-03-24
+
+- Q: 需要独立表记录 3GPP 运营商公开信息，与核心业务无逻辑耦合，支持按名称模糊、按 MCC/MNC 精确查询，返回名称/国家/MCC/MNC/频段；仅系统管理员可写入，其余用户只读。如何与现有数据模型对齐？ → A: 采用现有 Supabase 表 **`public.public_infos`**（迁移 `20260311100004_sim_connectivity.sql` 已创建；兼容视图 `public.carriers`）。产品定位：**辅助查阅**，不参与计费/订阅等业务判定。权限：**platform_admin** 可 INSERT/UPDATE/DELETE；**其他已认证用户**（reseller/customer 等）仅只读查询 API 或直接受 RLS 约束的 SELECT。查询语义：**name 模糊** + **mcc+mnc 精确**（AND 组合）。实现侧需补充：只读搜索 API + 管理端写 API（或 admin 路由）+ RLS/permissionGuard，详见 `contracts/public-info-api.md` 与 `tasks.md` Phase 27。
+- Q: 再次强调 `public_infos` 与 `business_operators`、业务中频繁使用的 `operator_id` 等必须无任何关系。 → A: **产品语义**：`public_infos` 与 `business_operators`、SIM/资费/订阅/计费等依赖的 **`operators.operator_id` 链路零关联**——禁止外键、禁止业务 JOIN、禁止用公开目录校验或同步业务运营商。**数据层**：若历史迁移中 `operators.carrier_id` 曾 FK 至 `public_infos`，视为技术债，**V1.1 必须删除该外键并 `DROP COLUMN operators.carrier_id`（物理删列，硬性验收）**；应用层不得再建立二者关联。删除 `public_infos` 行时**不得**再依赖「业务表是否引用」作为约束（业务表不应引用）。详见 **FR-057**、`data-model.md` ER 图修正与 `tasks.md` **T153**。
+- Q: Phase 24 (Reseller 身份统一) 中 `customers.reseller_id` 迁移策略采用哪种方案？ → A: 方案 A — 新增 `reseller_tenant_id` FK→tenants(tenant_id)，数据迁移完成后**弃用 `reseller_id`**（彻底统一，消除双标识歧义）。同理 `reseller_suppliers.reseller_id` 也应迁移为 FK→tenants(tenant_id)。
+- Q: Phase 19b (KB→MB 单位统一) 涉及 API 字段名 `*Kb` 改为 `*Mb`，对已有外部客户端的兼容策略？ → A: **一次性 Breaking Change** — V1.1 发布时统一切换为 MB 字段名（`quotaMb`、`ratePerMb`、`chargedMb` 等），不提供兼容层。发布前需提前通知所有 API 消费方（企业 M2M 客户端）升级。OpenAPI spec 同步更新，旧 `gen/ts-fetch/` 客户端重新生成。
+- Q: Phase 19 (Price Plan 快照模式重构) 将双表合并为单表快照模型，涉及大量 FK 变更，迁移失败时的回滚策略？ → A: **停机迁移 + 备份回滚** — V1.1 部署时短暂停机，迁移前执行全量 DB 备份（`pg_dump`），迁移脚本在事务中执行，失败则还原备份。需在 staging 环境充分验证迁移脚本后再上 production。迁移窗口需提前通知运维与客户。
+- Q: Phase 17 T078「Capability Negotiation 需在 V1.1 实现」被标记为已完成，实际状态？ → A: **T078 未完成** — 标记有误，Capability Negotiation 尚未实现，仍为 V1.1 待办任务。需取消勾选并保留在 V1.1 范围内。
+- Q: V1.1 各 Phase 的推荐执行顺序？ → A: **先基础设施再功能** — Phase 24（Reseller 身份统一）→ Phase 23（RBAC DB 权限配置）→ Phase 19+19b（Price Plan 快照重构 + KB→MB 统一）→ Phase 21/22/25/26/27（功能扩展：remark/write-off/SIM 同步/按包查询/public_infos）。理由：身份与权限是所有业务功能的前置依赖，计费重构影响范围大需集中处理，功能扩展相互独立可灵活排列。
+- Q: Phase 19（Price Plan 快照重构）和 Phase 19b（KB→MB）修改相同文件集（pricePlan.js、billing.js、package.js 等），分批上线会产生无意义中间态返工，如何处理？ → A: **合并为单个 Phase 19**（原子部署单元）— 两项重构统一实施、统一测试、单次停机部署。tasks.md 中原 Phase 19b 的任务合并到 Phase 19 下，消除中间态。
+- Q: Phase 24（Reseller 身份统一）部署时，已签发的旧 JWT（payload.resellerId 为 resellers.id）仍在流通，如何处理兼容？ → A: **强制重登录** — 部署时修改 JWT_SECRET（或增加 JWT 版本号校验），使所有旧 JWT 失效，用户重新登录获取包含 `tenants.tenant_id` 的新 token。此方案简单可靠，无需维护过渡映射逻辑。部署窗口需在低峰期执行并提前通知用户。
+- Q: Phase 23（RBAC DB 驱动）seed 脚本如果权限数据有误，DB 优先逻辑会绕过硬编码兜底导致权限缺失，是否需要功能开关？ → A: **不加功能开关，依赖测试覆盖** — seed 脚本在 staging 环境充分验证（集成测试覆盖全部 6 种角色 × 38+ 权限码组合），验证通过后直接上线。出问题时通过重新部署回退。保持代码简单，不引入额外的配置复杂度。
+- Q: Phase 25 T141（SIM 上游状态同步）实际隐含路由/幂等/无能力处理三个独立关注点，单任务是否足够？ → A: **拆分为 3 个子任务** — (1) T141a：适配器路由逻辑（按 `supplier_id` 选择 SPI 适配器）；(2) T141b：幂等与重试策略（`idempotency_key` 校验 + 指数退避 + 最大 3 次 + 死信队列）；(3) T141c：无上游能力处理（标记 `FAILED` + reason=`UPSTREAM_NOT_SUPPORTED`，不阻塞 job 队列，运维可按 reason 过滤排查）。
+- Q: V1.1 三个破坏性变更 Phase（24 身份统一/23 RBAC DB/19 计费重构+KB→MB）分别独立部署会导致多次服务中断，如何编排？ → A: **单次大版本发布（V1.1 Release）** — Phase 24+23+19 合并为一次停机窗口（约 30-60 分钟），一次性完成全部基础设施破坏性变更（JWT 失效重登录 + DB 迁移 + 字段重命名）。功能扩展 Phase（21/22/25/26/27）可后续零停机增量发布。部署脚本按依赖顺序执行：Phase 24 迁移 → Phase 23 seed → Phase 19 快照+KB→MB 迁移 → 验证 → 启动服务。
+
 ### Session 2026-03-12
 
 - Q: 不同角色的访问权限如何定义与配置？若需禁止 enterprise 用户访问 bills 模块，应如何操作？ → A: 当前实现采用 `defaultPermissionsByRoleScope` 硬编码（`src/app.js` 约 437 行、`src/middleware/rbac.ts` 约 51 行），按 roleScope（platform/reseller/customer/department）分配权限。请求到达时由 `resolvePermissionForRequest` 将路径映射为权限码（如 `/v1/bills` → bills.list），`permissionGuard` 校验用户是否具备该权限。禁止 enterprise 访问 bills：从 `customer` 和 `department` 的权限列表中移除 `bills.list`、`bills.read`、`bills.export`、`bills.mark_paid`、`bills.adjust` 即可。若未来启用 DB 驱动的 roles/permissions/role_permissions 表，则通过数据库配置覆盖默认值。
@@ -1124,7 +1139,7 @@
 - **FR-039**: 系统 MUST 实现统一事件目录（SIM_STATUS_CHANGED/SUBSCRIPTION_CHANGED/BILL_PUBLISHED/PAYMENT_CONFIRMED/ALERT_TRIGGERED/ENTERPRISE_STATUS_CHANGED）；事件向下游 Webhook 投递与重试见 [clarifications/webhook-delivery.md](clarifications/webhook-delivery.md)
 
 **实体建模（CMP.xlsx 对齐）**：
-- **FR-040**: 系统 MUST 使用独立表建模（resellers、customers、suppliers、business_operators、operators），废弃通用 tenants 表
+- **FR-040**: 系统 MUST 使用独立表建模（resellers、customers、suppliers、`public_infos`、business_operators、operators），废弃通用 tenants 表
 - **FR-041**: 系统 MUST 维护 business_operators 表用于业务运营商主数据；operators 维护 supplier_id + operator_id 关联与 operator_id 业务索引
 - **FR-042**: 系统 MUST 维护 upstream_integrations 表（supplier_id + operator_id 唯一约束），含 API 端点和加密凭证、CDR 配置
 
@@ -1145,11 +1160,17 @@
 - **FR-052**: 系统 MUST 在 Network Profiles 域提供 Carrier Service 与 Control Policy 的创建、更新、查询能力
 - **FR-053**: 系统 MUST 在 Price Plans 域提供 Commercial Terms 的创建、更新、查询能力
 
+**3GPP 公共运营商目录（辅助）**：
+- **FR-054**: 系统 MUST 在 `public.public_infos` 中维护 3GPP 公开运营商参考数据（至少含名称、国家、MCC、MNC、频段字段），**不得**将其作为计费、订阅或 SIM 状态机的决策输入；仅用于用户查阅与展示。
+- **FR-055**: 系统 MUST 提供只读查询能力：支持按**名称**模糊匹配、按 **MCC 与 MNC** 精确匹配（联合精确）；结果返回名称、国家、MCC、MNC、频段等等价字段。
+- **FR-056**: 系统 MUST 限制写权限：**仅 platform_admin** 可对 `public_infos` 执行插入与更新（删除仅用于数据纠错，同属管理员写权限）；**所有其他用户**仅允许读取。
+- **FR-057**: 系统 MUST 保证 `public_infos` 与 **`business_operators`** 及业务 **`operator_id`** 体系**无任何关联**：不得定义外键/触发器/批处理同步；不得在依赖 `operator_id` 的 API 或服务中 JOIN、引用或校验 `public_infos`。若数据库中仍存在 `operators.carrier_id` → `public_infos` 的外键或应用层依赖，MUST 在 V1.1 迁移与代码中**移除**；且 **`operators.carrier_id` 列 MUST 物理删除（`DROP COLUMN`）**，不得以「仅删除外键、保留可空列」作为终态，使业务运营商数据与 3GPP 公开目录彻底解耦（验收见 `tasks.md` **T153**）。
+
 ### Key Entities
 
 - **Supplier（供应商）**: 独立表 `suppliers`，上游 CMP 对接对象，UUID ID，name UNIQUE，status (active/suspended)
-- **Public Info（公共信息）**: 独立表 `public_infos`，公共信息目录，含 MCC/MNC、国家、频段  
-- **Business Operator（业务运营商）**: 独立表 `business_operators`，业务运营商字典（operator_id + mcc/mnc + name）
+- **Public Info（3GPP 公开参考）**: 物理表 `public.public_infos`（视图 `carriers` 兼容旧列名 `carrier_id`），E.212 MCC+MNC、国家、名称、LTE 频段等；**辅助只读目录**；与 `business_operators`、`operator_id` 业务链**零关联**（见 FR-054～FR-057）
+- **Business Operator（业务运营商）**: 独立表 `business_operators`，业务运营商字典（operator_id + mcc/mnc + name）；**与 `public_infos` 无表级或流程级关系**
 - **Operator（供应商运营商关联）**: 独立表 `operators`，供应商-运营商关联与业务 operator_id 索引
 - **Upstream Integration（上游集成）**: 独立表 `upstream_integrations`，(supplier_id, operator_id) UNIQUE，含 API 端点/密钥/CDR 配置
 - **SM-DP+ System**: 独立表 `smdp_systems`，eSIM Profile 生成/分发系统，status (active/deactivated/suspended)，environment (test/production)

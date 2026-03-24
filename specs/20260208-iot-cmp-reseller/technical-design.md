@@ -244,6 +244,13 @@ graph TD
 
 **V1.1 规划**：Phase 23 将实现 RBAC 数据库驱动配置（roles/permissions/role_permissions 三表），支持 reseller_admin、reseller_sales_director、reseller_sales、reseller_finance、customer_admin、customer_ops 六种角色的权限按表动态配置。
 
+**V1.1 架构变更摘要（2026-03-24 澄清确认）**：
+- **Reseller 身份统一（Phase 24）**：`customers.reseller_id` 将新增 `reseller_tenant_id` FK→tenants(tenant_id) 并弃用 `reseller_id`，消除双标识歧义。ER 图中所有 `reseller_id` 引用在 V1.1 完成后应更新为 `reseller_tenant_id`。部署时 JWT_SECRET 轮换强制重登录。
+- **Price Plan 快照重构 + KB→MB（Phase 19，原 19b 已合并）**：`price_plan_versions` 表合并到 `price_plans` 单表快照模型 + 所有 KB 字段统一为 MB。两项合并为**单个原子部署单元**，消除中间态返工。
+- **V1.1 单次大版本发布**：Phase 24+23+19 合并为一次停机窗口（约 30-60 分钟），部署脚本按依赖顺序：Phase 24 迁移 → Phase 23 seed → Phase 19 快照+KB→MB 迁移。
+- **Capability Negotiation（Phase 17 T078）**：此前误标已完成，实际仍为 V1.1 待办。
+- **T141 拆分**：SIM 上游状态同步拆为 3 个子任务（路由/幂等重试/无上游能力处理），无能力供应商标记 FAILED+UPSTREAM_NOT_SUPPORTED。
+
 ### 3.4 数据同步
 
 | 源 | 目标 | 同步方式 | 频率 |

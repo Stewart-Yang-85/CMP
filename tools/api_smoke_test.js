@@ -1381,7 +1381,7 @@ async function main() {
           price_plan_id: planId,
           version: 1,
           monthly_fee: 0,
-          quota_kb: 102400,
+          quota_mb: 100,
         })
         const ppvId = Array.isArray(ppv) ? ppv[0]?.price_plan_version_id : null
         const pkg = await c.insert('packages', {
@@ -1391,7 +1391,7 @@ async function main() {
         const pkgId = Array.isArray(pkg) ? pkg[0]?.package_id : null
         const terms1 = {
           testPeriodDays: 14,
-          testQuotaKb: 102400,
+          testQuotaMb: 100,
           testExpiryCondition: 'PERIOD_OR_QUOTA',
           commitmentPeriodMonths: 1,
         }
@@ -1404,7 +1404,7 @@ async function main() {
           operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: terms1,
-          price_plan_version_id: ppvId,
+          price_plan_id: planId,
         })
         const pv1Id = Array.isArray(pv1) ? pv1[0]?.package_version_id : null
         const terms2 = {
@@ -1419,7 +1419,7 @@ async function main() {
           operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: terms2,
-          price_plan_version_id: ppvId,
+          price_plan_id: planId,
         })
         const pv2Id = Array.isArray(pv2) ? pv2[0]?.package_version_id : null
         const pv3 = await c.insert('package_versions', {
@@ -1431,7 +1431,7 @@ async function main() {
           operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: {},
-          price_plan_version_id: ppvId,
+          price_plan_id: planId,
         })
         const pv3Id = Array.isArray(pv3) ? pv3[0]?.package_version_id : null
         const pv4 = await c.insert('package_versions', {
@@ -1443,7 +1443,7 @@ async function main() {
           operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: { commitment_period_days: 5 },
-          price_plan_version_id: ppvId,
+          price_plan_id: planId,
         })
         const pv4Id = Array.isArray(pv4) ? pv4[0]?.package_version_id : null
         const now = new Date()

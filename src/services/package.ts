@@ -988,7 +988,7 @@ async function loadPackage(supabase: SupabaseClient, packageId: string) {
 async function loadLatestPackageVersion(supabase: SupabaseClient, packageId: string) {
   const rows = await supabase.select(
     'package_versions',
-    `select=package_version_id,package_id,version,status,effective_from,supplier_id,operator_id,service_type,apn,roaming_profile,carrier_service_id,carrier_service_config,control_policy_id,control_policy,commercial_terms_id,commercial_terms,price_plan_id,price_plan_version_id,created_at&package_id=eq.${encodeURIComponent(packageId)}&order=version.desc&limit=1`
+    `select=package_version_id,package_id,version,status,effective_from,supplier_id,operator_id,service_type,apn,roaming_profile,carrier_service_id,carrier_service_config,control_policy_id,control_policy,commercial_terms_id,commercial_terms,price_plan_id,price_plan_id,created_at&package_id=eq.${encodeURIComponent(packageId)}&order=version.desc&limit=1`
   )
   return Array.isArray(rows) ? rows[0] : null
 }
@@ -1026,7 +1026,7 @@ function mapPackageVersion(version: any) {
     controlPolicy: version.control_policy,
     commercialTerms: version.commercial_terms,
     pricePlanId: version.price_plan_id ?? null,
-    pricePlanVersionId: version.price_plan_version_id,
+    pricePlanId: version.price_plan_id,
     createdAt: version.created_at,
   }
 }
@@ -1101,21 +1101,20 @@ export async function createPackage({
   const name = String(payload?.name || '').trim()
   if (!name) return toError(400, 'BAD_REQUEST', 'name is required.')
   const pricePlanId = String(payload?.pricePlanId || '').trim()
-  const pricePlanVersionId = String(payload?.pricePlanVersionId || '').trim()
-  if (!pricePlanId && !pricePlanVersionId) {
-    return toError(400, 'BAD_REQUEST', 'pricePlanId or pricePlanVersionId is required.')
+  if (!pricePlanId) {
+    return toError(400, 'BAD_REQUEST', 'pricePlanId is required.')
   }
   if (pricePlanId && !isValidUuid(pricePlanId)) {
     return toError(400, 'BAD_REQUEST', 'pricePlanId must be a valid uuid.')
   }
-  if (pricePlanVersionId && !isValidUuid(pricePlanVersionId)) {
-    return toError(400, 'BAD_REQUEST', 'pricePlanVersionId must be a valid uuid.')
+  if (pricePlanId && !isValidUuid(pricePlanId)) {
+    return toError(400, 'BAD_REQUEST', 'pricePlanId must be a valid uuid.')
   }
   const pricePlanVersionRows = await supabase.select(
-    'price_plan_versions',
-    pricePlanVersionId
-      ? `select=price_plan_version_id,price_plan_id,payg_rates&price_plan_version_id=eq.${encodeURIComponent(pricePlanVersionId)}&limit=1`
-      : `select=price_plan_version_id,price_plan_id,payg_rates&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc&limit=1`
+    'price_plans',
+    pricePlanId
+      ? `select=price_plan_id,price_plan_id,payg_rates&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
+      : `select=price_plan_id,price_plan_id,payg_rates&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc&limit=1`
   )
   const pricePlanVersion = Array.isArray(pricePlanVersionRows) ? pricePlanVersionRows[0] : null
   if (!pricePlanVersion) return toError(404, 'NOT_FOUND', 'Price plan not found.')
@@ -1190,7 +1189,7 @@ export async function createPackage({
       commercial_terms_id: commercialTermsId,
       commercial_terms: normalizedModules.value.commercialTerms,
       price_plan_id: (pricePlanVersion as any).price_plan_id,
-      price_plan_version_id: (pricePlanVersion as any).price_plan_version_id,
+      price_plan_id: (pricePlanVersion as any).price_plan_id,
     },
     { returning: 'representation' }
   )
@@ -1340,13 +1339,6 @@ export async function updatePackage({
     }
     patch.price_plan_id = pricePlanId
   }
-  if (payload?.pricePlanVersionId) {
-    const pricePlanVersionId = String(payload.pricePlanVersionId).trim()
-    if (!isValidUuid(pricePlanVersionId)) {
-      return toError(400, 'BAD_REQUEST', 'pricePlanVersionId must be a valid uuid.')
-    }
-    patch.price_plan_version_id = pricePlanVersionId
-  }
   if (Object.keys(patch).length) {
     await supabase.update(
       'package_versions',
@@ -1387,10 +1379,10 @@ export async function publishPackage({
     return toError(409, 'INVALID_STATUS', 'Only DRAFT package can be published.')
   }
   const pricePlanVersionRows = await supabase.select(
-    'price_plan_versions',
+    'price_plans',
     (latestVersion as any).price_plan_id
-      ? `select=price_plan_version_id,payg_rates&price_plan_id=eq.${encodeURIComponent((latestVersion as any).price_plan_id)}&order=version.desc&limit=1`
-      : `select=price_plan_version_id,payg_rates&price_plan_version_id=eq.${encodeURIComponent((latestVersion as any).price_plan_version_id)}&limit=1`
+      ? `select=price_plan_id,payg_rates&price_plan_id=eq.${encodeURIComponent((latestVersion as any).price_plan_id)}&order=version.desc&limit=1`
+      : `select=price_plan_id,payg_rates&price_plan_id=eq.${encodeURIComponent((latestVersion as any).price_plan_id)}&limit=1`
   )
   const pricePlanVersion = Array.isArray(pricePlanVersionRows) ? pricePlanVersionRows[0] : null
   if (!pricePlanVersion) return toError(404, 'NOT_FOUND', 'Price plan version not found.')
@@ -1502,7 +1494,7 @@ export async function listPackages({
     const idFilter = ids.map((id) => encodeURIComponent(id)).join(',')
     const versionRows = await supabase.select(
       'package_versions',
-      `select=package_version_id,package_id,version,status,effective_from,supplier_id,operator_id,service_type,apn,roaming_profile,carrier_service_id,carrier_service_config,control_policy_id,control_policy,commercial_terms_id,commercial_terms,price_plan_id,price_plan_version_id,created_at&package_id=in.(${idFilter})&order=version.desc`
+      `select=package_version_id,package_id,version,status,effective_from,supplier_id,operator_id,service_type,apn,roaming_profile,carrier_service_id,carrier_service_config,control_policy_id,control_policy,commercial_terms_id,commercial_terms,price_plan_id,price_plan_id,created_at&package_id=in.(${idFilter})&order=version.desc`
     )
     versions = Array.isArray(versionRows) ? versionRows : []
   }
@@ -1570,11 +1562,11 @@ export async function listPackagesByModuleRefs({
   let allowedPricePlanVersionIds: Set<string> | null = null
   if (pricePlanIdValue) {
     const planVersionRows = await supabase.select(
-      'price_plan_versions',
-      `select=price_plan_version_id&price_plan_id=eq.${encodeURIComponent(pricePlanIdValue)}`
+      'price_plans',
+      `select=price_plan_id&price_plan_id=eq.${encodeURIComponent(pricePlanIdValue)}`
     )
     const ids = (Array.isArray(planVersionRows) ? planVersionRows : [])
-      .map((row: any) => String((row as any)?.price_plan_version_id ?? '').trim())
+      .map((row: any) => String((row as any)?.price_plan_id ?? '').trim())
       .filter(Boolean)
     allowedPricePlanVersionIds = new Set(ids)
   }
@@ -1588,7 +1580,7 @@ export async function listPackagesByModuleRefs({
   const idFilter = packageIds.map((id) => encodeURIComponent(id)).join(',')
   const versionRows = await supabase.select(
     'package_versions',
-    `select=package_version_id,package_id,version,status,effective_from,supplier_id,operator_id,service_type,apn,roaming_profile,carrier_service_id,carrier_service_config,control_policy_id,control_policy,commercial_terms_id,commercial_terms,price_plan_id,price_plan_version_id,created_at&package_id=in.(${idFilter})&order=version.desc`
+    `select=package_version_id,package_id,version,status,effective_from,supplier_id,operator_id,service_type,apn,roaming_profile,carrier_service_id,carrier_service_config,control_policy_id,control_policy,commercial_terms_id,commercial_terms,price_plan_id,price_plan_id,created_at&package_id=in.(${idFilter})&order=version.desc`
   )
   const versions = Array.isArray(versionRows) ? versionRows : []
   const latestByPackageId = new Map<string, any>()
@@ -1615,7 +1607,7 @@ export async function listPackagesByModuleRefs({
     items = items.filter((item: any) => {
       const planId = String((item?.latestVersion as any)?.pricePlanId ?? '').trim()
       if (planId) return planId === pricePlanIdValue
-      const versionId = String((item?.latestVersion as any)?.pricePlanVersionId ?? '').trim()
+      const versionId = String((item?.latestVersion as any)?.pricePlanId ?? '').trim()
       return Boolean(versionId && allowedPricePlanVersionIds?.has(versionId))
     })
   }
@@ -1646,7 +1638,7 @@ export async function getPackageDetail({ supabase, packageId }: { supabase: Supa
   if (!pkg) return toError(404, 'NOT_FOUND', 'Package not found.')
   const versions = await supabase.select(
     'package_versions',
-    `select=package_version_id,package_id,version,status,effective_from,supplier_id,operator_id,service_type,apn,roaming_profile,carrier_service_id,carrier_service_config,control_policy_id,control_policy,commercial_terms_id,commercial_terms,price_plan_id,price_plan_version_id,created_at&package_id=eq.${encodeURIComponent(packageId)}&order=version.desc`
+    `select=package_version_id,package_id,version,status,effective_from,supplier_id,operator_id,service_type,apn,roaming_profile,carrier_service_id,carrier_service_config,control_policy_id,control_policy,commercial_terms_id,commercial_terms,price_plan_id,price_plan_id,created_at&package_id=eq.${encodeURIComponent(packageId)}&order=version.desc`
   )
   const list = Array.isArray(versions) ? versions : []
   return {

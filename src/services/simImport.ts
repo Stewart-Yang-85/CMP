@@ -42,7 +42,6 @@ function toError(status: number, code: string, message: string) {
 
 function classifySimInsertError(err: any) {
   const text = String(err?.body ?? err?.message ?? '').toLowerCase()
-  if (text.includes('null value in column') && text.includes('carrier_id')) return 'legacy_carrier_required'
   if (text.includes('violates foreign key constraint')) return 'foreign_key_violation'
   return 'insert_failed'
 }
@@ -305,7 +304,6 @@ export async function runSimImport(input: ImportInput): Promise<ImportResult> {
   }
   let processed = 0
   let failed = 0
-  let legacyCarrierRequiredHit = false
   for (const sim of simRows) {
     processed += 1
     let ok = true
@@ -330,7 +328,6 @@ export async function runSimImport(input: ImportInput): Promise<ImportResult> {
       ok = false
       failed += 1
       const classified = classifySimInsertError(err)
-      if (classified === 'legacy_carrier_required') legacyCarrierRequiredHit = true
     }
     if (jobId && processed % 100 === 0) {
       await supabase.update(
@@ -350,9 +347,7 @@ export async function runSimImport(input: ImportInput): Promise<ImportResult> {
         progress_processed: processed,
         progress_total: simRows.length,
         error_summary: failed
-          ? legacyCarrierRequiredHit
-            ? `${failed} sims failed to import: legacy carrier_id constraint still required.`
-            : `${failed} sims failed to import.`
+          ? `${failed} sims failed to import.`
           : null,
         finished_at: new Date().toISOString(),
       },

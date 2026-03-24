@@ -141,17 +141,12 @@ function normalizeControlPolicy(input: unknown) {
   }
   const cutoffPolicyId = src.cutoffPolicyId === undefined ? '' : String(src.cutoffPolicyId).trim()
   const throttlingPolicyId = src.throttlingPolicyId === undefined ? '' : String(src.throttlingPolicyId).trim()
-  const cutoffThresholdKb = src.cutoffThresholdKb === undefined ? null : toInteger(src.cutoffThresholdKb)
-  if (src.cutoffThresholdKb !== undefined && (cutoffThresholdKb === null || cutoffThresholdKb < 0)) {
-    return toError(400, 'BAD_REQUEST', 'controlPolicy.cutoffThresholdKb must be >= 0.')
-  }
   const cutoffThresholdMb = src.cutoffThresholdMb === undefined ? null : toInteger(src.cutoffThresholdMb)
   if (src.cutoffThresholdMb !== undefined && (cutoffThresholdMb === null || cutoffThresholdMb < 0)) {
     return toError(400, 'BAD_REQUEST', 'controlPolicy.cutoffThresholdMb must be >= 0.')
   }
   const cutoff: Record<string, unknown> = {}
   if (cutoffPolicyId) cutoff.cutoffPolicyId = cutoffPolicyId
-  if (cutoffThresholdKb !== null) cutoff.cutoffThresholdKb = cutoffThresholdKb
   if (cutoffThresholdMb !== null) cutoff.cutoffThresholdMb = cutoffThresholdMb
   return {
     ok: true as const,
@@ -683,15 +678,15 @@ function validatePayload(
 async function loadPricePlan(supabase: SupabaseClient, pricePlanId: string) {
   const rows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
+    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
   )
   return Array.isArray(rows) ? rows[0] : null
 }
 
 async function loadLatestVersion(supabase: SupabaseClient, pricePlanId: string) {
   const rows = await supabase.select(
-    'price_plan_versions',
-    `select=price_plan_version_id,price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc&limit=1`
+    'price_plans',
+    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
   )
   return Array.isArray(rows) ? rows[0] : null
 }
@@ -701,7 +696,7 @@ function mapVersionResponse(version: any) {
   const meta = version.payg_rates?.meta || null
   return {
     pricePlanId: version.price_plan_id,
-    pricePlanVersionId: version.price_plan_version_id,
+    sourcePricePlanId: version.source_price_plan_id ?? null,
     version: version.version,
     status: resolveVersionStatus(version),
     effectiveFrom: version.effective_from,
@@ -776,17 +771,7 @@ export async function createPricePlan({
         currency,
         billing_cycle_type: billingCycleType,
         first_cycle_proration: firstCycleProration,
-      },
-      { returning: 'representation' }
-    )
-    const plan = Array.isArray(created) ? created[0] : null
-    if (!(plan as any)?.price_plan_id) {
-      return toError(500, 'INTERNAL_ERROR', 'Failed to create price plan.')
-    }
-    const versionRows = await supabase.insert(
-      'price_plan_versions',
-      {
-        price_plan_id: (plan as any).price_plan_id,
+        source_price_plan_id: null,
         version: 1,
         effective_from: null,
         monthly_fee: monthlyFee ?? 0,
@@ -802,7 +787,10 @@ export async function createPricePlan({
       },
       { returning: 'representation' }
     )
-    const version = Array.isArray(versionRows) ? versionRows[0] : null
+    const plan = Array.isArray(created) ? created[0] : null
+    if (!(plan as any)?.price_plan_id) {
+      return toError(500, 'INTERNAL_ERROR', 'Failed to create price plan.')
+    }
     if ((plan as any)?.price_plan_id) {
       await writeAuditLog(supabase, {
         actor_user_id: audit?.actorUserId ?? null,
@@ -815,8 +803,7 @@ export async function createPricePlan({
         source_ip: audit?.sourceIp ?? null,
         after_data: {
           pricePlanId: (plan as any).price_plan_id,
-          pricePlanVersionId: (version as any)?.price_plan_version_id ?? null,
-          version: (version as any)?.version ?? 1,
+          version: (plan as any)?.version ?? 1,
         },
       })
     }
@@ -824,16 +811,22 @@ export async function createPricePlan({
       ok: true,
       value: {
         pricePlanId: (plan as any).price_plan_id,
-        version: (version as any)?.version ?? 1,
+        version: (plan as any)?.version ?? 1,
         status: 'DRAFT',
-        createdAt: (version as any)?.created_at ?? (plan as any).created_at,
+        createdAt: (plan as any).created_at,
       },
     }
   } catch (error) {
     return mapUpstreamFailure(error)
   }
 }
-
+        total_quota_mb: totalQuotaMb ?? null,
+        overage_rate_per_mb: overageRatePerMb ?? null,
+        tiers: tiers ?? null,
+        payg_rates: paygNormalize.value,
+      },
+      { returning: 'representation' }
+    )
 export async function listPricePlans({
   supabase,
   enterpriseId,
@@ -854,27 +847,11 @@ export async function listPricePlans({
   }
   const planRows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,created_at&enterprise_id=eq.${encodeURIComponent(enterpriseId)}${type ? `&type=eq.${encodeURIComponent(type)}` : ''}&order=created_at.desc`
+    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&enterprise_id=eq.${encodeURIComponent(enterpriseId)}${type ? `&type=eq.${encodeURIComponent(type)}` : ''}&order=created_at.desc`
   )
   const plans = Array.isArray(planRows) ? planRows : []
-  const ids = plans.map((p: any) => p.price_plan_id).filter(Boolean)
-  let versions: any[] = []
-  if (ids.length) {
-    const idFilter = ids.map((id) => encodeURIComponent(id)).join(',')
-    const versionRows = await supabase.select(
-      'price_plan_versions',
-      `select=price_plan_version_id,price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=in.(${idFilter})&order=version.desc`
-    )
-    versions = Array.isArray(versionRows) ? versionRows : []
-  }
-  const latestByPlan = new Map<string, any>()
-  for (const v of versions) {
-    if (!v?.price_plan_id) continue
-    if (!latestByPlan.has(v.price_plan_id)) latestByPlan.set(v.price_plan_id, v)
-  }
   let items = plans.map((plan: any) => {
-    const version = latestByPlan.get(plan.price_plan_id) || null
-    const statusValue = resolveVersionStatus(version)
+    const statusValue = resolveVersionStatus(plan)
     return {
       pricePlanId: plan.price_plan_id,
       name: plan.name,
@@ -884,7 +861,7 @@ export async function listPricePlans({
       billingCycleType: plan.billing_cycle_type,
       firstCycleProration: plan.first_cycle_proration,
       status: statusValue,
-      latestVersion: mapVersionResponse(version),
+      latestVersion: mapVersionResponse(plan),
       createdAt: plan.created_at,
     }
   })
@@ -903,12 +880,13 @@ export async function getPricePlanDetail({ supabase, pricePlanId }: { supabase: 
   }
   const plan = await loadPricePlan(supabase, pricePlanId)
   if (!plan) return toError(404, 'NOT_FOUND', 'Price plan not found.')
-  const versions = await supabase.select(
-    'price_plan_versions',
-    `select=price_plan_version_id,price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc`
+  // In snapshot model, the plan itself contains the version data
+  const cloneRows = await supabase.select(
+    'price_plans',
+    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&source_price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc`
   )
-  const list = Array.isArray(versions) ? versions : []
-  const currentVersion = list.length ? list[0] : null
+  const clones = Array.isArray(cloneRows) ? cloneRows : []
+  const allSnapshots = [plan, ...clones]
   return {
     ok: true,
     value: {
@@ -921,8 +899,8 @@ export async function getPricePlanDetail({ supabase, pricePlanId }: { supabase: 
       billingCycleType: (plan as any).billing_cycle_type,
       firstCycleProration: (plan as any).first_cycle_proration,
       createdAt: (plan as any).created_at,
-      currentVersion: mapVersionResponse(currentVersion),
-      versions: list.map(mapVersionResponse),
+      currentVersion: mapVersionResponse(plan),
+      versions: allSnapshots.map(mapVersionResponse),
     },
   }
 }
@@ -985,10 +963,18 @@ export async function createPricePlanVersion({
   const carrierService = extractCarrierServiceMeta(meta)
   const carrierValidate = await validateCarrierServiceReferences(supabase, String((plan as any).service_type ?? ''), carrierService)
   if (!carrierValidate.ok) return carrierValidate
+  // Snapshot model: clone creates a new price_plan row with source_price_plan_id
   const rows = await supabase.insert(
-    'price_plan_versions',
+    'price_plans',
     {
-      price_plan_id: pricePlanId,
+      enterprise_id: (plan as any).enterprise_id,
+      name: (plan as any).name,
+      type: (plan as any).type,
+      service_type: (plan as any).service_type,
+      currency: (plan as any).currency,
+      billing_cycle_type: (plan as any).billing_cycle_type,
+      first_cycle_proration: (plan as any).first_cycle_proration,
+      source_price_plan_id: pricePlanId,
       version: nextVersion,
       effective_from: null,
       monthly_fee: monthlyFee ?? 0,
@@ -1005,8 +991,8 @@ export async function createPricePlanVersion({
     { returning: 'representation' }
   )
   const version = Array.isArray(rows) ? rows[0] : null
-  if (!(version as any)?.price_plan_version_id) {
-    return toError(500, 'INTERNAL_ERROR', 'Failed to create price plan version.')
+  if (!(version as any)?.price_plan_id) {
+    return toError(500, 'INTERNAL_ERROR', 'Failed to create price plan snapshot.')
   }
   await writeAuditLog(supabase, {
     actor_user_id: audit?.actorUserId ?? null,
@@ -1014,11 +1000,12 @@ export async function createPricePlanVersion({
     tenant_id: (plan as any).enterprise_id ?? null,
     action: 'PRICE_PLAN_VERSION_CREATED',
     target_type: 'PRICE_PLAN',
-    target_id: pricePlanId,
+    target_id: (version as any).price_plan_id,
     request_id: audit?.requestId ?? null,
     source_ip: audit?.sourceIp ?? null,
     after_data: {
-      pricePlanVersionId: (version as any).price_plan_version_id,
+      pricePlanId: (version as any).price_plan_id,
+      sourcePricePlanId: pricePlanId,
       version: (version as any).version ?? nextVersion,
     },
   })

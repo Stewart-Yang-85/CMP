@@ -132,7 +132,7 @@ describe('Billing Golden Case Integration (T036-T040)', () => {
       }
     }
 
-    for (const gc of goldenCases.cases as { id: string; expected: { classification: string; charged_kb: number; rate_per_kb: number | null; amount: number } }[]) {
+    for (const gc of goldenCases.cases as { id: string; expected: { classification: string; charged_mb: number; rate_per_mb: number | null; amount: number } }[]) {
       const ref = `golden:${gc.id}`
       const actual = byInputRef.get(ref)
       expect(actual, `Missing result for ${ref}`).toBeDefined()
@@ -142,16 +142,16 @@ describe('Billing Golden Case Integration (T036-T040)', () => {
       expect(actual.classification, `${gc.id} classification`).toBe(exp.classification)
       expect(actual.amount, `${gc.id} amount`).toBe(exp.amount)
 
-      const chargedKb = (actual as { charged_kb?: number; charged_mb?: number }).charged_kb ?? (actual as { charged_mb?: number }).charged_mb
-      if (chargedKb !== undefined) {
-        expect(chargedKb, `${gc.id} charged_kb`).toBe(exp.charged_kb)
+      const chargedMb = (actual as { charged_kb?: number; charged_mb?: number }).charged_mb ?? (actual as { charged_kb?: number }).charged_kb
+      if (chargedMb !== undefined) {
+        expect(chargedMb, `${gc.id} charged_mb`).toBe(exp.charged_mb)
       }
 
-      const ratePerKb = (actual as { rate_per_kb?: number; rate_per_mb?: number }).rate_per_kb ?? (actual as { rate_per_mb?: number }).rate_per_mb
-      if (exp.rate_per_kb !== null) {
-        expect(ratePerKb, `${gc.id} rate_per_kb`).toBe(exp.rate_per_kb)
+      const ratePerMb = (actual as { rate_per_kb?: number; rate_per_mb?: number }).rate_per_mb ?? (actual as { rate_per_kb?: number }).rate_per_kb
+      if (exp.rate_per_mb !== null) {
+        expect(ratePerMb, `${gc.id} rate_per_mb`).toBe(exp.rate_per_mb)
       } else {
-        expect(ratePerKb == null || ratePerKb === 0, `${gc.id} rate should be null/0`).toBe(true)
+        expect(ratePerMb == null || ratePerMb === 0, `${gc.id} rate should be null/0`).toBe(true)
       }
     }
   })

@@ -86,7 +86,7 @@ function Select-MatchingPackage($CatalogPackages, $Subscriptions, [string]$Visit
   return $null
 }
 
-function Resolve-PaygRatePerKb($MainPackage, [string]$VisitedMccMnc) {
+function Resolve-PaygRatePerMb($MainPackage, [string]$VisitedMccMnc) {
   if ($null -eq $MainPackage) { return $null }
   if ($null -eq $MainPackage.payg) { return $null }
   if ($null -eq $MainPackage.payg.zones) { return $null }
@@ -95,7 +95,7 @@ function Resolve-PaygRatePerKb($MainPackage, [string]$VisitedMccMnc) {
     $zone = $MainPackage.payg.zones.$zoneName
     if ($null -eq $zone) { continue }
     if (@($zone.mccmnc) -contains $VisitedMccMnc) {
-      return [double]$zone.ratePerKb
+      return [double]$zone.ratePerMb
     }
   }
 
@@ -112,8 +112,8 @@ function Evaluate-UsageMatch($Doc, $Case) {
   Assert-Equal ([bool]($null -ne $matched)) ([bool]$Case.expect.inProfile) "Case $($Case.id) inProfile"
   Assert-Equal $Case.expect.deductFromPackage $matched "Case $($Case.id) deductFromPackage"
 
-  $chargedKb = Convert-MbToKbCeil $totalMb $Doc.meta.unit.mbToKb
-  Assert-Equal $chargedKb $chargedKb "Case $($Case.id) unit conversion sanity"
+  $chargedMb = $totalMb
+  Assert-Equal $chargedMb $chargedMb "Case $($Case.id) unit conversion sanity"
 }
 
 function Evaluate-PaygOutOfProfile($Doc, $Case) {
@@ -131,8 +131,8 @@ function Evaluate-PaygOutOfProfile($Doc, $Case) {
   $matched = Select-MatchingPackage $pkgs $Case.context.subscriptions $visited
   Assert-Equal $matched $null "Case $($Case.id) should be out-of-profile"
 
-  $chargedKb = Convert-MbToKbCeil $totalMb $Doc.meta.unit.mbToKb
-  $rate = Resolve-PaygRatePerKb $mainPkg $visited
+  $chargedMb = $totalMb
+  $rate = Resolve-PaygRatePerMb $mainPkg $visited
   if ($null -eq $rate) {
     Assert-Equal $Case.expect.charge.type "PAYG_RULE_MISSING" "Case $($Case.id) payg missing"
     if (@($Case.expect.alerts) -notcontains "PAYG_RULE_MISSING") {
@@ -141,11 +141,11 @@ function Evaluate-PaygOutOfProfile($Doc, $Case) {
     return
   }
 
-  $amount = [math]::Round(($chargedKb * $rate), 2)
+  $amount = [math]::Round(($chargedMb * $rate), 2)
 
   Assert-Equal $Case.expect.charge.type "PAYG" "Case $($Case.id) charge type"
-  Assert-Equal ([double]$Case.expect.charge.ratePerKb) $rate "Case $($Case.id) ratePerKb"
-  Assert-Equal ([long]$Case.expect.charge.chargedKb) $chargedKb "Case $($Case.id) chargedKb"
+  Assert-Equal ([double]$Case.expect.charge.ratePerMb) $rate "Case $($Case.id) ratePerMb"
+  Assert-Equal ([double]$Case.expect.charge.chargedMb) $chargedMb "Case $($Case.id) chargedMb"
   Assert-Equal ([double]$Case.expect.charge.amount) $amount "Case $($Case.id) amount"
   if (@($Case.expect.alerts) -notcontains "UNEXPECTED_ROAMING") {
     throw "Case $($Case.id) expected UNEXPECTED_ROAMING alert"
@@ -205,13 +205,13 @@ foreach ($case in $doc.cases) {
         Assert-Equal $actual.deductFromPackage $case.expect.deductFromPackage "Case $($case.id) deductFromPackage"
         Assert-Equal $actual.charge.type $case.expect.charge.type "Case $($case.id) charge type"
         if ($case.expect.charge.type -eq "PAYG") {
-          Assert-Equal ([double]$actual.charge.ratePerKb) ([double]$case.expect.charge.ratePerKb) "Case $($case.id) ratePerKb"
-          Assert-Equal ([long]$actual.charge.chargedKb) ([long]$case.expect.charge.chargedKb) "Case $($case.id) chargedKb"
+          Assert-Equal ([double]$actual.charge.ratePerMb) ([double]$case.expect.charge.ratePerMb) "Case $($case.id) ratePerMb"
+          Assert-Equal ([double]$actual.charge.chargedMb) ([double]$case.expect.charge.chargedMb) "Case $($case.id) chargedMb"
           Assert-Equal ([double]$actual.charge.amount) ([double]$case.expect.charge.amount) "Case $($case.id) amount"
         }
         if ($case.expect.charge.type -eq "OVERAGE") {
-          Assert-Equal ([double]$actual.charge.ratePerKb) ([double]$case.expect.charge.ratePerKb) "Case $($case.id) ratePerKb"
-          Assert-Equal ([long]$actual.charge.chargedKb) ([long]$case.expect.charge.chargedKb) "Case $($case.id) chargedKb"
+          Assert-Equal ([double]$actual.charge.ratePerMb) ([double]$case.expect.charge.ratePerMb) "Case $($case.id) ratePerMb"
+          Assert-Equal ([double]$actual.charge.chargedMb) ([double]$case.expect.charge.chargedMb) "Case $($case.id) chargedMb"
           Assert-Equal ([double]$actual.charge.amount) ([double]$case.expect.charge.amount) "Case $($case.id) amount"
         }
       } elseif ($case.type -eq "overage_when_exhausted") {
@@ -219,8 +219,8 @@ foreach ($case in $doc.cases) {
         Assert-Equal ([bool]$actual.inProfile) ([bool]$case.expect.inProfile) "Case $($case.id) inProfile"
         Assert-Equal $actual.deductFromPackage $case.expect.deductFromPackage "Case $($case.id) deductFromPackage"
         Assert-Equal $actual.charge.type $case.expect.charge.type "Case $($case.id) charge type"
-        Assert-Equal ([double]$actual.charge.ratePerKb) ([double]$case.expect.charge.ratePerKb) "Case $($case.id) ratePerKb"
-        Assert-Equal ([long]$actual.charge.chargedKb) ([long]$case.expect.charge.chargedKb) "Case $($case.id) chargedKb"
+        Assert-Equal ([double]$actual.charge.ratePerMb) ([double]$case.expect.charge.ratePerMb) "Case $($case.id) ratePerMb"
+        Assert-Equal ([double]$actual.charge.chargedMb) ([double]$case.expect.charge.chargedMb) "Case $($case.id) chargedMb"
         Assert-Equal ([double]$actual.charge.amount) ([double]$case.expect.charge.amount) "Case $($case.id) amount"
       } elseif ($case.type -eq "monthly_fee_high_water") {
         Assert-Equal $actual.chargeType $case.expect.chargeType "Case $($case.id) chargeType"

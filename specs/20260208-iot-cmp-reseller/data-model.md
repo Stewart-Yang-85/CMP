@@ -1,6 +1,6 @@
 # Data Model: IoT CMP Reseller System
 
-**Feature**: `iot-cmp-reseller` | **Date**: 2026-02-08 | **Spec**: [spec.md](./spec.md)
+**Feature**: `iot-cmp-reseller` | **Date**: 2026-02-08（`public_infos` 节 2026-03-24 对齐澄清） | **Spec**: [spec.md](./spec.md)
 
 ## 1. 概述
 
@@ -50,10 +50,10 @@
 ```
 ── 组织层 ──────────────────────────────────────────────────────
 
-carriers (public catalog)
+public_infos（3GPP 公开参考，仅辅助查询；与下方业务子图无连线、无 FK）
 business_operators (business dictionary)
 
-suppliers ──1:N──┐                      operators ──N:1── carriers
+suppliers ──1:N──┐                      operators
     │            ▼                          │
     │   upstream_integrations ◄──N:1────────┘
     │     (supplier_id + operator_id UNIQUE)
@@ -156,17 +156,19 @@ sim_cards ──1:N──> rating_results
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
 
-#### `carriers` — 公共运营商目录
+#### `public_infos` — 3GPP 公开运营商参考目录（辅助）
+
+> **命名**：物理表为 `public.public_infos`；`public.carriers` 为 **兼容视图**（`carrier_id` ← `public_info_id`），见迁移 `20260311100004_sim_connectivity.sql`。数据**仅供查阅**，不参与计费/订阅等业务规则；**仅 platform_admin 可写**，其余角色只读（RLS + API 层，见 spec FR-054～FR-057、`contracts/public-info-api.md`）。**与 `business_operators`、`operators.operator_id` 业务链无任何外键或语义关联**（V1.1 须去除历史 `operators.carrier_id` → `public_infos` 的 FK，见 FR-057）。
 
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
-| carrier_id | uuid | PK, default gen_random_uuid() | 公共运营商 ID |
-| mcc | char(3) | NOT NULL | 移动国家代码 |
+| public_info_id | uuid | PK, default gen_random_uuid() | 目录行 ID |
+| mcc | char(3) | NOT NULL | 移动国家代码（E.212） |
 | mnc | char(3) | NOT NULL | 移动网络代码 |
-| name | text | — | 运营商名称 |
-| country_name | text | — | 国家名称（英文） |
-| lte_bands | text | — | LTE 频段 |
-| | | UNIQUE(mcc, mnc) | E.212 唯一约束 |
+| name | text | — | 运营商公开名称（支持 API 侧 `ilike` 模糊查询） |
+| country_name | text | — | 国家/地区名称（英文或展示用文本） |
+| lte_bands | text | — | 频段说明（如 LTE 频段文本；未来可扩展 NR 列或 JSONB，由迁移单独立项） |
+| | | UNIQUE(mcc, mnc) | PLMN 唯一约束 |
 
 #### `business_operators` — 业务运营商字典
 
@@ -183,12 +185,12 @@ sim_cards ──1:N──> rating_results
 |----|------|------|------|
 | operator_id | uuid | PK, default gen_random_uuid() | 业务关联 ID |
 | supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
-| carrier_id | uuid | NOT NULL, FK→carriers | 公共运营商 |
+| business_operator_id | uuid | NULLABLE, FK→business_operators | 业务运营商字典（与 `public_infos` 无关）；**V1.1 迁移 `T153` 后** `operators` **不再包含** `carrier_id` 列（已物理删除，见 tasks.md T153 硬性验收） |
 | name | text | — | 运营商名称快照 |
 | status | text | NOT NULL, default 'ACTIVE' | ACTIVE / SUSPENDED |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
-| | | UNIQUE(supplier_id, carrier_id) | 供应商-公共运营商唯一 |
+| | | UNIQUE(supplier_id, business_operator_id) 等（以迁移为准） | **不得**使用已删除的 `carrier_id`；**不得**与 `public_infos` 关联（FR-057） |
 
 #### `upstream_integrations` — 上游集成配置（替代旧 `supplier_carriers`）
 
@@ -261,6 +263,8 @@ sim_cards ──1:N──> rating_results
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
 | | | UNIQUE(reseller_id, name) | 同代理商客户名称唯一 |
+
+> **V1.1 迁移（2026-03-24 确认）**：`reseller_id` 将新增 `reseller_tenant_id` (uuid, FK→tenants(tenant_id)) 替代，数据迁移完成后弃用 `reseller_id`，消除 `resellers.id` 与 `tenants.tenant_id` 双标识歧义。UNIQUE 约束随迁移调整为 `UNIQUE(reseller_tenant_id, name)`。
 
 #### `permissions` — 权限定义（RBAC）
 

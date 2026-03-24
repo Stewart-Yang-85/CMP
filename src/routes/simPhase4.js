@@ -106,24 +106,8 @@ async function detectSimResellerColumn(supabase) {
   }
 }
 
-/**
- * Resolve auth.resellerId (may be resellers.id or tenants.tenant_id) to both IDs.
- * tenants.parent_id uses tenant_id; reseller_suppliers and sims.reseller_id use resellers.id.
- */
-async function resolveResellerIdentity(supabase, rawResellerId) {
-  if (!rawResellerId || !/^[0-9a-f-]{36}$/i.test(String(rawResellerId))) return null
-  const id = String(rawResellerId).trim()
-  const rows = await supabase.select(
-    'resellers',
-    `select=id,tenant_id&or=(id.eq.${encodeURIComponent(id)},tenant_id.eq.${encodeURIComponent(id)})&limit=1`
-  )
-  const row = Array.isArray(rows) && rows[0] ? rows[0] : null
-  if (!row) return null
-  return {
-    resellerId: row.id ? String(row.id) : null,
-    tenantId: row.tenant_id ? String(row.tenant_id) : null,
-  }
-}
+// Phase 24: resolveResellerIdentity removed — auth.resellerId is always tenants.tenant_id
+// after V1.1 identity unification, reseller_suppliers.reseller_id also uses tenant_id
 
 export function registerSimPhase4Routes({ app, prefix, deps }) {
   const {
@@ -207,26 +191,17 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
         return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
       }
       if (resellerIdQuery) {
-        const resolved = await resolveResellerIdentity(supabase, resellerIdQuery)
-        if (resolved) {
-          resellerId = resolved.resellerId
-          resellerTenantIdForCsv = resolved.tenantId
-        } else {
-          resellerId = resellerIdQuery
-          resellerTenantIdForCsv = resellerIdQuery
-        }
+        // Phase 24: resellerId is always tenant_id, no resolution needed
+        resellerId = resellerIdQuery
+        resellerTenantIdForCsv = resellerIdQuery
       }
       enterpriseId = enterpriseIdQuery
     } else if (roleScope === 'reseller') {
       const raw = req?.cmpAuth?.resellerId ? String(req.cmpAuth.resellerId) : null
       if (raw) {
-        const resolved = await resolveResellerIdentity(supabase, raw)
-        if (resolved) {
-          resellerId = resolved.resellerId
-          resellerTenantIdForCsv = resolved.tenantId
-        } else {
-          resellerId = raw
-        }
+        // Phase 24: auth.resellerId is already tenant_id
+        resellerId = raw
+        resellerTenantIdForCsv = raw
       }
       if (enterpriseIdQuery) {
         if (!isValidUuid(enterpriseIdQuery)) {
@@ -301,6 +276,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
           'activationDate',
           'totalUsageBytes',
           'imei',
+          'remark',
         ]
         res.setHeader('Content-Type', 'text/csv; charset=utf-8')
         res.setHeader('Content-Disposition', 'attachment; filename="sims.csv"')
@@ -367,7 +343,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
           } else if (rsIds.length > 0) {
             filters.push(`and(enterprise_id.is.null,supplier_id.in.(${rsIds.map((id) => encodeURIComponent(id)).join(',')}))`)
           } else {
-            const csvHeaders = ['simId', 'iccid', 'imsi', 'msisdn', 'status', 'lifecycleSubStatus', 'upstreamStatus', 'upstreamStatusUpdatedAt', 'formFactor', 'activationCode', ...(includeSensitive ? ['supplierId', 'supplierName', 'operatorId', 'operatorName', 'mcc', 'mnc'] : []), 'apn', ...(includeSensitive ? ['resellerId', 'resellerName'] : []), 'enterpriseId', 'enterpriseName', 'departmentId', 'departmentName', 'activationDate', 'totalUsageBytes', 'imei']
+            const csvHeaders = ['simId', 'iccid', 'imsi', 'msisdn', 'status', 'lifecycleSubStatus', 'upstreamStatus', 'upstreamStatusUpdatedAt', 'formFactor', 'activationCode', ...(includeSensitive ? ['supplierId', 'supplierName', 'operatorId', 'operatorName', 'mcc', 'mnc'] : []), 'apn', ...(includeSensitive ? ['resellerId', 'resellerName'] : []), 'enterpriseId', 'enterpriseName', 'departmentId', 'departmentName', 'activationDate', 'totalUsageBytes', 'imei', 'remark']
             res.setHeader('Content-Type', 'text/csv; charset=utf-8')
             res.setHeader('Content-Disposition', 'attachment; filename="sims.csv"')
             res.send(`${csvHeaders.map(escapeCsv).join(',')}\n`)
@@ -390,7 +366,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       'sim_id', 'iccid', 'primary_imsi', 'msisdn', 'status', 'apn', 'activation_date', 'bound_imei', 'activation_code',
       'supplier_id', 'operator_id',
       ...(hasSimResellerColumn ? ['reseller_id'] : []),
-      'enterprise_id', 'department_id', 'form_factor', 'upstream_status', 'upstream_status_updated_at', 'created_at',
+      'enterprise_id', 'department_id', 'form_factor', 'upstream_status', 'upstream_status_updated_at', 'remark', 'created_at',
       'suppliers(name)', 'operators(name)',
     ].join(',')
     const { data } = await supabase.selectWithCount(
@@ -465,6 +441,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       'activationDate',
       'totalUsageBytes',
       'imei',
+      'remark',
     ]
 
     const csvRows = [headers.map(escapeCsv).join(',')]
@@ -506,6 +483,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
         escapeCsv(toIsoDateTime(r.activation_date) ?? ''),
         escapeCsv(''),
         escapeCsv(r.bound_imei ?? ''),
+        escapeCsv(r.remark ?? ''),
       ].join(','))
     }
 
@@ -750,6 +728,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     const supplierId = req.query.supplierId ? String(req.query.supplierId) : null
     const operatorId = req.query.operatorId ? String(req.query.operatorId) : null
     const departmentIdQuery = req.query.departmentId ? String(req.query.departmentId) : null
+    const packageIdQuery = req.query.packageId ? String(req.query.packageId).trim() : null
     const pageSize = req.query.pageSize ? Number(req.query.pageSize) : (req.query.limit ? Number(req.query.limit) : 20)
     const page = req.query.page ? Number(req.query.page) : 1
     const limit = Math.min(100, Math.max(1, pageSize))
@@ -762,6 +741,36 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     }
     if (operatorId && !isValidUuid(operatorId)) {
       return sendError(res, 400, 'BAD_REQUEST', 'operatorId must be a valid uuid.')
+    }
+    if (packageIdQuery && !isValidUuid(packageIdQuery)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'packageId must be a valid uuid.')
+    }
+    // T143: Resolve SIM IDs from package subscriptions
+    let packageSimIds = null
+    if (packageIdQuery) {
+      const pvRows = await supabase.select(
+        'package_versions',
+        `select=package_version_id&package_id=eq.${encodeURIComponent(packageIdQuery)}`
+      )
+      const pvIds = (Array.isArray(pvRows) ? pvRows : [])
+        .map((r) => String(r?.package_version_id ?? '').trim())
+        .filter(Boolean)
+      if (!pvIds.length) {
+        return res.json({ items: [], total: 0, page, pageSize: limit })
+      }
+      const pvIdFilter = pvIds.map((id) => encodeURIComponent(id)).join(',')
+      const subRows = await supabase.select(
+        'subscriptions',
+        `select=sim_id&package_version_id=in.(${pvIdFilter})&state=in.(ACTIVE,PENDING)`
+      )
+      packageSimIds = new Set(
+        (Array.isArray(subRows) ? subRows : [])
+          .map((r) => String(r?.sim_id ?? '').trim())
+          .filter(Boolean)
+      )
+      if (packageSimIds.size === 0) {
+        return res.json({ items: [], total: 0, page, pageSize: limit })
+      }
     }
     let operatorFilter = null
     if (operatorId) {
@@ -788,11 +797,16 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     if (status) filters.push(`status=eq.${encodeURIComponent(status)}`)
     if (supplierId) filters.push(`supplier_id=eq.${encodeURIComponent(supplierId)}`)
     appendOperatorFilter(filters, operatorFilter)
+    // T143: Filter by package-derived SIM IDs
+    if (packageSimIds) {
+      const simIdArr = Array.from(packageSimIds)
+      filters.push(`sim_id=in.(${simIdArr.map((id) => encodeURIComponent(id)).join(',')})`)
+    }
     const filterQs = filters.length ? `&${filters.join('&')}` : ''
 
     const { data, total } = await supabase.selectWithCount(
       'sims',
-      `select=sim_id,iccid,primary_imsi,msisdn,status,apn,activation_date,bound_imei,activation_code,supplier_id,operator_id,enterprise_id,department_id,form_factor,upstream_status,upstream_status_updated_at,created_at,suppliers(name),operators(name)&order=iccid.asc&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
+      `select=sim_id,iccid,primary_imsi,msisdn,status,apn,activation_date,bound_imei,activation_code,supplier_id,operator_id,enterprise_id,department_id,form_factor,upstream_status,upstream_status_updated_at,remark,created_at,suppliers(name),operators(name)&order=iccid.asc&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
     )
 
     const rows = Array.isArray(data) ? data : []
@@ -839,6 +853,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       activationDate: toIsoDateTime(r.activation_date),
       totalUsageBytes: null,
       imei: r.bound_imei ?? null,
+      remark: r.remark ?? null,
       }
     })
 
@@ -851,6 +866,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       if (operatorId) filterPairs.push(`operatorId=${operatorId}`)
       filterPairs.push(`enterpriseId=${enterpriseId}`)
       if (departmentId) filterPairs.push(`departmentId=${departmentId}`)
+      if (packageIdQuery) filterPairs.push(`packageId=${packageIdQuery}`)
       filterPairs.push(`pageSize=${limit}`)
       filterPairs.push(`page=${page}`)
       setXFilters(res, filterPairs.join(';'))
@@ -876,6 +892,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     const resellerIdQuery = req.query.resellerId ? String(req.query.resellerId) : null
     const enterpriseIdQuery = req.query.enterpriseId ? String(req.query.enterpriseId) : null
     const departmentIdQuery = req.query.departmentId ? String(req.query.departmentId) : null
+    const packageIdQuery = req.query.packageId ? String(req.query.packageId).trim() : null
     const pageSize = req.query.pageSize ? Number(req.query.pageSize) : (req.query.limit ? Number(req.query.limit) : 20)
     const page = req.query.page ? Number(req.query.page) : 1
     const limit = Math.min(100, Math.max(1, pageSize))
@@ -892,6 +909,13 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     if (resellerIdQuery && !isValidUuid(resellerIdQuery)) {
       return sendError(res, 400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
     }
+    if (packageIdQuery && !isValidUuid(packageIdQuery)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'packageId must be a valid uuid.')
+    }
+    // T142: packageId requires enterpriseId for platform/reseller scope
+    if (packageIdQuery && (roleScope === 'platform' || roleScope === 'reseller') && !enterpriseIdQuery) {
+      return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required when filtering by packageId.')
+    }
     let operatorFilter = null
     if (operatorId) {
       const resolved = await resolveOperatorFilter(supabase, operatorId, supplierId)
@@ -906,11 +930,9 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     if (roleScope === 'reseller') {
       const raw = auth?.resellerId ? String(auth.resellerId) : null
       if (raw) {
-        const resolved = await resolveResellerIdentity(supabase, raw)
-        if (resolved) {
-          resellerId = resolved.resellerId
-          resellerTenantId = resolved.tenantId
-        }
+        // Phase 24: auth.resellerId is already tenant_id
+        resellerId = raw
+        resellerTenantId = raw
       }
       if (enterpriseIdQuery) {
         enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, enterpriseIdQuery)
@@ -919,14 +941,9 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     } else if (roleScope === 'platform') {
       if (enterpriseIdQuery) enterpriseId = enterpriseIdQuery
       if (resellerIdQuery) {
-        const resolved = await resolveResellerIdentity(supabase, resellerIdQuery)
-        if (resolved) {
-          resellerId = resolved.resellerId
-          resellerTenantId = resolved.tenantId
-        } else {
-          resellerId = resellerIdQuery
-          resellerTenantId = resellerIdQuery
-        }
+        // Phase 24: resellerId is always tenant_id, no resolution needed
+        resellerId = resellerIdQuery
+        resellerTenantId = resellerIdQuery
       }
     }
     const departmentId = roleScope === 'department' ? getDepartmentIdFromReq(req) : await resolveDepartmentForEnterprise(req, res, supabase, enterpriseId, departmentIdQuery)
@@ -994,13 +1011,44 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     if (status) filters.push(`status=eq.${encodeURIComponent(status)}`)
     if (supplierId) filters.push(`supplier_id=eq.${encodeURIComponent(supplierId)}`)
     appendOperatorFilter(filters, operatorFilter)
+    // T142: Resolve SIM IDs from package subscriptions
+    let packageSimIds = null
+    if (packageIdQuery) {
+      const pvRows = await supabase.select(
+        'package_versions',
+        `select=package_version_id&package_id=eq.${encodeURIComponent(packageIdQuery)}`
+      )
+      const pvIds = (Array.isArray(pvRows) ? pvRows : [])
+        .map((r) => String(r?.package_version_id ?? '').trim())
+        .filter(Boolean)
+      if (!pvIds.length) {
+        return res.json({ items: [], total: 0, page, pageSize: limit })
+      }
+      const pvIdFilter = pvIds.map((id) => encodeURIComponent(id)).join(',')
+      const subRows = await supabase.select(
+        'subscriptions',
+        `select=sim_id&package_version_id=in.(${pvIdFilter})&state=in.(ACTIVE,PENDING)`
+      )
+      packageSimIds = new Set(
+        (Array.isArray(subRows) ? subRows : [])
+          .map((r) => String(r?.sim_id ?? '').trim())
+          .filter(Boolean)
+      )
+      if (packageSimIds.size === 0) {
+        return res.json({ items: [], total: 0, page, pageSize: limit })
+      }
+    }
+    if (packageSimIds) {
+      const simIdArr = Array.from(packageSimIds)
+      filters.push(`sim_id=in.(${simIdArr.map((id) => encodeURIComponent(id)).join(',')})`)
+    }
     const filterQs = filters.length ? `&${filters.join('&')}` : ''
 
     const simSelectFields = [
       'sim_id', 'iccid', 'primary_imsi', 'msisdn', 'status', 'apn', 'activation_date', 'bound_imei', 'activation_code',
       'supplier_id', 'operator_id',
       ...(hasSimResellerColumn ? ['reseller_id'] : []),
-      'enterprise_id', 'department_id', 'form_factor', 'upstream_status', 'upstream_status_updated_at', 'created_at',
+      'enterprise_id', 'department_id', 'form_factor', 'upstream_status', 'upstream_status_updated_at', 'remark', 'created_at',
       'suppliers(name)', 'operators(name)',
     ].join(',')
     const { data, total } = await supabase.selectWithCount(
@@ -1091,6 +1139,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
         activationDate: toIsoDateTime(r.activation_date),
         totalUsageBytes: null,
         imei: r.bound_imei ?? null,
+        remark: r.remark ?? null,
       }
     })
 
@@ -1104,6 +1153,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       if (resellerId) filterPairs.push(`resellerId=${resellerId}`)
       if (enterpriseId) filterPairs.push(`enterpriseId=${enterpriseId}`)
       if (departmentId) filterPairs.push(`departmentId=${departmentId}`)
+      if (packageIdQuery) filterPairs.push(`packageId=${packageIdQuery}`)
       filterPairs.push(`pageSize=${limit}`)
       filterPairs.push(`page=${page}`)
       setXFilters(res, filterPairs.join(';'))
@@ -1127,14 +1177,14 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
 
     const rows = await supabase.select(
       'sims',
-      `select=sim_id,iccid,primary_imsi,msisdn,status,apn,activation_date,bound_imei,activation_code,supplier_id,operator_id,enterprise_id,department_id,form_factor,upstream_status,upstream_status_updated_at,created_at,suppliers(name),operators(name)&${simIdResult.field}=eq.${encodeURIComponent(simIdResult.value)}&limit=1`
+      `select=sim_id,iccid,primary_imsi,msisdn,status,apn,activation_date,bound_imei,activation_code,supplier_id,operator_id,enterprise_id,department_id,form_factor,upstream_status,upstream_status_updated_at,remark,created_at,suppliers(name),operators(name)&${simIdResult.field}=eq.${encodeURIComponent(simIdResult.value)}&limit=1`
     )
     let sim = Array.isArray(rows) ? rows[0] : null
     if (!sim && simIdResult.field === 'iccid') {
       const iccidValue = String(simIdResult.value || '').trim()
       const fallbackRows = await supabase.select(
         'sims',
-        `select=sim_id,iccid,primary_imsi,msisdn,status,apn,activation_date,bound_imei,activation_code,supplier_id,operator_id,enterprise_id,department_id,form_factor,upstream_status,upstream_status_updated_at,created_at,suppliers(name),operators(name)&iccid=ilike.${encodeURIComponent(`%${iccidValue}%`)}&limit=20`
+        `select=sim_id,iccid,primary_imsi,msisdn,status,apn,activation_date,bound_imei,activation_code,supplier_id,operator_id,enterprise_id,department_id,form_factor,upstream_status,upstream_status_updated_at,remark,created_at,suppliers(name),operators(name)&iccid=ilike.${encodeURIComponent(`%${iccidValue}%`)}&limit=20`
       )
       const candidates = Array.isArray(fallbackRows) ? fallbackRows : []
       const normalizeDigits = (value) => String(value || '').replace(/\D/g, '')
@@ -1236,6 +1286,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       activationDate: toIsoDateTime(sim.activation_date),
       totalUsageBytes: null,
       imei: sim.bound_imei ?? null,
+      remark: sim.remark ?? null,
     })
   })
 
@@ -1455,6 +1506,52 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     }
     const statusCode = result.failed === 0 ? 200 : (result.succeeded === 0 ? 400 : 207)
     res.status(statusCode).json(result)
+  })
+
+  // Phase 21: PATCH /v1/sims/:simId — update remark (and other mutable fields)
+  // TODO: T116 — add PATCH /v1/sims/{iccid} to OpenAPI spec (iot-cmp-api.yaml)
+  app.patch(`${prefix}/sims/:simId`, async (req, res) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const simIdResult = parseSimIdentifier(req.params.simId)
+    if (!simIdResult.ok) {
+      return sendError(res, simIdResult.status, simIdResult.code, simIdResult.message)
+    }
+    const body = req.body ?? {}
+    const allowedFields = new Set(['remark'])
+    const patchKeys = Object.keys(body).filter((k) => allowedFields.has(k))
+    if (patchKeys.length === 0) {
+      return sendError(res, 400, 'BAD_REQUEST', 'No updatable fields provided. Supported: remark.')
+    }
+    const patch = {}
+    if ('remark' in body) {
+      const remarkValue = body.remark === null ? null : String(body.remark).slice(0, 1000)
+      patch.remark = remarkValue
+    }
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const rows = await supabase.select(
+      'sims',
+      `select=sim_id,iccid,enterprise_id&${simIdResult.field}=eq.${encodeURIComponent(simIdResult.value)}&limit=1`
+    )
+    const sim = Array.isArray(rows) ? rows[0] : null
+    if (!sim) {
+      return sendError(res, 404, 'NOT_FOUND', 'SIM not found.')
+    }
+    const updatedRows = await supabase.update(
+      'sims',
+      `sim_id=eq.${encodeURIComponent(sim.sim_id)}`,
+      patch,
+      { returning: 'representation' }
+    )
+    const updated = Array.isArray(updatedRows) ? updatedRows[0] : null
+    if (!updated) {
+      return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to update SIM.')
+    }
+    res.json({
+      simId: updated.sim_id,
+      iccid: updated.iccid,
+      remark: updated.remark ?? null,
+    })
   })
 
   app.post(`${prefix}/sims:batch-deactivate`, async (req, res) => {

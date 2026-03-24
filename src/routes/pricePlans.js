@@ -1,4 +1,4 @@
-import { createPricePlan, listPricePlans, getPricePlanDetail, createPricePlanVersion } from '../services/pricePlan.js'
+import { createPricePlan, listPricePlans, getPricePlanDetail, clonePricePlan, updatePricePlan, publishPricePlan } from '../services/pricePlan.js'
 
 export function registerPricePlanRoutes({ app, prefix, deps }) {
   const {
@@ -64,7 +64,7 @@ export function registerPricePlanRoutes({ app, prefix, deps }) {
     res.json(result.value)
   })
 
-  app.post(`${prefix}/price-plans/:pricePlanId/versions`, async (req, res) => {
+  app.post(`${prefix}/price-plans/:pricePlanId\\:clone`, async (req, res) => {
     const auth = ensureResellerAdmin(req, res)
     if (!auth) return
     const pricePlanId = String(req.params.pricePlanId || '').trim()
@@ -75,8 +75,40 @@ export function registerPricePlanRoutes({ app, prefix, deps }) {
       sourceIp: req.ip,
     }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-    const result = await createPricePlanVersion({ supabase, pricePlanId, payload: req.body ?? {}, audit })
+    const result = await clonePricePlan({ supabase, pricePlanId, payload: req.body ?? {}, audit })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
     res.status(201).json(result.value)
+  })
+
+  app.put(`${prefix}/price-plans/:pricePlanId`, async (req, res) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const pricePlanId = String(req.params.pricePlanId || '').trim()
+    const audit = {
+      actorUserId: req?.cmpAuth?.userId ?? null,
+      actorRole: req?.cmpAuth?.role ?? null,
+      requestId: getTraceId(res),
+      sourceIp: req.ip,
+    }
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const result = await updatePricePlan({ supabase, pricePlanId, payload: req.body ?? {}, audit })
+    if (!result.ok) return sendError(res, result.status, result.code, result.message)
+    res.json(result.value)
+  })
+
+  app.post(`${prefix}/price-plans/:pricePlanId\\:publish`, async (req, res) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const pricePlanId = String(req.params.pricePlanId || '').trim()
+    const audit = {
+      actorUserId: req?.cmpAuth?.userId ?? null,
+      actorRole: req?.cmpAuth?.role ?? null,
+      requestId: getTraceId(res),
+      sourceIp: req.ip,
+    }
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const result = await publishPricePlan({ supabase, pricePlanId, audit })
+    if (!result.ok) return sendError(res, result.status, result.code, result.message)
+    res.json(result.value)
   })
 }

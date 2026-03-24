@@ -56,17 +56,35 @@ export interface CatalogSPI {
   mapVendorProduct(params: { supplierId: string; externalProductId: string }): Promise<VendorProductMapping>
 }
 
+export type SpiOperation =
+  | 'ACTIVATE'
+  | 'SUSPEND'
+  | 'RESUME'
+  | 'DEACTIVATE'
+  | 'RETIRE'
+  | 'CHANGE_PLAN'
+  | 'GET_USAGE'
+  | 'FETCH_CDR'
+  | 'SIM_STATUS_CHANGE'
+
 export type SupplierCapabilities = {
   supportsFutureDatedChange: boolean
   supportsRealTimeUsage: boolean
   supportsSftp: boolean
   supportsWebhookNotification: boolean
   maxBatchSize: number
+  supportedOperations: readonly SpiOperation[]
+}
+
+export interface CapabilityNegotiationSPI {
+  getCapabilities(): SupplierCapabilities
+  supportsOperation(operation: SpiOperation): boolean
 }
 
 export type SupplierAdapter = ProvisioningSPI &
   UsageSPI &
-  CatalogSPI & {
+  CatalogSPI &
+  CapabilityNegotiationSPI & {
     capabilities: SupplierCapabilities
     supplierKey: string
   }

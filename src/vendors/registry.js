@@ -60,3 +60,22 @@ export function negotiateChangePlanStrategy({ adapter, effectiveAt }) {
   }
   return { mode: 'UPSTREAM' }
 }
+
+export function resolveAdapterForSupplier({ supplierId }) {
+  try {
+    return createSupplierAdapter({ supplierId })
+  } catch {
+    return null
+  }
+}
+
+export function checkOperationSupported({ supplierId, operation }) {
+  const adapter = resolveAdapterForSupplier({ supplierId })
+  if (!adapter) {
+    return { supported: false, adapter: null, reason: 'ADAPTER_NOT_FOUND' }
+  }
+  if (!adapter.supportsOperation(operation)) {
+    return { supported: false, adapter, reason: 'UPSTREAM_NOT_SUPPORTED' }
+  }
+  return { supported: true, adapter }
+}

@@ -111,5 +111,19 @@ export async function transitionBillStatus({
       },
     })
   }
+  if (nextStatus === 'WRITTEN_OFF') {
+    await emitEvent({
+      eventType: 'BILL_WRITTEN_OFF',
+      tenantId: updated.enterprise_id ?? null,
+      actorUserId: actorUserId ?? null,
+      requestId: requestId ?? null,
+      payload: {
+        billId: updated.bill_id,
+        customerId: updated.enterprise_id,
+        totalAmount: Number(updated.total_amount ?? 0),
+        writtenOffAt: nowIso,
+      },
+    })
+  }
   return { ok: true, value: updated }
 }

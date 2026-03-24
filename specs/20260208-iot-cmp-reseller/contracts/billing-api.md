@@ -4,6 +4,8 @@
 **关联 User Story**: US5（计费引擎）、US6（账单与出账）、US7（信控催收）
 **关联需求**: FR-023 ~ FR-034
 
+> **V1.1 Breaking Change（2026-03-24 确认）**：KB→MB 单位统一为一次性 Breaking Change。所有 API 字段名 `*Kb` 将替换为 `*Mb`（如 `usageKb`→`usageMb`、`totalUsageKb`→`totalUsageMb`），不提供兼容层。发布前需通知所有 API 消费方升级。
+
 ---
 
 ## 1. 账单管理

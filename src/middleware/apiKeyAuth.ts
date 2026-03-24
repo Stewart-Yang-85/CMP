@@ -40,7 +40,7 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
     const supabase = createSupabaseRestClient({ useServiceRole: true })
     const rows = await supabase.select(
       'customers',
-      `select=customer_id,id,reseller_id,api_secret_hash,status&api_key=eq.${encodeURIComponent(apiKey)}&limit=1`
+      `select=customer_id,id,reseller_tenant_id,api_secret_hash,status&api_key=eq.${encodeURIComponent(apiKey)}&limit=1`
     )
     const row = Array.isArray(rows) ? rows[0] : null
     if (!row || String(row.status || '').toLowerCase() !== 'active') {
@@ -54,7 +54,7 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
     const customerId = row.customer_id ?? row.id ?? null
     setAuthContext(req, {
       userId: null,
-      resellerId: row.reseller_id ?? null,
+      resellerId: row.reseller_tenant_id ?? null,
       customerId: customerId ? String(customerId) : null,
       roleScope: 'customer',
       role: 'customer_m2m',

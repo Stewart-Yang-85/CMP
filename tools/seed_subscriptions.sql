@@ -5,7 +5,7 @@
 
 -- Fix legacy tables that may be missing columns
 alter table if exists package_versions
-  add column if not exists price_plan_version_id uuid references price_plan_versions(price_plan_version_id),
+  add column if not exists price_plan_id uuid references price_plans(price_plan_id),
   add column if not exists carrier_id uuid,
   add column if not exists service_type service_type not null default 'DATA',
   add column if not exists apn text,
@@ -23,9 +23,7 @@ declare
   v_sim3_id uuid;
   v_sim4_id uuid;
   v_price_plan_id uuid;
-  v_ppv_id uuid;
   v_price_plan2_id uuid;
-  v_ppv2_id uuid;
   v_package_id uuid;
   v_pkgv_id uuid;
   v_package2_id uuid;
@@ -96,7 +94,7 @@ begin
   -- 4. Price Plans + Versions (FIXED_BUNDLE + ONE_TIME)
   -- ============================================================
 
-  -- Plan A: Fixed Bundle 500MB/月, $10/月, 超量 $0.01/KB
+  -- Plan A: Fixed Bundle 500MB/月, $10/月, 超量 $0.01024/MB
   select price_plan_id into v_price_plan_id
   from price_plans where enterprise_id = v_enterprise_id and name = 'Fixed 500MB Monthly' limit 1;
 
@@ -106,20 +104,18 @@ begin
     returning price_plan_id into v_price_plan_id;
   end if;
 
-  select price_plan_version_id into v_ppv_id
-  from price_plan_versions where price_plan_id = v_price_plan_id and version = 1 limit 1;
-
-  if v_ppv_id is null then
+  -- Upsert price plan version for Plan A
+  perform 1 from price_plan_versions where price_plan_id = v_price_plan_id and version = 1;
+  if not found then
     insert into price_plan_versions (
       price_plan_id, version, effective_from,
-      monthly_fee, quota_kb, overage_rate_per_kb,
+      monthly_fee, quota_mb, overage_rate_per_mb,
       payg_rates
     ) values (
       v_price_plan_id, 1, '2026-01-01T00:00:00Z',
-      10.00, 512000, 0.00001,
-      '[{"mcc":"460","mnc":"*","ratePerKb":0.00002}]'::jsonb
-    )
-    returning price_plan_version_id into v_ppv_id;
+      10.00, 500, 0.01024,
+      '[{"mcc":"460","mnc":"*","ratePerMb":0.02048}]'::jsonb
+    );
   end if;
 
   -- Plan B: One-time 100MB, $5, 有效期 30 天
@@ -132,21 +128,19 @@ begin
     returning price_plan_id into v_price_plan2_id;
   end if;
 
-  select price_plan_version_id into v_ppv2_id
-  from price_plan_versions where price_plan_id = v_price_plan2_id and version = 1 limit 1;
-
-  if v_ppv2_id is null then
+  -- Upsert price plan version for Plan B
+  perform 1 from price_plan_versions where price_plan_id = v_price_plan2_id and version = 1;
+  if not found then
     insert into price_plan_versions (
       price_plan_id, version, effective_from,
-      one_time_fee, quota_kb, validity_days
+      one_time_fee, quota_mb, validity_days
     ) values (
       v_price_plan2_id, 1, '2026-01-01T00:00:00Z',
-      5.00, 102400, 30
-    )
-    returning price_plan_version_id into v_ppv2_id;
+      5.00, 100, 30
+    );
   end if;
 
-  raise notice 'price_plan_version_ids = %, %', v_ppv_id, v_ppv2_id;
+  raise notice 'price_plan_ids = %, %', v_price_plan_id, v_price_plan2_id;
 
   -- ============================================================
   -- 5. Packages + Package Versions (PUBLISHED)
@@ -168,10 +162,10 @@ begin
   if v_pkgv_id is null then
     insert into package_versions (
       package_id, version, status, effective_from,
-      supplier_id, service_type, price_plan_version_id
+      supplier_id, service_type, price_plan_id
     ) values (
       v_package_id, 1, 'PUBLISHED', '2026-01-01T00:00:00Z',
-      v_supplier_id, 'DATA', v_ppv_id
+      v_supplier_id, 'DATA', v_price_plan_id
     )
     returning package_version_id into v_pkgv_id;
   end if;
@@ -192,10 +186,10 @@ begin
   if v_pkgv2_id is null then
     insert into package_versions (
       package_id, version, status, effective_from,
-      supplier_id, service_type, price_plan_version_id
+      supplier_id, service_type, price_plan_id
     ) values (
       v_package2_id, 1, 'PUBLISHED', '2026-01-01T00:00:00Z',
-      v_supplier_id, 'DATA', v_ppv2_id
+      v_supplier_id, 'DATA', v_price_plan2_id
     )
     returning package_version_id into v_pkgv2_id;
   end if;

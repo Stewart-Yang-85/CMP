@@ -1,4 +1,4 @@
-import { createPricePlan, listPricePlans, getPricePlanDetail, createPricePlanVersion } from '../services/pricePlan.js'
+import { createPricePlan, listPricePlans, getPricePlanDetail, clonePricePlan } from '../services/pricePlan.js'
 
 type Deps = {
   createSupabaseRestClient: (options: { useServiceRole: boolean; traceId?: string | null }) => {
@@ -77,7 +77,7 @@ export function registerPricePlanRoutes({ app, prefix, deps }: { app: any; prefi
     res.json((result as any).value)
   })
 
-  app.post(`${prefix}/price-plans/:pricePlanId/versions`, async (req: any, res: any) => {
+  app.post(`${prefix}/price-plans/:pricePlanId\\:clone`, async (req: any, res: any) => {
     const auth = ensureResellerAdmin(req, res)
     if (!auth) return
     const pricePlanId = String(req.params.pricePlanId || '').trim()
@@ -88,7 +88,7 @@ export function registerPricePlanRoutes({ app, prefix, deps }: { app: any; prefi
       sourceIp: req.ip,
     }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-    const result = await createPricePlanVersion({ supabase, pricePlanId, payload: req.body ?? {}, audit })
+    const result = await clonePricePlan({ supabase, pricePlanId, payload: req.body ?? {}, audit })
     if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
     res.status(201).json((result as any).value)
   })

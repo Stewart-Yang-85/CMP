@@ -153,7 +153,7 @@ function createFakeSupabase(seed: Record<string, Record<string, any>[]> = {}) {
       if (!row.price_plan_id) row.price_plan_id = randomUUID()
       if (!row.created_at) row.created_at = nowIso
     }
-    if (table === 'price_plan_versions') {
+    if (table === 'price_plans') {
       if (!row.price_plan_version_id) row.price_plan_version_id = randomUUID()
       if (!row.created_at) row.created_at = nowIso
     }
@@ -270,7 +270,7 @@ function preparePackageModules({
   return {
     commercialTerms: {
       testPeriodDays: 7,
-      testQuotaKb: 1024,
+      testQuotaMb: 1024,
       testExpiryCondition: 'PERIOD_OR_QUOTA',
       testExpiryAction: 'DEACTIVATED',
     },
@@ -739,7 +739,7 @@ describe('phase5', () => {
       supabase,
       payload: {
         name: 'Roaming missing reseller',
-        mccmncList: [{ mcc: '001', mnc: '01', ratePerKb: 0.001 }],
+        mccmncList: [{ mcc: '001', mnc: '01', ratePerMb: 0.001 }],
         supplierId,
       },
     })
@@ -759,8 +759,8 @@ describe('phase5', () => {
         supplierId,
         operatorId,
         mccmncList: [
-          { mcc: '001', mnc: '01', ratePerKb: 0.0005 },
-          { mcc: '001', mnc: '01', ratePerKb: 0.0004 },
+          { mcc: '001', mnc: '01', ratePerMb: 0.0005 },
+          { mcc: '001', mnc: '01', ratePerMb: 0.0004 },
         ],
       },
     })
@@ -768,7 +768,7 @@ describe('phase5', () => {
     const row = supabase.getTable('roaming_profiles')[0]
     expect(row?.supplier_id).toBe(supplierId)
     expect(Array.isArray(row?.mccmnc_list)).toBe(true)
-    expect(row?.mccmnc_list?.[0]?.ratePerKb).toBe(0.0005)
+    expect(row?.mccmnc_list?.[0]?.ratePerMb).toBe(0.0005)
   })
 
   it('creates roaming profile even when mccmncList values are not in business_operators', async () => {
@@ -780,8 +780,8 @@ describe('phase5', () => {
         supplierId,
         operatorId,
         mccmncList: [
-          { mcc: '250', mnc: '20', ratePerKb: 0.0008 },
-          { mcc: '502', mnc: '*', ratePerKb: 0.0012 },
+          { mcc: '250', mnc: '20', ratePerMb: 0.0008 },
+          { mcc: '502', mnc: '*', ratePerMb: 0.0012 },
         ],
       },
     })
@@ -791,8 +791,8 @@ describe('phase5', () => {
       expect(result.value.version).toBe(1)
     }
     const row = supabase.getTable('roaming_profiles')[0]
-    expect(row?.mccmnc_list?.[0]).toMatchObject({ mcc: '250', mnc: '20', ratePerKb: 0.0008 })
-    expect(row?.mccmnc_list?.[1]).toMatchObject({ mcc: '502', mnc: '*', ratePerKb: 0.0012 })
+    expect(row?.mccmnc_list?.[0]).toMatchObject({ mcc: '250', mnc: '20', ratePerMb: 0.0008 })
+    expect(row?.mccmnc_list?.[1]).toMatchObject({ mcc: '502', mnc: '*', ratePerMb: 0.0012 })
   })
 
   it('rejects roaming profile list when supplierId and operatorId are both empty', async () => {
@@ -817,8 +817,8 @@ describe('phase5', () => {
         supplierId,
         operatorId,
         mccmncList: [
-          { mcc: '460', mnc: '00', ratePerKb: 0.001 },
-          { mcc: '454', mnc: '*', ratePerKb: 0.002 },
+          { mcc: '460', mnc: '00', ratePerMb: 0.001 },
+          { mcc: '454', mnc: '*', ratePerMb: 0.002 },
         ],
       },
     })
@@ -853,8 +853,8 @@ describe('phase5', () => {
       payload: {
         operations: [
           { op: 'DELETE', entryId: deleteTarget.entryId },
-          { op: 'UPSERT', mcc: '460', mnc: '00', ratePerKb: 0.0015 },
-          { op: 'UPSERT', mcc: '001', mnc: '99', ratePerKb: 0.003 },
+          { op: 'UPSERT', mcc: '460', mnc: '00', ratePerMb: 0.0015 },
+          { op: 'UPSERT', mcc: '001', mnc: '99', ratePerMb: 0.003 },
         ],
       },
     })
@@ -871,9 +871,9 @@ describe('phase5', () => {
     if (listAfter.ok) {
       expect(listAfter.value.total).toBe(2)
       const upserted = listAfter.value.items.find((item) => item.mcc === '460' && item.mnc === '00')
-      expect(upserted?.ratePerKb).toBe(0.0015)
+      expect(upserted?.ratePerMb).toBe(0.0015)
       const inserted = listAfter.value.items.find((item) => item.mcc === '001' && item.mnc === '99')
-      expect(inserted?.ratePerKb).toBe(0.003)
+      expect(inserted?.ratePerMb).toBe(0.003)
     }
   })
 
@@ -885,7 +885,7 @@ describe('phase5', () => {
         resellerId,
         supplierId,
         operatorId,
-        mccmncList: [{ mcc: '460', mnc: '11', ratePerKb: 0.001 }],
+        mccmncList: [{ mcc: '460', mnc: '11', ratePerMb: 0.001 }],
       },
     })
     expect(created.ok).toBe(true)
@@ -899,7 +899,7 @@ describe('phase5', () => {
       profile_id: created.value.roamingProfileId,
       version: 1,
       status: 'DRAFT',
-      config: { mccmncList: [{ mcc: '460', mnc: '11', ratePerKb: 0.001 }] },
+      config: { mccmncList: [{ mcc: '460', mnc: '11', ratePerMb: 0.001 }] },
     })
     const derived = await deriveRoamingProfileVersion({
       supabase,
@@ -920,7 +920,7 @@ describe('phase5', () => {
         resellerId,
         supplierId,
         operatorId,
-        mccmncList: [{ mcc: '460', mnc: '01', ratePerKb: 0.002 }],
+        mccmncList: [{ mcc: '460', mnc: '01', ratePerMb: 0.002 }],
       },
     })
     expect(created.ok).toBe(true)
@@ -946,7 +946,7 @@ describe('phase5', () => {
       roamingProfileId: created.value.roamingProfileId,
       profileVersionId: lockedProfileVersionId,
       payload: {
-        operations: [{ op: 'UPSERT', mcc: '460', mnc: '01', ratePerKb: 0.004 }],
+        operations: [{ op: 'UPSERT', mcc: '460', mnc: '01', ratePerMb: 0.004 }],
       },
     })
     expect(patched.ok).toBe(false)
@@ -989,8 +989,8 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 10,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 1024,
-        paygRates: [{ zoneCode: 'Z1', countries: ['001-01'], ratePerKb: 0.01 }],
+        perSimQuotaMb: 1024,
+        paygRates: [{ zoneCode: 'Z1', countries: ['001-01'], ratePerMb: 0.01 }],
       },
     })
     expect(planResult.ok).toBe(true)
@@ -1016,7 +1016,7 @@ describe('phase5', () => {
     const result = validateCommercialTermsModule({
       commercialTerms: {
         testPeriodDays: 7,
-        testQuotaKb: 1024,
+        testQuotaMb: 1024,
         testExpiryCondition: 'PERIOD_OR_QUOTA',
         testExpiryAction: 'ACTIVATED',
       },
@@ -1080,7 +1080,7 @@ describe('phase5', () => {
         enterpriseId,
         commercialTerms: {
           testPeriodDays: 7,
-          testQuotaKb: 1024,
+          testQuotaMb: 1024,
           testExpiryCondition: 'PERIOD_OR_QUOTA',
           testExpiryAction: 'ACTIVATED',
         },
@@ -1301,7 +1301,7 @@ describe('phase5', () => {
       payload: {
         commercialTerms: {
           testPeriodDays: 7,
-          testQuotaKb: 1024,
+          testQuotaMb: 1024,
           testExpiryCondition: 'PERIOD_OR_QUOTA',
           testExpiryAction: 'ACTIVATED',
         },
@@ -1321,8 +1321,8 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 20,
         deactivatedMonthlyFee: 2,
-        perSimQuotaKb: 4096,
-        paygRates: [{ zoneCode: 'Z1', countries: ['001-01'], ratePerKb: 0.01 }],
+        perSimQuotaMb: 4096,
+        paygRates: [{ zoneCode: 'Z1', countries: ['001-01'], ratePerMb: 0.01 }],
       },
     })
     expect(planResult.ok).toBe(true)
@@ -1386,7 +1386,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 10,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 1024,
+        perSimQuotaMb: 1024,
         commercialTerms: {
           testPeriodDays: 14,
           testExpiryCondition: 'PERIOD_OR_QUOTA',
@@ -1435,7 +1435,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 10,
         deactivatedMonthlyFee: 1,
-        tiers: [{ fromKb: 0, toKb: 1024, ratePerKb: 0.01 }],
+        tiers: [{ fromMb: 0, toMb: 1024, ratePerMb: 0.01 }],
       },
     })
     expect(planResult.ok).toBe(true)
@@ -1457,7 +1457,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 10,
         deactivatedMonthlyFee: 1,
-        tiers: [{ fromKb: 0, toKb: 1024, ratePerKb: 0.01 }],
+        tiers: [{ fromMb: 0, toMb: 1024, ratePerMb: 0.01 }],
       },
     })
     expect(createResult.ok).toBe(true)
@@ -1469,7 +1469,7 @@ describe('phase5', () => {
         price_plan_type: 'TIERED_PRICING',
         monthlyFee: 12,
         deactivatedMonthlyFee: 1,
-        tiers: [{ fromKb: 0, toKb: 2048, ratePerKb: 0.008 }],
+        tiers: [{ fromMb: 0, toMb: 2048, ratePerMb: 0.008 }],
       },
     })
     expect(versionResult.ok).toBe(true)
@@ -1489,7 +1489,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 10,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 1024,
+        perSimQuotaMb: 1024,
       },
     })
     expect(createResult.ok).toBe(true)
@@ -1501,7 +1501,7 @@ describe('phase5', () => {
         price_plan_type: 'FIXED_BUNDLE',
         monthlyFee: 12,
         deactivatedMonthlyFee: 1,
-        totalQuotaKb: 2048,
+        totalQuotaMb: 2048,
       },
     })
     expect(versionResult.ok).toBe(false)
@@ -1525,10 +1525,10 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 10,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 1024,
+        perSimQuotaMb: 1024,
         paygRates: [
-          { zoneCode: 'Z1', countries: ['001-01'], ratePerKb: 0.01 },
-          { zoneCode: 'Z2', countries: ['001-01'], ratePerKb: 0.02 },
+          { zoneCode: 'Z1', countries: ['001-01'], ratePerMb: 0.01 },
+          { zoneCode: 'Z2', countries: ['001-01'], ratePerMb: 0.02 },
         ],
       },
     })
@@ -1578,8 +1578,8 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 10,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 2048,
-        paygRates: [{ zoneCode: 'Z1', countries: ['001-01'], ratePerKb: 0.01 }],
+        perSimQuotaMb: 2048,
+        paygRates: [{ zoneCode: 'Z1', countries: ['001-01'], ratePerMb: 0.01 }],
       },
     })
     expect(planResult.ok).toBe(true)
@@ -1628,7 +1628,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 10,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 1024,
+        perSimQuotaMb: 1024,
       },
     })
     expect(planResult.ok).toBe(false)
@@ -1649,7 +1649,7 @@ describe('phase5', () => {
           billingCycleType: 'CALENDAR_MONTH',
           firstCycleProration: 'NONE',
           prorationRounding: 'ROUND_HALF_UP',
-          quotaKb: 1024,
+          quotaMb: 1024,
           validityDays: 30,
           expiryBoundary: 'CALENDAR_DAY_END',
         },
@@ -1667,7 +1667,7 @@ describe('phase5', () => {
           monthlyFee: 10,
           deactivatedMonthlyFee: 1,
         },
-        message: 'perSimQuotaKb must be >= 0.',
+        message: 'perSimQuotaMb must be >= 0.',
       },
       {
         payload: {
@@ -1681,7 +1681,7 @@ describe('phase5', () => {
           monthlyFee: 10,
           deactivatedMonthlyFee: 1,
         },
-        message: 'totalQuotaKb must be >= 0.',
+        message: 'totalQuotaMb must be >= 0.',
       },
       {
         payload: {
@@ -1740,10 +1740,10 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 18,
         deactivatedMonthlyFee: 3,
-        perSimQuotaKb: 2048,
+        perSimQuotaMb: 2048,
         commercialTerms: {
           testPeriodDays: 15,
-          testQuotaKb: 10240,
+          testQuotaMb: 10240,
           testExpiryCondition: 'PERIOD_OR_QUOTA',
           testExpiryAction: 'DEACTIVATED',
           commitmentPeriodMonths: 12,
@@ -1760,7 +1760,7 @@ describe('phase5', () => {
       },
     })
     expect(result.ok).toBe(true)
-    const versionRow = supabase.getTable('price_plan_versions')[0]
+    const versionRow = supabase.getTable('price_plans')[0]
     expect(versionRow?.payg_rates?.meta?.commercialTerms?.testExpiryAction).toBe('DEACTIVATED')
     expect(versionRow?.payg_rates?.meta?.controlPolicy?.enabled).toBe(true)
     expect(versionRow?.payg_rates?.meta?.carrierService?.roamingProfileVersionId).toBe(roamingProfileVersionId)
@@ -1793,7 +1793,7 @@ describe('phase5', () => {
       prorationRounding: 'ROUND_HALF_UP',
       commercialTerms: {
         testPeriodDays: 10,
-        testQuotaKb: 1024,
+        testQuotaMb: 1024,
         testExpiryCondition: 'PERIOD_OR_QUOTA',
         testExpiryAction: 'ACTIVATED',
       },
@@ -1812,7 +1812,7 @@ describe('phase5', () => {
           ...basePayload,
           type: 'ONE_TIME',
           oneTimeFee: 9.9,
-          quotaKb: 2048,
+          quotaMb: 2048,
           validityDays: 30,
           expiryBoundary: 'CALENDAR_DAY_END',
         },
@@ -1824,7 +1824,7 @@ describe('phase5', () => {
           type: 'SIM_DEPENDENT_BUNDLE',
           monthlyFee: 10,
           deactivatedMonthlyFee: 1,
-          perSimQuotaKb: 2048,
+          perSimQuotaMb: 2048,
         },
       },
       {
@@ -1834,7 +1834,7 @@ describe('phase5', () => {
           type: 'FIXED_BUNDLE',
           monthlyFee: 20,
           deactivatedMonthlyFee: 2,
-          totalQuotaKb: 4096,
+          totalQuotaMb: 4096,
         },
       },
       {
@@ -1845,8 +1845,8 @@ describe('phase5', () => {
           monthlyFee: 15,
           deactivatedMonthlyFee: 1,
           tiers: [
-            { fromKb: 0, toKb: 1024, ratePerKb: 0.001 },
-            { fromKb: 1024, toKb: 2048, ratePerKb: 0.0008 },
+            { fromMb: 0, toMb: 1024, ratePerMb: 0.001 },
+            { fromMb: 1024, toMb: 2048, ratePerMb: 0.0008 },
           ],
         },
       },
@@ -1861,7 +1861,7 @@ describe('phase5', () => {
         },
       })
       expect(result.ok).toBe(true)
-      const versionRow = supabase.getTable('price_plan_versions')[index]
+      const versionRow = supabase.getTable('price_plans')[index]
       expect(versionRow?.payg_rates?.meta?.commercialTerms?.testPeriodDays).toBe(10)
       expect(versionRow?.payg_rates?.meta?.controlPolicy?.enabled).toBe(true)
       expect(versionRow?.payg_rates?.meta?.carrierService?.roamingProfileVersionId).toBe(roamingProfileVersionId)
@@ -1882,7 +1882,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 10,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 1024,
+        perSimQuotaMb: 1024,
         carrierService: {
           rat: '6G',
           apn: 'iot.bad',
@@ -1907,7 +1907,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 10,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 1024,
+        perSimQuotaMb: 1024,
         commercialTerms: {
           testExpiryAction: 'PAUSED',
         },
@@ -1933,7 +1933,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 10,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 1024,
+        perSimQuotaMb: 1024,
         carrierService: {
           supplierId,
           operatorId,
@@ -1979,7 +1979,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 10,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 1024,
+        perSimQuotaMb: 1024,
         carrierService: {
           supplierId,
           operatorId,
@@ -2018,7 +2018,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 8,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 1024,
+        perSimQuotaMb: 1024,
       },
     })
     expect(createResult.ok).toBe(true)
@@ -2029,7 +2029,7 @@ describe('phase5', () => {
       payload: {
         monthlyFee: 9,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 1024,
+        perSimQuotaMb: 1024,
         carrierServiceConfig: {
           supplierId,
           operatorId,
@@ -2048,8 +2048,7 @@ describe('phase5', () => {
 
   it('creates one-time subscription with expiry and commitment', async () => {
     const simId = randomUUID()
-    const pricePlanId = randomUUID()
-    const pricePlanVersionId = randomUUID()
+    const pricePlanSnapshotId = randomUUID()
     const packageId = randomUUID()
     const packageVersionId = randomUUID()
     supabase.getTable('sims').push({
@@ -2059,12 +2058,8 @@ describe('phase5', () => {
       status: 'ACTIVATED',
     })
     supabase.getTable('price_plans').push({
-      price_plan_id: pricePlanId,
+      price_plan_id: pricePlanSnapshotId,
       type: 'ONE_TIME',
-    })
-    supabase.getTable('price_plan_versions').push({
-      price_plan_version_id: pricePlanVersionId,
-      price_plan_id: pricePlanId,
       validity_days: 7,
       payg_rates: { meta: { expiryBoundary: 'CALENDAR_DAY_END' } },
     })
@@ -2077,7 +2072,7 @@ describe('phase5', () => {
       package_version_id: packageVersionId,
       package_id: packageId,
       status: 'PUBLISHED',
-      price_plan_version_id: pricePlanVersionId,
+      price_plan_id: pricePlanSnapshotId,
       commercial_terms: { commitmentPeriodDays: 30 },
     })
     const result = await createSubscription({
@@ -2258,7 +2253,7 @@ describe('phase5', () => {
         resellerId,
         supplierId,
         operatorId,
-        mccmncList: [{ mcc: '001', mnc: '01', ratePerKb: 0.0006 }],
+        mccmncList: [{ mcc: '001', mnc: '01', ratePerMb: 0.0006 }],
       },
     })
     expect(roamingResult.ok).toBe(true)
@@ -2296,7 +2291,7 @@ describe('phase5', () => {
       payload: {
         commercialTerms: {
           testPeriodDays: 7,
-          testQuotaKb: 1024,
+          testQuotaMb: 1024,
           testExpiryCondition: 'PERIOD_OR_QUOTA',
           testExpiryAction: 'DEACTIVATED',
         },
@@ -2330,7 +2325,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 18,
         deactivatedMonthlyFee: 2,
-        perSimQuotaKb: 2048,
+        perSimQuotaMb: 2048,
       },
     })
     expect(planResult.ok).toBe(true)
@@ -2410,7 +2405,7 @@ describe('phase5', () => {
       payload: {
         commercialTerms: {
           testPeriodDays: 10,
-          testQuotaKb: 2048,
+          testQuotaMb: 2048,
           testExpiryCondition: 'PERIOD_OR_QUOTA',
           testExpiryAction: 'ACTIVATED',
         },
@@ -2443,7 +2438,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 12,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 1024,
+        perSimQuotaMb: 1024,
       },
     })
     expect(planResult.ok).toBe(true)
@@ -2454,7 +2449,7 @@ describe('phase5', () => {
       enterpriseId,
       payload: {
         name: 'Package By Module Refs',
-        pricePlanVersionId: supabase.getTable('price_plan_versions')[0]?.price_plan_version_id,
+        pricePlanId: supabase.getTable('price_plans')[0]?.price_plan_id,
         carrierServiceId: carrierResult.value.carrierServiceId,
         controlPolicyId: controlResult.value.controlPolicyId,
         commercialTermsId: commercialResult.value.commercialTermsId,
@@ -2525,7 +2520,7 @@ describe('phase5', () => {
       payload: {
         commercialTerms: {
           testPeriodDays: 5,
-          testQuotaKb: 1024,
+          testQuotaMb: 1024,
           testExpiryCondition: 'PERIOD_OR_QUOTA',
           testExpiryAction: 'DEACTIVATED',
         },
@@ -2558,7 +2553,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 10,
         deactivatedMonthlyFee: 1,
-        perSimQuotaKb: 1024,
+        perSimQuotaMb: 1024,
       },
     })
     expect(planV1.ok).toBe(true)
@@ -2569,7 +2564,7 @@ describe('phase5', () => {
       enterpriseId,
       payload: {
         name: 'Snapshot Package',
-        pricePlanVersionId: supabase.getTable('price_plan_versions')[0]?.price_plan_version_id,
+        pricePlanId: supabase.getTable('price_plans')[0]?.price_plan_id,
         carrierServiceId: carrierResult.value.carrierServiceId,
         controlPolicyId: controlV1.value.controlPolicyId,
         commercialTermsId: commercialV1.value.commercialTermsId,
@@ -2585,7 +2580,7 @@ describe('phase5', () => {
       payload: {
         commercialTerms: {
           testPeriodDays: 20,
-          testQuotaKb: 4096,
+          testQuotaMb: 4096,
           testExpiryCondition: 'PERIOD_OR_QUOTA',
           testExpiryAction: 'ACTIVATED',
         },
@@ -2617,7 +2612,7 @@ describe('phase5', () => {
         prorationRounding: 'ROUND_HALF_UP',
         monthlyFee: 16,
         deactivatedMonthlyFee: 2,
-        perSimQuotaKb: 4096,
+        perSimQuotaMb: 4096,
       },
     })
     expect(planV2.ok).toBe(true)
@@ -2634,12 +2629,12 @@ describe('phase5', () => {
       status: 'PUBLISHED',
       created_at: versionV2CreatedAt,
       effective_from: versionV2CreatedAt,
-      price_plan_version_id: supabase.getTable('price_plan_versions')[1]?.price_plan_version_id,
+      price_plan_id: supabase.getTable('price_plans')[1]?.price_plan_id,
       commercial_terms_id: commercialV2.value.commercialTermsId,
       control_policy_id: controlV2.value.controlPolicyId,
       commercial_terms: {
         testPeriodDays: 20,
-        testQuotaKb: 4096,
+        testQuotaMb: 4096,
         testExpiryCondition: 'PERIOD_OR_QUOTA',
         testExpiryAction: 'ACTIVATED',
       },

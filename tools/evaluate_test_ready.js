@@ -28,8 +28,8 @@ function getTestPeriodDays() {
   const n = Number(process.env.TEST_PERIOD_DAYS || 14)
   return Math.max(1, n)
 }
-function getTestQuotaKb() {
-  const n = Number(process.env.TEST_QUOTA_KB || 102400)
+function getTestQuotaMb() {
+  const n = Number(process.env.TEST_QUOTA_MB || 100)
   return Math.max(0, n)
 }
 
@@ -55,18 +55,19 @@ async function main() {
   }
   const cond = getTestExpiryCondition()
   const periodDays = getTestPeriodDays()
-  const quotaKbLimit = getTestQuotaKb()
+  const quotaMbLimit = getTestQuotaMb()
   const startDay = startOfDayIso(new Date(startTimeIso))
   let totalKb = 0
   const usageRows = await c.select('usage_daily_summary', `select=total_kb,usage_day&iccid=eq.${encodeURIComponent(sim.iccid)}${sim.enterprise_id ? `&enterprise_id=eq.${encodeURIComponent(sim.enterprise_id)}` : ''}&usage_day=gte.${encodeURIComponent(startDay)}`)
   if (Array.isArray(usageRows)) {
     for (const r of usageRows) totalKb += Number(r.total_kb ?? 0)
   }
+  const totalMb = totalKb / 1024
   const expireByPeriod = Date.now() >= (new Date(new Date(startTimeIso).getTime() + periodDays * 24 * 3600 * 1000)).getTime()
-  const expireByQuota = quotaKbLimit > 0 ? totalKb >= quotaKbLimit : false
+  const expireByQuota = quotaMbLimit > 0 ? totalMb >= quotaMbLimit : false
   const shouldExpire = cond === 'PERIOD_ONLY' ? expireByPeriod : cond === 'QUOTA_ONLY' ? expireByQuota : (expireByPeriod || expireByQuota)
   if (!shouldExpire) {
-    process.stdout.write(JSON.stringify({ processed: 1, activated: 0, remaining: 1, totalKb }) + '\n')
+    process.stdout.write(JSON.stringify({ processed: 1, activated: 0, remaining: 1, totalMb }) + '\n')
     return
   }
   const nowIso = new Date().toISOString()
@@ -93,14 +94,14 @@ async function main() {
       beforeStatus: 'TEST_READY',
       afterStatus: 'ACTIVATED',
       reason: 'TEST_EXPIRY_MANUAL',
-      totalKb,
+      totalMb,
       periodDays,
-      quotaKbLimit,
+      quotaMbLimit,
       startTime: startTimeIso,
       endTime: nowIso,
     },
   }, { returning: 'minimal' })
-  process.stdout.write(JSON.stringify({ processed: 1, activated: 1, remaining: 0, totalKb }) + '\n')
+  process.stdout.write(JSON.stringify({ processed: 1, activated: 1, remaining: 0, totalMb }) + '\n')
 }
 
 main().catch((err) => {

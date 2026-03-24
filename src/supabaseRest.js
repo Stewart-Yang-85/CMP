@@ -51,7 +51,7 @@ function mapForeignKeyField(field) {
   if (!key) return null
   if (key === 'customer_id' || key === 'enterprise_id' || key === 'tenant_id') return 'enterpriseId'
   if (key === 'supplier_id') return 'supplierId'
-  if (key === 'operator_id' || key === 'carrier_id') return 'operatorId'
+  if (key === 'operator_id') return 'operatorId'
   if (key === 'reseller_id') return 'resellerId'
   if (key === 'user_id' || key === 'actor_user_id') return 'userId'
   if (key === 'sim_id') return 'simId'

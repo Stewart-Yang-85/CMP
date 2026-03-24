@@ -95,6 +95,27 @@ CREATE POLICY sims_tenant_isolation ON sims
 
 ---
 
+## SD-06: Reseller 身份标识已统一为 tenants.tenant_id
+
+**严重级**: HIGH (已修复) | **修复状态**: V1.1 Phase 24 已修复
+
+**问题**: `auth.resellerId` 可能来自 `resellers.id`（如 `customers.reseller_id`）或 `tenants.tenant_id`，导致：
+- `tenants.parent_id` 层级查询用 `resellers.id` 查不到子企业（静默返回空）
+- `reseller_suppliers` 等用 `tenant_id` 查关联数据失败
+- `buildTenantFilterAsync` 等租户隔离函数行为不一致
+
+**修复内容** (V1.1 Phase 24):
+1. **DB 迁移**: `customers` 新增 `reseller_tenant_id` FK→tenants(tenant_id)，弃用 `reseller_id`
+2. **DB 迁移**: `reseller_suppliers.reseller_id` FK 改为指向 tenants(tenant_id)
+3. **API Key 认证**: 从 `customers.reseller_tenant_id` 直接获取 tenant_id
+4. **JWT 签发**: login 路径通过 `customers.reseller_tenant_id` 解析 reseller tenant_id 写入 JWT
+5. **OIDC**: 文档化 OIDC claims 必须使用 tenant_id 语义
+6. **代码清理**: 移除 `resolveResellerIdentity` workaround 函数（`src/app.js`、`src/routes/simPhase4.js`）
+
+**设计决策**: 所有身份标识统一使用 `tenants.tenant_id`，不保留 `resellers.id` 的任何运行时语义。
+
+---
+
 ## 审计清单
 
 | ID | 描述 | 严重级 | MVP 状态 | V1.1 计划 |
@@ -104,3 +125,4 @@ CREATE POLICY sims_tenant_isolation ON sims
 | SD-03 | Scrypt 参数未文档化 | LOW | API Key 未启用 | 文档化 |
 | SD-04 | eSIM 未实现 | LOW | 501 guard | 独立 spec + 实现 |
 | SD-05 | 租户双层断裂 | HIGH | **已修复** | N/A |
+| SD-06 | Reseller 身份双标识 | HIGH | **V1.1 已修复** | N/A |

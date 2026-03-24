@@ -264,7 +264,7 @@ async function main() {
           operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: terms1,
-          price_plan_version_id: ppvId,
+          price_plan_id: planId,
         })
         const pv1Id = Array.isArray(pv1Rows) ? pv1Rows[0]?.package_version_id : null
         const terms2 = { commitmentPeriodDays: 10 }
@@ -276,7 +276,7 @@ async function main() {
           operator_id: operatorId,
           service_type: 'DATA',
           commercial_terms: terms2,
-          price_plan_version_id: ppvId,
+          price_plan_id: planId,
         })
         const pv2Id = Array.isArray(pv2Rows) ? pv2Rows[0]?.package_version_id : null
         const scenarioStart = nowIso()

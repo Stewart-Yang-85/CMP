@@ -98,7 +98,6 @@ function toError(status, code, message) {
 
 function classifySimInsertError(err) {
   const text = String(err?.body ?? err?.message ?? '').toLowerCase()
-  if (text.includes('null value in column') && text.includes('carrier_id')) return 'legacy_carrier_required'
   if (text.includes('violates foreign key constraint')) return 'foreign_key_violation'
   return 'insert_failed'
 }

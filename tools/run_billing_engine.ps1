@@ -68,7 +68,7 @@ function Select-MatchingPackageId($CatalogPackages, $Subscriptions, [string]$Vis
   return $null
 }
 
-function Resolve-PaygRatePerKb($MainPackage, [string]$VisitedMccMnc) {
+function Resolve-PaygRatePerMb($MainPackage, [string]$VisitedMccMnc) {
   if ($null -eq $MainPackage) { return $null }
   if ($null -eq $MainPackage.payg) { return $null }
   if ($null -eq $MainPackage.payg.zones) { return $null }
@@ -77,7 +77,7 @@ function Resolve-PaygRatePerKb($MainPackage, [string]$VisitedMccMnc) {
     $zone = $MainPackage.payg.zones.$zoneName
     if ($null -eq $zone) { continue }
     if (@($zone.mccmnc) -contains $VisitedMccMnc) {
-      return [double]$zone.ratePerKb
+      return [double]$zone.ratePerMb
     }
   }
 
@@ -106,44 +106,44 @@ foreach ($case in $doc.cases) {
     "overage_when_exhausted" {
       $visited = $case.context.usage.visitedMccMnc
       $totalMb = [double]$case.context.usage.totalMb
-      $chargedKb = Convert-MbToKbCeil $totalMb $mbToKb
+      $chargedMb = [double]$case.context.usage.totalMb
       $matchId = Select-MatchingPackageId $catalogPackages $case.context.subscriptions $visited
 
-      $remainingKb = [long]$case.context.quota.remainingKb
-      if ($remainingKb -lt 0) { $remainingKb = 0 }
-      $billableKb = $chargedKb
-      if ($billableKb -lt 0) { $billableKb = 0 }
+      $remainingMb = [double]$case.context.quota.remainingMb
+      if ($remainingMb -lt 0) { $remainingMb = 0 }
+      $billableMb = $chargedMb
+      if ($billableMb -lt 0) { $billableMb = 0 }
 
       $pkg = $null
       if ($null -ne $matchId) { $pkg = Get-Pkg $catalogPackages $matchId }
       $rate = $null
-      if ($null -ne $pkg -and $null -ne $pkg.overageRatePerKb) { $rate = [double]$pkg.overageRatePerKb }
+      if ($null -ne $pkg -and $null -ne $pkg.overageRatePerMb) { $rate = [double]$pkg.overageRatePerMb }
       if ($null -eq $rate) { $rate = 0.0 }
 
-      $overKb = $billableKb
-      if ($remainingKb -gt 0) {
-        $overKb = [math]::Max(0, ($billableKb - $remainingKb))
+      $overMb = $billableMb
+      if ($remainingMb -gt 0) {
+        $overMb = [math]::Max(0, ($billableMb - $remainingMb))
       }
-      $amount = [math]::Round(($overKb * $rate), 2)
+      $amount = [math]::Round(($overMb * $rate), 2)
 
       $out.actual = [ordered]@{
         match = [ordered]@{ package = $matchId }
         inProfile = [bool]($null -ne $matchId)
         deductFromPackage = $matchId
-        charge = [ordered]@{ type = "OVERAGE"; currency = $doc.meta.currency; ratePerKb = $rate; chargedKb = $chargedKb; amount = $amount }
+        charge = [ordered]@{ type = "OVERAGE"; currency = $doc.meta.currency; ratePerMb = $rate; chargedMb = $chargedMb; amount = $amount }
         alerts = @()
       }
     }
     "inactive_usage" {
       $visited = $case.context.usage.visitedMccMnc
       $totalMb = [double]$case.context.usage.totalMb
-      $chargedKb = Convert-MbToKbCeil $totalMb $mbToKb
+      $chargedMb = $totalMb
 
       $mainSub = @($case.context.subscriptions | Where-Object { $_.kind -eq "MAIN" }) | Select-Object -First 1
       $mainPkg = $null
       if ($null -ne $mainSub) { $mainPkg = Get-Pkg $catalogPackages $mainSub.package }
 
-      $rate = Resolve-PaygRatePerKb $mainPkg $visited
+      $rate = Resolve-PaygRatePerMb $mainPkg $visited
       if ($null -eq $rate) {
         $out.actual = [ordered]@{
           match = [ordered]@{ package = $null }
@@ -153,12 +153,12 @@ foreach ($case in $doc.cases) {
           alerts = @("INACTIVE_USAGE", "UNEXPECTED_ROAMING", "PAYG_RULE_MISSING")
         }
       } else {
-        $amount = [math]::Round(($chargedKb * $rate), 2)
+        $amount = [math]::Round(($chargedMb * $rate), 2)
         $out.actual = [ordered]@{
           match = [ordered]@{ package = $null }
           inProfile = $false
           deductFromPackage = $null
-          charge = [ordered]@{ type = "PAYG"; currency = $doc.meta.currency; ratePerKb = $rate; chargedKb = $chargedKb; amount = $amount }
+          charge = [ordered]@{ type = "PAYG"; currency = $doc.meta.currency; ratePerMb = $rate; chargedMb = $chargedMb; amount = $amount }
           alerts = @("INACTIVE_USAGE", "UNEXPECTED_ROAMING")
         }
       }
@@ -166,7 +166,7 @@ foreach ($case in $doc.cases) {
     "payg_out_of_profile" {
       $visited = $case.context.usage.visitedMccMnc
       $totalMb = [double]$case.context.usage.totalMb
-      $chargedKb = Convert-MbToKbCeil $totalMb $mbToKb
+      $chargedMb = $totalMb
 
       $matchId = Select-MatchingPackageId $catalogPackages $case.context.subscriptions $visited
 
@@ -174,7 +174,7 @@ foreach ($case in $doc.cases) {
       $mainPkg = $null
       if ($null -ne $mainSub) { $mainPkg = Get-Pkg $catalogPackages $mainSub.package }
 
-      $rate = Resolve-PaygRatePerKb $mainPkg $visited
+      $rate = Resolve-PaygRatePerMb $mainPkg $visited
       if ($null -eq $rate) {
         $out.actual = [ordered]@{
           match = [ordered]@{ package = $matchId }
@@ -184,12 +184,12 @@ foreach ($case in $doc.cases) {
           alerts = @("UNEXPECTED_ROAMING", "PAYG_RULE_MISSING")
         }
       } else {
-        $amount = [math]::Round(($chargedKb * $rate), 2)
+        $amount = [math]::Round(($chargedMb * $rate), 2)
         $out.actual = [ordered]@{
           match = [ordered]@{ package = $matchId }
           inProfile = $false
           deductFromPackage = $null
-          charge = [ordered]@{ type = "PAYG"; currency = $doc.meta.currency; ratePerKb = $rate; chargedKb = $chargedKb; amount = $amount }
+          charge = [ordered]@{ type = "PAYG"; currency = $doc.meta.currency; ratePerMb = $rate; chargedMb = $chargedMb; amount = $amount }
           alerts = @("UNEXPECTED_ROAMING")
         }
       }

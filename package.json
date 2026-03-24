@@ -52,5 +52,8 @@
     "typescript": "^5.7.3",
     "vitest": "^4.0.18",
     "yaml": "^2.8.0"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-darwin-arm64": "^4.60.0"
   }
 }

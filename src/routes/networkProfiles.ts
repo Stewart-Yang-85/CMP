@@ -71,15 +71,18 @@ export function registerNetworkProfileRoutes({ app, prefix, deps }: { app: any; 
   app.get(`${prefix}/apn-profiles`, async (req: any, res: any) => {
     const auth = ensureResellerSales(req, res)
     if (!auth) return
-    const { supplierId, operatorId, status, page, pageSize } = req.query ?? {}
-    if (!supplierId && !operatorId) {
-      return sendError(res, 400, 'BAD_REQUEST', 'supplierId or operatorId is required.')
+    const { supplierId, operatorId, apnProfileId, status, page, pageSize } = req.query ?? {}
+    if (!supplierId && !operatorId && !apnProfileId) {
+      return sendError(res, 400, 'BAD_REQUEST', 'supplierId, operatorId, or apnProfileId is required.')
+    }
+    if (apnProfileId && !isValidUuid(apnProfileId)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'apnProfileId must be a valid uuid.')
     }
     if (operatorId && !isValidUuid(operatorId)) {
       return sendError(res, 400, 'BAD_REQUEST', 'operatorId must be a valid uuid.')
     }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-    const result = await listApnProfiles({ supabase, supplierId, operatorId, status, page, pageSize })
+    const result = await listApnProfiles({ supabase, supplierId, operatorId, apnProfileId, status, page, pageSize })
     if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
     res.json((result as any).value)
   })
@@ -87,16 +90,19 @@ export function registerNetworkProfileRoutes({ app, prefix, deps }: { app: any; 
   app.get(`${prefix}/roaming-profiles`, async (req: any, res: any) => {
     const auth = ensureResellerSales(req, res)
     if (!auth) return
-    const { supplierId, operatorId: operatorIdRaw, carrierId, status, page, pageSize } = req.query ?? {}
+    const { supplierId, operatorId: operatorIdRaw, carrierId, roamingProfileId, status, page, pageSize } = req.query ?? {}
     const operatorId = operatorIdRaw ?? carrierId ?? null
-    if (!supplierId && !operatorId) {
-      return sendError(res, 400, 'BAD_REQUEST', 'supplierId or operatorId is required.')
+    if (!supplierId && !operatorId && !roamingProfileId) {
+      return sendError(res, 400, 'BAD_REQUEST', 'supplierId, operatorId, or roamingProfileId is required.')
+    }
+    if (roamingProfileId && !isValidUuid(roamingProfileId)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'roamingProfileId must be a valid uuid.')
     }
     if (operatorId && !isValidUuid(operatorId)) {
       return sendError(res, 400, 'BAD_REQUEST', 'operatorId must be a valid uuid.')
     }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-    const result = await listRoamingProfiles({ supabase, supplierId, operatorId, status, page, pageSize })
+    const result = await listRoamingProfiles({ supabase, supplierId, operatorId, roamingProfileId, status, page, pageSize })
     if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
     res.json((result as any).value)
   })

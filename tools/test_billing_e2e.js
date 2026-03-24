@@ -57,7 +57,7 @@ async function main() {
         payg_rates: {
             zones: {
                 "ZONE_E2E": {
-                    ratePerKb: 0.01,
+                    ratePerMb: 10.24,
                     mccmnc: ["424-02"] // Test roaming network
                 }
             }
@@ -78,7 +78,7 @@ async function main() {
         supplier_id: supplierId,
         carrier_id: carrierId,
         operator_id: operatorId,
-        price_plan_version_id: ppvId,
+        price_plan_id: planId,
         roaming_profile: {
             type: 'MCCMNC_ALLOWLIST',
             mccmnc: [`999-${randomMnc}`] // Home network only, so 424-02 will be roaming/PAYG
@@ -168,7 +168,7 @@ async function main() {
     
     // Expected:
     // Monthly Fee: 10.00
-    // Usage: 1000KB * 0.01 = 10.00
+    // Usage: ~0.977MB * 10.24/MB = 10.00
     // Total: 20.00
     
     if (Number(bill.total_amount) === 20.00) {

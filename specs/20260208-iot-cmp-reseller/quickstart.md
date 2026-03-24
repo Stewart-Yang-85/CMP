@@ -241,6 +241,8 @@ await vendor.getDailyUsage({ iccid, date });
 | `/v1/alerts` | GET | 告警列表 | US9 |
 | `/v1/webhook-subscriptions` | POST/GET | Webhook 管理 | US11 |
 | `/v1/events` | GET | 事件查询 | US11 |
+| `/v1/public-infos` | GET | 3GPP 公开运营商目录模糊/精确查询（V1.1，见 `contracts/public-info-api.md`） | US1 |
+| `/v1/admin/public-infos` | POST/PATCH/DELETE | 同上目录，仅 platform_admin 写入（V1.1） | US1 |
 
 ---
 

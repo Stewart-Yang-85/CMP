@@ -1,65 +1,53 @@
 ---
-description: "Implementation plan for IoT CMP Reseller System"
-scripts:
-  node: node .ttadk/plugins/ttadk/core/resources/scripts/update-agent-context.js __AGENT__
+description: "IoT CMP Reseller 系统实施计划 — 从 Express 单体到完整多租户 IoT 连接管理平台"
 ---
 
 # Implementation Plan: IoT CMP Reseller System
 
-**Feature**: `iot-cmp-reseller` | **Date**: 2026-02-08 | **Spec**: [spec.md](./spec.md)
+**Feature**: `iot-cmp-reseller` | **Date**: 2026-03-24 | **Spec**: [spec.md](./spec.md)
 **Input**: Feature specification from `/specs/20260208-iot-cmp-reseller/spec.md`
-**Last Updated**: 2026-03-11 (专家工程评审后修正)
 
 ## Summary
 
-IoT CMP Reseller System 是一个面向代理商运营与企业自助的物联网连接管理平台。系统实现"供应商 → 代理商 → 企业"三级租户层级，集成上游供应商 CMP，提供 SIM 全生命周期管理、4 种资费计划类型（One-time / SIM Dependent Bundle / Fixed Bundle / Tiered Volume Pricing）、高水位月租费计算、Waterfall Logic 用量匹配、自动出账与信控催收等核心计费能力；企业状态仅由代理商管理员手工控制，Dunning 不自动变更企业状态。状态规范化采用 Reseller: ACTIVE/DEACTIVATED/SUSPENDED，Supplier: ACTIVE/SUSPENDED，并记录上游 SIM 状态与映射规则。
+构建面向代理商-企业的 IoT 连接管理平台（CMP），核心能力包括：
 
-**技术方案**：基于现有 Supabase（PostgreSQL）+ Vercel Serverless 架构演进。现有代码库已包含 64 个 API 端点、9 个域级数据库迁移文件（V001-V009）、完整的计费引擎和供应商适配器（wxzhonggeng）。
+1. **多租户组织管理**：供应商→代理商→企业→部门四级层级 + RBAC 七角色权限模型
+2. **SIM/eSIM 全生命周期**：5 状态机 + 批量导入 + 上游双向同步 + IMEI 锁定
+3. **产品包与资费引擎**：4 种 Price Plan 类型 + 不可变快照机制 + Zone-based PAYG
+4. **计费与出账**：高水位月租 + Waterfall 用量匹配 + 三级账单 + 调账
+5. **信控与催收**：Dunning 等级管理 + 手工管控决策
+6. **多供应商虚拟化**：SPI 适配器 + 能力协商 + 对账
+7. **监控与可观测性**：统一告警引擎 + Webhook 投递 + 事件目录
 
-**架构评审修正要点（D-31）**：
-
-1. **租户模型统一**：tenants 表保留为统一 ID 层（所有 FK 指向 tenants.tenant_id），独立 resellers/customers 表通过 `tenant_id UNIQUE FK` 桥接。创建操作通过 PostgreSQL 事务性函数（`create_reseller`/`create_customer`）保证原子性。`sync_customer_status_to_tenant()` 触发器自动同步 customer_status → enterprise_status。
-2. **多租户隔离双层策略**：应用层（`rbac.ts` 的 `buildTenantFilterAsync()`）为主要隔离机制；数据库层 RLS（V009）为 defense-in-depth。Service role 绕过 RLS 是正确行为。
-3. **计费引擎重构**：消除 N+1 查询（per-SIM 3 次 → 批量 `sim_id=in.()` 并行查询），pool 用量按 sim_id 排序保证确定性，新增幂等检查。
-4. **精度统一**：所有金额计算使用 `roundAmount()`（ROUND_HALF_UP, precision=2），禁止 `.toFixed(2)`。
-5. **MVP 范围拆分**：Week 1-4 核心（SIM+Fixed Bundle+手动出账），Week 5-8 扩展（RBAC+One-time+自动出账+批量导入）。
+**技术路线**：基于现有 Express + TypeScript 单体应用（64 个 API 端点、30+ 数据库表、12 个迁移文件），增量迭代实现 V1.0 MVP 和 V1.1 增强。
 
 ## Technical Context
 
-**Language/Version**: TypeScript (Node.js LTS) — 渐进迁移，.js 为当前运行版本，.ts 为类型增强目标
-**Primary Dependencies**: Fastify, dotenv, swagger-ui-dist, @supabase/supabase-js
-**Storage**: Supabase (PostgreSQL 15+) — 30+ 表，9 个域级迁移文件（V001-V009），21+ 个 ENUM 类型
-**Testing**: Vitest 单元测试 + API smoke tests + E2E demos + Golden Case validation
-**Target Platform**: Vercel (Serverless Functions) + Supabase Cloud
-**Project Type**: web (API backend，MVP 阶段不含前端 Portal)
-**Performance Goals**: 10 万 SIM, 500 万 CDR/日, 峰值 1000 TPS, P95 < 300ms
-**Constraints**: 可用性 99.9%, RPO < 5 min, RTO < 30 min, MVP 8 周
-**Scale/Scope**: 首期 10 万 SIM → 未来 100 万; 64 个已有 API 端点
-
-**当前适用技术栈清单**：
-- 语言与运行时：Node.js + TypeScript（渐进迁移，.js 和 .ts 共存）
-- Web/API 框架：Express（当前 app.js）/ Fastify（目标 app.ts），MVP 阶段以 .js 运行
-- 定时与任务：Vercel Cron + Queue（Job Handler 分批处理，单次 ≤10s）
-- 数据库与数据访问：Supabase REST（service_role 绕过 RLS）+ PostgreSQL 函数（事务性操作）
-- 多租户隔离：应用层 `buildTenantFilterAsync()` 为主 + RLS defense-in-depth
-- 计费精度：`roundAmount()` (ROUND_HALF_UP, precision=2)，禁止 `.toFixed(2)`
-- OpenAPI：swagger-ui-dist + iot-cmp-api.yaml
-- 部署平台：Vercel Serverless + Supabase Cloud
-- 测试：Vitest 单元测试、API 烟测与 E2E 脚本
+**Language/Version**: TypeScript (ES Module) / Node.js LTS
+**Primary Dependencies**: Express.js, @supabase/supabase-js, jsonwebtoken (HS256), scrypt (密码哈希), openapi-generator (ts-fetch 客户端)
+**Storage**: Supabase (托管 PostgreSQL 15+) — 30+ 表、21 个 ENUM、12 个迁移文件、RLS 策略
+**Testing**: Vitest（单元/集成）、Golden Test Cases（计费验证 — `golden_cases.json`）
+**Target Platform**: Vercel Serverless Functions（Pro 计划 300s 超时）+ Supabase 托管
+**Project Type**: Web API 单体（Express 应用 + Vercel Cron + Worker 队列）
+**Performance Goals**: 核心 API P95 < 300ms，日均 500 万 CDR，峰值 1000 TPS
+**Constraints**: Serverless 函数 300s 超时、LISTEN/NOTIFY 8KB payload、首期 10 万 SIM
+**Scale/Scope**: 首期 10 万 SIM（12 月内），未来 100 万；SLA 99.9%
 
 ## Constitution Check
 
-*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
+*GATE: 无 constitution.md 文件 — 跳过形式化门控。*
 
-已存在 `.specify/memory/constitution.md` — 逐项验证：
+以下为基于项目规格的自检清单：
 
-| 章程原则 | 状态 | 验证说明 |
-|----------|------|---------|
-| I. 权威数据源与一致性 | PASS | SIM 状态以本地 sims 表为权威，上游同步通过 reconciliation_runs 对账；计费以 rating_results 为权威 |
-| II. 租户隔离与最小权限 | PASS (D-31修正) | V008 触发器 + V009 RLS + rbac.ts `buildTenantFilterAsync()` 三层保障；原 RLS `using(true)` 已修复 |
-| III. 状态机与生命周期不可违背 | PASS | simLifecycle.ts 实现 5 状态机，allowedFrom Set 校验；eSIM 操作返回 501 |
-| IV. 审计与可追溯性 | PASS | audit_logs 表 + events 表覆盖关键操作；rating_results 含 calculation_id 追溯链 |
-| V. 上游集成可靠性与幂等 | PASS | supabaseRest.js 含重试+熔断器；SIM 导入幂等 (batchId/fileHash)；计费幂等 (enterprise+period UNIQUE) |
+| 检查项 | 状态 | 说明 |
+|--------|------|------|
+| 单一数据库 | ✅ PASS | 仅 Supabase PostgreSQL |
+| 单一部署平台 | ✅ PASS | Vercel Serverless |
+| 单体应用 | ✅ PASS | Express 单体，按路由/服务分模块 |
+| 类型安全 | ✅ PASS | TypeScript 全量覆盖 |
+| 不可变数据模式 | ✅ PASS | Price Plan/APN/Roaming/Control Policy 采用快照 + 新 ID 模式 |
+| 审计可追溯 | ✅ PASS | audit_logs 表 + 计费 rating_results + 事件表 |
+| 数据隔离 | ✅ PASS | RLS 策略 + 应用层 buildTenantFilterAsync() 双层隔离 |
 
 ## Project Structure
 
@@ -68,94 +56,255 @@ IoT CMP Reseller System 是一个面向代理商运营与企业自助的物联�
 ```
 specs/20260208-iot-cmp-reseller/
 ├── plan.md              # 本文件（实施计划）
-├── research.md          # Phase 0: 技术研究与差距分析
-├── data-model.md        # Phase 1: 数据模型设计
-├── quickstart.md        # Phase 1: 开发快速上手指南
+├── research.md          # Phase 0 研究产出（差距分析+技术选型）
+├── data-model.md        # Phase 1 数据模型设计（ER 图+表结构）
+├── quickstart.md        # Phase 1 快速启动指南
+├── contracts/           # Phase 1 API 契约
+│   ├── tenant-api.md        # 租户与权限 API
+│   ├── sim-api.md           # SIM 生命周期 API
+│   ├── pricing-api.md       # 产品包与资费 API
+│   ├── billing-api.md       # 账单与出账 API
+│   ├── integration-api.md   # 集成与虚拟化 API
+│   └── public-info-api.md   # 3GPP 公开目录 API
+├── checklists/              # 验收检查清单
+├── clarifications/          # 工程澄清文档
+│   ├── bill-status-machine.md
+│   ├── jobs-sim-status-change.md
+│   └── webhook-delivery.md
 ├── technical-design.md  # 技术设计文档
-├── waterfall-algorithm.md # Waterfall 算法文档
-├── security-debt.md     # 安全债务记录
-├── frontend-portal-blueprint.md # [V1.1] 前端 Portal 蓝图
-├── contracts/           # Phase 1: API 契约定义
-│   ├── tenant-api.md    # 租户与权限 API 契约
-│   ├── sim-api.md       # SIM 生命周期 API 契约
-│   ├── pricing-api.md   # 产品包与资费 API 契约
-│   ├── billing-api.md   # 计费与出账 API 契约
-│   └── integration-api.md # 集成与事件 API 契约
-├── checklists/          # 质量检查清单
-│   └── requirements.md  # 需求完整性检查
-└── tasks.md             # Phase 2: 实施任务（由 /adk:tasks 生成）
+├── tasks.md             # 任务分解（/adk:tasks 生成）
+└── waterfall-algorithm.md   # 计费用量匹配算法
 ```
 
 ### Source Code (repository root)
 
 ```
 src/
-├── app.js               # Express 主应用（当前运行版本，13180 行）
-├── app.ts               # Fastify 主应用（迁移目标，5265 行）
-├── server.js            # HTTP 服务器入口
-├── billing.js           # 计费引擎（批量查询 + 幂等 + roundAmount 导出）
-├── billing.d.ts         # 计费引擎类型声明
-├── worker.js            # 异步任务处理器（4 个 cron job）
-├── supabaseRest.js      # Supabase REST 客户端（重试 + 熔断器）
-├── middleware/
-│   └── rbac.ts          # RBAC 鉴权 + 租户隔离过滤器
-├── services/            # 业务逻辑层（.js + .ts 双栈）
-│   ├── simLifecycle.ts  # SIM 状态机
-│   ├── subscription.ts  # 订阅管理
-│   ├── dunning.ts       # 信控催收（使用 roundAmount）
-│   ├── package.ts       # 产品包管理
-│   ├── pricePlan.ts     # 资费计划管理
-│   ├── billingGenerate.ts # 出账生成
-│   ├── reconciliation.ts # 对账
-│   └── ...
-├── routes/              # 路由层（.js + .ts 双栈）
-└── vendors/
-    └── wxzhonggeng.ts   # 微众耕供应商适配器
+├── app.js / app.ts              # Express 主应用（路由注册+中间件+RBAC 配置）
+├── server.js / server.ts        # 服务入口
+├── billing.js                   # 计费引擎核心
+├── worker.js                    # 异步任务 Worker
+├── jwt.js                       # JWT 认证
+├── password.js                  # 密码哈希
+├── supabaseRest.js              # Supabase REST 客户端（重试+熔断）
+├── routes/                      # API 路由层
+│   ├── events.ts                # 事件路由
+│   ├── networkProfiles.ts       # APN/Roaming/Control Policy 路由
+│   ├── packageModules.ts        # 产品包模块路由
+│   ├── packages.ts              # 产品包路由
+│   ├── pricePlans.ts            # Price Plan 路由
+│   ├── reconciliation.ts        # 对账路由
+│   ├── simPhase4.ts             # SIM 生命周期路由
+│   ├── subscriptions.ts         # 订阅路由
+│   ├── vendorMappings.ts        # 供应商映射路由
+│   └── webhooks.ts              # Webhook 路由
+├── services/                    # 业务逻辑层（38+ 服务模块）
+│   ├── simLifecycle.ts          # SIM 状态机
+│   ├── simImport.ts             # SIM 批量导入
+│   ├── billingGenerate.ts       # 账单生成
+│   ├── billingSchedule.ts       # 计费调度
+│   ├── billStatusMachine.ts     # 账单状态机
+│   ├── subscription.ts          # 订阅管理
+│   ├── pricePlan.ts             # Price Plan 管理
+│   ├── package.ts               # 产品包管理
+│   ├── networkProfile.ts        # 网络策略管理
+│   ├── dunning.ts               # 催收管理
+│   ├── alerting.ts              # 告警服务
+│   ├── reconciliation.ts        # 对账服务
+│   ├── webhook.ts               # Webhook 投递
+│   ├── eventEmitter.ts          # 事件发射器
+│   ├── adjustmentNote.ts        # 调账服务
+│   ├── connectivity.ts          # 连接状态
+│   ├── gdprRetention.ts         # GDPR 数据保留
+│   ├── lateCdr.js               # 迟到话单处理
+│   ├── usageCleaning.js         # 用量清洗
+│   └── vendorMapping.ts         # 供应商映射
+├── middleware/                   # 中间件层
+│   ├── rbac.ts                  # RBAC 权限守卫
+│   ├── tenantScope.ts           # 租户作用域
+│   ├── apiKeyAuth.ts            # API Key 认证
+│   ├── auditLog.ts              # 审计日志
+│   ├── oidcAuth.ts              # OIDC 认证
+│   └── rateLimit.ts             # 速率限制
+├── vendors/                     # 供应商适配器
+│   └── wxzhonggeng/             # 微众耕适配器（当前唯一实现）
+├── cron/                        # Cron 任务入口
+├── queues/                      # 异步队列
+├── types/                       # TypeScript 类型定义
+└── utils/                       # 工具函数
+
+tests/
+├── unit/                        # 单元测试
+├── integration/                 # 集成测试
+└── e2e/                         # 端到端测试
 
 supabase/
-└── migrations/          # 9 个域级迁移文件（从 50 个合并）
-    ├── 20260311100001_core_schema.sql          # V001: 核心表结构 + ENUMs
-    ├── 20260311100002_billing_golden_tests.sql # V002: 计费黄金测试用例
-    ├── 20260311100003_tenant_reseller.sql      # V003: resellers/customers 独立表
-    ├── 20260311100004_sim_connectivity.sql     # V004: 网络 profile + operators
-    ├── 20260311100005_billing_integration.sql  # V005: dunning/alerts/webhooks/billing config
-    ├── 20260311100006_package_modules.sql      # V006: 产品包模块表
-    ├── 20260311100007_rls_policies.sql         # V007: RLS 基础策略
-    ├── 20260311100008_tenant_model_unification.sql # V008: 租户模型统一（触发器+函数+视图）
-    └── 20260311100009_rls_tenant_isolation.sql # V009: RLS 租户隔离策略
-
-tools/                   # 测试/工具脚本
-├── api_smoke_test.js    # API 烟测
-├── e2e_demo.js          # 端到端演示
-├── e2e_demo_wx.js       # 微众耕 E2E 演示
-├── test_billing_e2e.js  # 计费 E2E 测试
-└── import_wx_sims.js    # SIM 导入工具
-
-gen/ts-fetch/            # 生成的 TypeScript Fetch 客户端
-fixtures/                # 测试数据（golden cases, vendor product IDs）
-iot-cmp-api.yaml         # OpenAPI 3.0.3 规范
-golden_cases.json        # 机器可读计费黄金用例
+└── migrations/                  # 数据库迁移（12 个已有）
+    ├── 20260311100001_core_schema.sql
+    ├── 20260311100002_billing_golden_tests.sql
+    ├── 20260311100003_tenant_reseller.sql
+    ├── 20260311100004_sim_connectivity.sql
+    ├── 20260311100005_billing_integration.sql
+    ├── 20260311100006_package_modules.sql
+    ├── 20260311100007_rls_policies.sql
+    ├── 20260311100008_tenant_model_unification.sql
+    ├── 20260311100009_rls_tenant_isolation.sql
+    ├── 20260312100001_subscription_cancel_schedules.sql
+    ├── 20260313100001_deprecate_legacy_carriers.sql
+    └── 20260314100001_normalize_reseller_status_enum.sql
 ```
 
-**Structure Decision**: 采用现有的单体应用结构（Single project），所有源代码在 `src/` 下。当前 .js 和 .ts 共存（渐进迁移），`server.js → app.js` 为实际运行路径。MVP 阶段保持单体架构以降低复杂性，商用阶段按 DDD 域拆分为微服务。
+**Structure Decision**: 保持现有 Express 单体结构，按 `routes/` + `services/` + `middleware/` 分层。新功能遵循现有模式：路由层处理 HTTP、服务层处理业务逻辑、中间件处理横切关注点。数据库变更通过 `supabase/migrations/` 增量迁移管理。
 
-## Architecture Decisions (D-31 修正)
+## Phase 0: 研究产出摘要
 
-| 编号 | 决策 | 理由 | 替代方案及淘汰原因 |
-|------|------|------|-------------------|
-| AD-1 | 保留 tenants 表为统一 ID 层，通过触发器同步 | 所有 FK 已指向 tenants.tenant_id，改为直接 FK 到 resellers/customers 代价过大 | 方案 A（删除 tenants 表）：需迁移所有 FK，风险太高 |
-| AD-2 | 应用层租户过滤为主，RLS 为辅 | service_role 绕过 RLS，应用层 `buildTenantFilterAsync()` 是唯一可靠隔离点 | 纯 RLS 方案：service_role 无法受 RLS 约束 |
-| AD-3 | 计费引擎批量查询 + sim_id 排序 | 消除 N+1（10万 SIM = 30万次 HTTP），排序保证 pool 用量确定性 | per-SIM 查询：Vercel 超时不可接受 |
-| AD-4 | roundAmount() 统一精度 | ROUND_HALF_UP + BILLING_PRECISION=2 全局一致 | .toFixed(2)：行为不一致（银行家舍入问题） |
-| AD-5 | MVP 拆分为核心 4 周 + 扩展 4 周 | 原 8 周范围实际需 12 周，拆分后核心链路 4 周可验证 | 不拆分：无法按时交付 |
-| AD-6 | 前端 Portal 推迟到 V1.1 | MVP 用 Swagger UI + Postman 验证 API；如需操作界面用 Retool | 含前端 MVP：工期不可控 |
+**详细内容**: [research.md](./research.md)
+
+### 核心发现
+
+1. **现有代码库成熟度高**：64 个 API 端点、30+ 表、RLS 策略、JWT 认证、1 个供应商适配器已就绪
+2. **所有技术未知项已在 /adk:clarify 阶段解决**：语言（TypeScript）、数据库（Supabase）、部署（Vercel）、币种策略、MVP 形态均已确定
+3. **差距主要集中在 V1.1 增强**：RBAC DB 驱动、Reseller 身份统一、Price Plan 快照重构、KB→MB 统一
+
+### V1.1 关键架构决策（2026-03-24 澄清）
+
+| 决策 | 方案 | 理由 |
+|------|------|------|
+| Phase 24: Reseller 身份统一 | 新增 `reseller_tenant_id` FK→tenants，弃用 `reseller_id` | 消除双标识歧义 |
+| Phase 24: JWT 迁移 | 强制重登录（修改 JWT_SECRET） | 简单可靠，无需维护过渡映射 |
+| Phase 23: RBAC DB 驱动 | 不加功能开关，依赖测试覆盖 | 保持代码简单 |
+| Phase 19+19b: 合并为原子部署 | Price Plan 快照重构 + KB→MB 统一一次性部署 | 消除中间态返工 |
+| Phase 25: T141 拆分 | 3 子任务（路由/幂等/无能力处理） | 独立关注点分离 |
+| V1.1 破坏性变更 | 单次停机窗口（30-60 分钟） | Phase 24+23+19 一次性完成 |
+| V1.1 执行顺序 | 24→23→19→21/22/25/26/27 | 基础设施优先，功能扩展后行 |
+| `public_infos` 隔离 | 与 `business_operators`/`operator_id` 零关联 | FR-057 强制要求 |
+
+## Phase 1: 设计产出摘要
+
+### 数据模型
+
+**详细内容**: [data-model.md](./data-model.md)
+
+核心实体关系：
+
+```
+供应商(suppliers) ──1:N──► 运营商关联(operators) ◄──M:N──► 业务运营商(business_operators)
+                  ──1:N──► 上游集成(upstream_integrations)
+
+代理商(resellers) ──1:N──► 企业(customers) ──1:N──► 部门(departments)
+                  ──1:N──► 用户(users)
+
+SIM 卡(sim_cards)  ──N:1──► 供应商 + 运营商 + 代理商 + 企业（四方归属链）
+eSIM(esim_profiles) ──N:1──► 供应商 + 运营商 + SM-DP+(smdp_systems) + 代理商 + 企业
+
+产品包(packages) ──引用──► Price Plan(快照ID) + Carrier Service + Control Policy(快照ID) + Commercial Terms
+
+订阅(subscriptions) ──N:1──► SIM + 产品包
+账单(bills) ──1:N──► 明细(bill_line_items) ──关联──► 调账(adjustment_notes)
+
+public_infos ──────── 完全独立，与业务表零关联 ────────
+```
+
+### API 契约
+
+**详细内容**: [contracts/](./contracts/)
+
+| 契约文件 | 覆盖范围 | User Story |
+|----------|----------|------------|
+| tenant-api.md | 代理商/企业/用户/供应商/运营商 CRUD | US1 |
+| sim-api.md | SIM 导入/状态变更/查询/备注编辑 | US2 |
+| pricing-api.md | Price Plan/APN/Roaming/Control Policy/Package 快照管理 | US3 |
+| billing-api.md | 账单查询/导出/核销/调账/出账 | US5, US6 |
+| integration-api.md | 供应商适配/SPI/Webhook/对账 | US8, US10 |
+| public-info-api.md | 3GPP 公开目录只读查询+管理写入 | FR-054~FR-057 |
+
+### 快速启动
+
+**详细内容**: [quickstart.md](./quickstart.md)
+
+覆盖：环境配置、数据库迁移、Seed 数据、本地开发、Vercel 部署。
+
+## 实施路线图
+
+### MVP（V1.0）— 8 周
+
+```
+Phase 1 (Week 1-2): 地基修正
+  ├── TypeScript 双栈确认 + Schema 完整性验证
+  ├── 租户模型验证（create_reseller/create_customer + 触发器同步）
+  ├── SIM CRUD + 5 状态机验证
+  └── Fixed Bundle 资费创建
+
+Phase 2 (Week 3-4): 计费核心
+  ├── 计费引擎 Golden Test Case 全量通过
+  ├── 手动触发出账 API
+  ├── 端到端冒烟测试
+  └── Vercel staging 部署
+
+Phase 3 (Week 5-6): 扩展能力
+  ├── RBAC + 多租户隔离集成
+  ├── One-time 资费 + 自动出账（T+N）
+  └── SIM 批量导入 + WX 上游同步
+
+Phase 4 (Week 7-8): 集成与验收
+  ├── Dunning 基础版
+  ├── 上游对账 + 虚拟化层
+  └── 全量回归测试 + Golden Test Cases
+```
+
+### V1.1 增强 — 破坏性变更 + 功能扩展
+
+**单次停机部署窗口**（Phase 24 → 23 → 19）:
+
+```
+Phase 24: Reseller 身份统一
+  ├── 新增 reseller_tenant_id FK→tenants
+  ├── 数据迁移（customers.reseller_id → reseller_tenant_id）
+  ├── JWT 版本号/SECRET 更新 → 强制重登录
+  └── 弃用旧 reseller_id 引用
+
+Phase 23: RBAC DB 驱动
+  ├── roles/permissions/role_permissions 三表 Seed
+  ├── 6 角色 × 38+ 权限码完整覆盖
+  ├── getEffectivePermissions 重构（DB 优先，硬编码兜底）
+  └── 集成测试覆盖全部角色权限组合
+
+Phase 19: Price Plan 快照重构 + KB→MB 统一
+  ├── price_plans + price_plan_versions 合并为单表快照
+  ├── 所有 *_kb 字段/API 参数重命名为 *_mb
+  ├── OpenAPI spec + ts-fetch 客户端重新生成
+  └── 停机迁移 + pg_dump 备份回滚方案
+```
+
+**零停机功能扩展**（可独立部署）:
+
+```
+Phase 21: SIM/eSIM remark 字段
+Phase 22: 账单 WRITTEN_OFF 状态
+Phase 25: SIM 上游状态同步（T141a/b/c）
+Phase 26: 按产品包/策略反查功能
+Phase 27: public_infos 只读 API + 管理写入 + RLS
+FR-057: operators.carrier_id DROP COLUMN + 外键清理
+```
+
+## 风险与缓解
+
+| 风险 | 影响 | 概率 | 缓解措施 |
+|------|------|------|----------|
+| Serverless 超时（批量操作） | 高 | 中 | 异步 Job + 队列 + 批次拆分 |
+| 单体 app.js 规模增长（643KB） | 中 | 高 | MVP 后按域拆分模块 |
+| V1.1 停机迁移失败 | 高 | 低 | pg_dump 全量备份 + 事务迁移 + staging 充分验证 |
+| CDR 数据量（500 万/日） | 高 | 中 | PostgreSQL 分区表 + 批量 INSERT + 冷归档 |
+| 计费精度 | 高 | 低 | roundAmount() ROUND_HALF_UP + numeric(12,2) |
+| JWT 强制重登录用户影响 | 低 | 高 | 低峰期部署 + 提前通知 |
+| KB→MB Breaking Change | 中 | 高 | 提前通知 API 消费方 + OpenAPI spec 同步更新 |
 
 ## Complexity Tracking
 
-| 关注点 | 当前状态 | 风险等级 | 缓解措施 |
-|--------|---------|---------|---------|
-| .js/.ts 双栈共存 | 稳定运行，类型检查部分通过 | 中 | MVP 不做迁移，只保证新增代码用 TS |
-| 计费引擎复杂度 | 749 行 JS，4 种资费类型 | 高 | Golden Case 回归 + roundAmount 统一 |
-| 多租户隔离完整性 | 应用层+RLS 双层 | 中 | 每个路由必须调用 buildTenantFilterAsync |
-| Vercel Serverless 超时 | 10s (Free) / 300s (Pro) | 高 | 批量操作走 Queue，计费分批处理 |
-| 租户模型一致性 | 触发器+事务函数保障 | 低 | V008 迁移已验证 |
+*无 Constitution 门控违规。*
+
+| 注意事项 | 说明 | 接受理由 |
+|----------|------|----------|
+| 单体 app.js 643KB | 超出常规文件大小建议 | 现有架构已稳定运行，MVP 后按域拆分 |
+| 30+ 数据库表 | IoT CMP 业务域复杂度决定 | 实体间关系清晰，符合 DDD 领域建模 |
+| 12 个迁移文件 | 增量迭代自然产物 | 每个迁移职责单一，可独立回滚 |

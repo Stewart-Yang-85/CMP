@@ -1,5 +1,5 @@
 import { createWxzhonggengAdapter } from './wxzhonggeng.js'
-import type { SupplierAdapter, SupplierCapabilities } from './spi.js'
+import type { SupplierAdapter, SupplierCapabilities, SpiOperation } from './spi.js'
 
 type ChangePlanStrategy = {
   mode: 'UPSTREAM' | 'VIRTUAL'
@@ -70,4 +70,29 @@ export function negotiateChangePlanStrategy({
     return { mode: 'VIRTUAL' }
   }
   return { mode: 'UPSTREAM' }
+}
+
+export function resolveAdapterForSupplier({ supplierId }: { supplierId?: string | null }): SupplierAdapter | null {
+  try {
+    return createSupplierAdapter({ supplierId })
+  } catch {
+    return null
+  }
+}
+
+export function checkOperationSupported({
+  supplierId,
+  operation,
+}: {
+  supplierId?: string | null
+  operation: SpiOperation
+}): { supported: boolean; adapter: SupplierAdapter | null; reason?: string } {
+  const adapter = resolveAdapterForSupplier({ supplierId })
+  if (!adapter) {
+    return { supported: false, adapter: null, reason: 'ADAPTER_NOT_FOUND' }
+  }
+  if (!adapter.supportsOperation(operation)) {
+    return { supported: false, adapter, reason: 'UPSTREAM_NOT_SUPPORTED' }
+  }
+  return { supported: true, adapter }
 }

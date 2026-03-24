@@ -380,6 +380,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
       const resellerIdQuery = query.resellerId ? String(query.resellerId) : null
       const enterpriseIdQuery = query.enterpriseId ? String(query.enterpriseId) : null
       const departmentIdQuery = query.departmentId ? String(query.departmentId) : null
+      const packageIdQuery = query.packageId ? String(query.packageId).trim() : null
       const pageSize = query.pageSize ? Number(query.pageSize) : (query.limit ? Number(query.limit) : 20)
       const page = query.page ? Number(query.page) : 1
       const limit = Math.min(100, Math.max(1, pageSize))
@@ -395,6 +396,40 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
       }
       if (resellerIdQuery && !isValidUuid(resellerIdQuery)) {
         return sendError(reply, 400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
+      }
+      if (packageIdQuery && !isValidUuid(packageIdQuery)) {
+        return sendError(reply, 400, 'BAD_REQUEST', 'packageId must be a valid uuid.')
+      }
+      // T142: packageId requires enterpriseId for platform/reseller scope
+      if (packageIdQuery && (roleScope === 'platform' || roleScope === 'reseller') && !enterpriseIdQuery) {
+        return sendError(reply, 400, 'BAD_REQUEST', 'enterpriseId is required when filtering by packageId.')
+      }
+      // T142: Resolve SIM IDs from package subscriptions
+      let packageSimIds: Set<string> | null = null
+      if (packageIdQuery) {
+        const pvRows = await supabase.select(
+          'package_versions',
+          `select=package_version_id&package_id=eq.${encodeURIComponent(packageIdQuery)}`
+        )
+        const pvIds = (Array.isArray(pvRows) ? pvRows : [])
+          .map((r: any) => String(r?.package_version_id ?? '').trim())
+          .filter(Boolean)
+        if (!pvIds.length) {
+          return reply.send({ items: [], total: 0, page, pageSize: limit })
+        }
+        const pvIdFilter = pvIds.map((id) => encodeURIComponent(id)).join(',')
+        const subRows = await supabase.select(
+          'subscriptions',
+          `select=sim_id&package_version_id=in.(${pvIdFilter})&state=in.(ACTIVE,PENDING)`
+        )
+        packageSimIds = new Set(
+          (Array.isArray(subRows) ? subRows : [])
+            .map((r: any) => String(r?.sim_id ?? '').trim())
+            .filter(Boolean)
+        )
+        if (packageSimIds.size === 0) {
+          return reply.send({ items: [], total: 0, page, pageSize: limit })
+        }
       }
       let operatorFilter: { operatorIds: string[] } | null = null
       if (operatorId) {
@@ -488,6 +523,11 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
       if (status) filters.push(`status=eq.${encodeURIComponent(status)}`)
       if (supplierId) filters.push(`supplier_id=eq.${encodeURIComponent(supplierId)}`)
       appendOperatorFilter(filters, operatorFilter)
+      // T142: Filter by package-derived SIM IDs
+      if (packageSimIds) {
+        const simIdArr = Array.from(packageSimIds)
+        filters.push(`sim_id=in.(${simIdArr.map((id) => encodeURIComponent(id)).join(',')})`)
+      }
       const filterQs = filters.length ? `&${filters.join('&')}` : ''
 
       const simSelectFields = [
@@ -619,6 +659,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
         if (resellerId) filterPairs.push(`resellerId=${resellerId}`)
         if (enterpriseId) filterPairs.push(`enterpriseId=${enterpriseId}`)
         if (departmentId) filterPairs.push(`departmentId=${departmentId}`)
+        if (packageIdQuery) filterPairs.push(`packageId=${packageIdQuery}`)
         filterPairs.push(`pageSize=${limit}`)
         filterPairs.push(`page=${page}`)
         reply.header('X-Filters', filterPairs.join(';'))

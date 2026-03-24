@@ -60,14 +60,14 @@ foreach ($c in @($casesDoc.cases)) {
   $actual = $engineMap[$c.id]
   $visited = [string]$c.context.usage.visitedMccMnc
   $totalMb = [double]$c.context.usage.totalMb
-  $chargedKb = Convert-MbToKbCeil $totalMb $mbToKb
+  $chargedMb = $totalMb
 
   $classification = [string]$actual.charge.type
   $amount = $null
   $rate = $null
   $outCurrency = $null
   if ($null -ne $actual.charge.amount) { $amount = [double]$actual.charge.amount }
-  if ($null -ne $actual.charge.ratePerKb) { $rate = [double]$actual.charge.ratePerKb }
+  if ($null -ne $actual.charge.ratePerMb) { $rate = [double]$actual.charge.ratePerMb }
   if ($null -ne $actual.charge.currency) { $outCurrency = [string]$actual.charge.currency } else { $outCurrency = $currency }
 
   $inputRef = "golden:$($c.id)"
@@ -82,13 +82,13 @@ foreach ($c in @($casesDoc.cases)) {
   $calcId = "golden_case_$($c.id)"
 
   $lines.Add(
-    "INSERT INTO rating_results (calculation_id, iccid, visited_mccmnc, input_ref, classification, charged_kb, rate_per_kb, amount, currency) VALUES (" +
+    "INSERT INTO rating_results (calculation_id, iccid, visited_mccmnc, input_ref, classification, charged_mb, rate_per_mb, amount, currency) VALUES (" +
     "'" + $calcId.Replace("'", "''") + "'," +
     "'" + ([string]$c.context.sim.iccid).Replace("'", "''") + "'," +
     "'" + $visited.Replace("'", "''") + "'," +
     "'" + $inputRef.Replace("'", "''") + "'," +
     "'" + $classification.Replace("'", "''") + "'," +
-    $chargedKb + "," +
+    $chargedMb + "," +
     $rateSql + "," +
     $amountSql + "," +
     $currencySql +

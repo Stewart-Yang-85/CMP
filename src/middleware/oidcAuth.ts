@@ -180,6 +180,10 @@ export function oidcAuth(options: OidcOptions = {}) {
       reply.status(401).send({ code: 'UNAUTHORIZED', message: 'Invalid token signature.' })
       return
     }
+    // Phase 24: OIDC claims MUST use tenants.tenant_id for resellerId.
+    // If the OIDC provider sends the legacy resellers.id, the tenant hierarchy
+    // queries (e.g. tenants.parent_id) will silently fail. Configure your IDP
+    // to issue the reseller's tenant_id, not resellers.id.
     setAuthContext(req, {
       userId: payloadJson.userId ? String(payloadJson.userId) : payloadJson.sub ? String(payloadJson.sub) : null,
       resellerId: payloadJson.resellerId ? String(payloadJson.resellerId) : null,

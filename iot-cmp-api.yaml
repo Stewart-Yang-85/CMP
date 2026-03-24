@@ -41,9 +41,9 @@ tags:
   - name: Jobs
     description: Job status tracking
   - name: Packages
-    description: Package catalog and versions
+    description: Package catalog and management
   - name: PricePlans
-    description: Price plan catalog and versions
+    description: Price plan catalog and management
   - name: NetworkProfiles
     description: APN and roaming profile management
   - name: Resellers
@@ -939,7 +939,7 @@ components:
             properties:
               period:
                 type: string
-              totalKb:
+              totalMb:
                 type: number
 
     TopSimsReport:
@@ -956,7 +956,7 @@ components:
             properties:
               iccid:
                 type: string
-              totalKb:
+              totalMb:
                 type: number
 
     AnomalySimsReport:
@@ -1686,11 +1686,11 @@ components:
         visitedMccMnc:
           type: string
           description: MCC-MNC (e.g., 204-08)
-        totalKb:
+        totalMb:
           type: integer
-        uplinkKb:
+        uplinkMb:
           type: integer
-        downlinkKb:
+        downlinkMb:
           type: integer
 
     AdminSimSeedUsageResponse:
@@ -1702,11 +1702,11 @@ components:
           type: string
         visitedMccMnc:
           type: string
-        uplinkKb:
+        uplinkMb:
           type: integer
-        downlinkKb:
+        downlinkMb:
           type: integer
-        totalKb:
+        totalMb:
           type: integer
         seeded:
           type: boolean
@@ -2624,7 +2624,7 @@ components:
           type: string
         throttlingPolicyId:
           type: string
-        cutoffThresholdKb:
+        cutoffThresholdMb:
           type: integer
         cutoffThresholdMb:
           type: integer
@@ -2985,7 +2985,7 @@ components:
     PricePlanVersion:
       type: object
       properties:
-        pricePlanVersionId:
+        pricePlanId:
           type: string
         version:
           type: integer
@@ -3091,19 +3091,19 @@ components:
           items:
             $ref: '#/components/schemas/PricePlanVersion'
 
-    PricePlanVersionCreateRequest:
+    PricePlanCloneRequest:
       oneOf:
-        - $ref: '#/components/schemas/PricePlanVersionCreateOneTime'
-        - $ref: '#/components/schemas/PricePlanVersionCreateSimDependentBundle'
-        - $ref: '#/components/schemas/PricePlanVersionCreateFixedBundle'
-        - $ref: '#/components/schemas/PricePlanVersionCreateTieredPricing'
+        - $ref: '#/components/schemas/PricePlanCloneOneTime'
+        - $ref: '#/components/schemas/PricePlanCloneSimDependentBundle'
+        - $ref: '#/components/schemas/PricePlanCloneFixedBundle'
+        - $ref: '#/components/schemas/PricePlanCloneTieredPricing'
       discriminator:
         propertyName: price_plan_type
         mapping:
-          ONE_TIME: '#/components/schemas/PricePlanVersionCreateOneTime'
-          SIM_DEPENDENT_BUNDLE: '#/components/schemas/PricePlanVersionCreateSimDependentBundle'
-          FIXED_BUNDLE: '#/components/schemas/PricePlanVersionCreateFixedBundle'
-          TIERED_PRICING: '#/components/schemas/PricePlanVersionCreateTieredPricing'
+          ONE_TIME: '#/components/schemas/PricePlanCloneOneTime'
+          SIM_DEPENDENT_BUNDLE: '#/components/schemas/PricePlanCloneSimDependentBundle'
+          FIXED_BUNDLE: '#/components/schemas/PricePlanCloneFixedBundle'
+          TIERED_PRICING: '#/components/schemas/PricePlanCloneTieredPricing'
       examples:
         oneTime:
           value:
@@ -3139,7 +3139,7 @@ components:
                 toMb: 5368709120
                 ratePerMb: 0.0006
 
-    PricePlanVersionCreateCommon:
+    PricePlanCloneCommon:
       type: object
       required: [price_plan_type]
       properties:
@@ -3154,9 +3154,9 @@ components:
           items:
             $ref: '#/components/schemas/PaygRate'
 
-    PricePlanVersionCreateOneTime:
+    PricePlanCloneOneTime:
       allOf:
-        - $ref: '#/components/schemas/PricePlanVersionCreateCommon'
+        - $ref: '#/components/schemas/PricePlanCloneCommon'
         - type: object
           required: [price_plan_type, oneTimeFee, quotaMb, validityDays, expiryBoundary]
           properties:
@@ -3173,9 +3173,9 @@ components:
               type: string
               enum: [CALENDAR_DAY_END, DURATION_EXCLUSIVE_END]
 
-    PricePlanVersionCreateSimDependentBundle:
+    PricePlanCloneSimDependentBundle:
       allOf:
-        - $ref: '#/components/schemas/PricePlanVersionCreateCommon'
+        - $ref: '#/components/schemas/PricePlanCloneCommon'
         - type: object
           required: [price_plan_type, monthlyFee, deactivatedMonthlyFee, perSimQuotaMb]
           properties:
@@ -3191,9 +3191,9 @@ components:
             overageRatePerMb:
               type: number
 
-    PricePlanVersionCreateFixedBundle:
+    PricePlanCloneFixedBundle:
       allOf:
-        - $ref: '#/components/schemas/PricePlanVersionCreateCommon'
+        - $ref: '#/components/schemas/PricePlanCloneCommon'
         - type: object
           required: [price_plan_type, monthlyFee, deactivatedMonthlyFee, totalQuotaMb]
           properties:
@@ -3209,9 +3209,9 @@ components:
             overageRatePerMb:
               type: number
 
-    PricePlanVersionCreateTieredPricing:
+    PricePlanCloneTieredPricing:
       allOf:
-        - $ref: '#/components/schemas/PricePlanVersionCreateCommon'
+        - $ref: '#/components/schemas/PricePlanCloneCommon'
         - type: object
           required: [price_plan_type, monthlyFee, deactivatedMonthlyFee, tiers]
           properties:
@@ -3227,10 +3227,10 @@ components:
               items:
                 $ref: '#/components/schemas/PricePlanTier'
 
-    PricePlanVersionCreateResponse:
+    PricePlanCloneResponse:
       type: object
       properties:
-        pricePlanVersionId:
+        pricePlanId:
           type: string
         version:
           type: integer
@@ -3289,13 +3289,13 @@ components:
 
     PackageCreateRequest:
       type: object
-      required: [name, pricePlanVersionId, carrierServiceId, controlPolicyId, commercialTermsId]
+      required: [name, pricePlanId, carrierServiceId, controlPolicyId, commercialTermsId]
       properties:
         name:
           type: string
         description:
           type: string
-        pricePlanVersionId:
+        pricePlanId:
           type: string
         carrierServiceId:
           type: string
@@ -3311,7 +3311,7 @@ components:
           type: string
         description:
           type: string
-        pricePlanVersionId:
+        pricePlanId:
           type: string
         carrierServiceId:
           type: string
@@ -3394,7 +3394,7 @@ components:
           $ref: '#/components/schemas/ControlPolicy'
         commercialTerms:
           $ref: '#/components/schemas/CommercialTerms'
-        pricePlanVersionId:
+        pricePlanId:
           type: string
         createdAt:
           type: string
@@ -8938,7 +8938,7 @@ paths:
                         firstCycleProration: NONE
                         status: DRAFT
                         latestVersion:
-                          pricePlanVersionId: 72f3dc76-a003-4f41-89cb-44f2235ebde0
+                          pricePlanId: 72f3dc76-a003-4f41-89cb-44f2235ebde0
                           version: 1
                           status: DRAFT
                           monthlyFee: 10
@@ -8993,7 +8993,7 @@ paths:
                     billingCycleType: CALENDAR_MONTH
                     firstCycleProration: NONE
                     currentVersion:
-                      pricePlanVersionId: 72f3dc76-a003-4f41-89cb-44f2235ebde0
+                      pricePlanId: 72f3dc76-a003-4f41-89cb-44f2235ebde0
                       version: 1
                       status: DRAFT
                       monthlyFee: 10
@@ -9018,7 +9018,7 @@ paths:
                         roamingProfile:
                           allowedMccMnc: [460-00, 460-*]
                     versions:
-                      - pricePlanVersionId: 72f3dc76-a003-4f41-89cb-44f2235ebde0
+                      - pricePlanId: 72f3dc76-a003-4f41-89cb-44f2235ebde0
                         version: 1
                         status: DRAFT
                         monthlyFee: 10
@@ -9043,6 +9043,31 @@ paths:
                           roamingProfile:
                             allowedMccMnc: [460-00, 460-*]
 
+  /price-plans/{pricePlanId}:clone:
+    post:
+      tags: [PricePlans]
+      summary: Clone Price Plan
+      description: Creates a new price plan by cloning an existing one. The new plan is created in DRAFT status with optional field overrides.
+      parameters:
+        - name: pricePlanId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PricePlanCloneRequest'
+      responses:
+        '201':
+          description: Cloned price plan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PricePlanCloneResponse'
+
   /enterprises/{enterpriseId}/packages:
     post:
       tags: [Packages]
@@ -9064,14 +9089,14 @@ paths:
                 value:
                   name: 企业物联网标准包
                   description: 含资费、运营商业务、商业条款、控制策略
-                  pricePlanVersionId: 0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f
+                  pricePlanId: 0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f
                   carrierServiceId: 4f4f4f4f-4f4f-4f4f-8f4f-4f4f4f4f4f4f
                   controlPolicyId: 7f7f7f7f-7f7f-4f7f-8f7f-7f7f7f7f7f7f
                   commercialTermsId: 3f3f3f3f-3f3f-4f3f-8f3f-3f3f3f3f3f3f
               indexFromPricePlanMeta:
                 value:
                   name: 企业物联网简化包
-                  pricePlanVersionId: 8f8f8f8f-8f8f-4f8f-8f8f-8f8f8f8f8f8f
+                  pricePlanId: 8f8f8f8f-8f8f-4f8f-8f8f-8f8f8f8f8f8f
       responses:
         '201':
           description: Package created
@@ -9174,7 +9199,7 @@ paths:
                         testExpiryCondition: PERIOD_OR_QUOTA
                         testExpiryAction: DEACTIVATED
                         commitmentPeriodMonths: 12
-                      pricePlanVersionId: 0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f
+                      pricePlanId: 0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f
                       createdAt: '2026-03-10T09:00:00Z'
     put:
       tags: [Packages]

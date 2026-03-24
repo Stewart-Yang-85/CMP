@@ -653,6 +653,20 @@ function registerAuthRoutes({
         return sendError(res, 401, 'UNAUTHORIZED', 'Invalid credentials.')
       }
       const enterpriseId = readString((row as any).enterprise_id)
+      // Phase 24: Resolve reseller tenant_id from customer's reseller_tenant_id
+      let resellerId: string | null = null
+      if (enterpriseId) {
+        try {
+          const custRows = await supabase.select(
+            'customers',
+            `select=reseller_tenant_id&id=eq.${encodeURIComponent(enterpriseId)}&limit=1`
+          )
+          const custRow = Array.isArray(custRows) ? custRows[0] : null
+          if (custRow && (custRow as any).reseller_tenant_id) {
+            resellerId = String((custRow as any).reseller_tenant_id)
+          }
+        } catch {}
+      }
       const payload = {
         iss: 'iot-cmp-api',
         sub: String(email),
@@ -662,6 +676,7 @@ function registerAuthRoutes({
         roleScope: 'customer',
         role: 'customer_m2m',
         ...(enterpriseId ? { enterpriseId, customerId: enterpriseId } : {}),
+        ...(resellerId ? { resellerId } : {}),
       }
       const token = signJwtHs256(payload, getEnvTrim('AUTH_TOKEN_SECRET'))
       return res.json({
@@ -673,7 +688,7 @@ function registerAuthRoutes({
           email,
           role: 'customer_m2m',
           roleScope: 'customer',
-          resellerId: null,
+          resellerId,
           customerId: enterpriseId,
         },
       })

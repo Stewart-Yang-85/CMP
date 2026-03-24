@@ -138,7 +138,7 @@
 |------|------|------|
 | SPI 定义 | ⚠️ wxzhonggeng 适配器 | 需抽象 ProvisioningSPI / UsageSPI / CatalogSPI |
 | 多供应商支持 | ⚠️ 仅 1 个适配器 | 需定义适配器接口规范 |
-| 能力协商 | ❌ 不存在 | 需实现 Capability Negotiation |
+| 能力协商 | ❌ 不存在 | 需实现 Capability Negotiation（2026-03-24 确认：T078 此前误标已完成，实际仍为 V1.1 待办） |
 | SFTP 话单 | ❌ 不存在 | 需实现 SFTP 接入+幂等入库 |
 | Reconciliation | ❌ 不存在 | 需实现每日对账任务 |
 
@@ -241,3 +241,8 @@ Phase 4 (Week 7-8): 集成与验收
 ```
 
 P2 功能（US9 监控诊断、US11 事件架构）在 MVP 中以基础版本交付。
+
+## 8. 补充（2026-03-24 澄清）
+
+- **`public_infos` / `carriers` 视图**：V004 迁移已落地物理表 `public.public_infos` 与兼容视图 `carriers`；与「3GPP 公开运营商辅助目录」需求对齐时**无需再建一张平行表**，仅需 API + RLS + admin 写路径（见 `contracts/public-info-api.md`、`tasks.md` Phase 27）。
+- **与 `business_operators` / `operator_id` 隔离（2026-03-24 重申）**：产品规格要求 `public_infos` 与业务运营商表及 **`operator_id` 业务索引链完全无关**；V1.1 须删除历史外键并禁止应用层桥接（**FR-057**）。

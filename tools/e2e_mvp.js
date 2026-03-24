@@ -13,7 +13,7 @@ let resellerId, resellerTenantId
 let customerId, customerTenantId
 let supplierId
 let simId, iccid
-let pricePlanId, pricePlanVersionId
+let pricePlanId
 let packageId, packageVersionId
 let subscriptionId
 let billId
@@ -111,16 +111,14 @@ async function main() {
 
   // Step 7: Create Price Plan Version
   await step('Create price plan version', async () => {
-    const rows = await supabase.insert('price_plan_versions', {
+    await supabase.insert('price_plan_versions', {
       price_plan_id: pricePlanId,
       version: 1,
       monthly_fee: 10.00,
       deactivated_monthly_fee: 5.00,
-      total_quota_kb: 1048576, // 1GB
-      overage_rate_per_kb: 0.0001,
-    }, { returning: 'representation' })
-    pricePlanVersionId = rows?.[0]?.price_plan_version_id
-    if (!pricePlanVersionId) throw new Error('No price_plan_version_id returned')
+      total_quota_mb: 1024, // 1GB
+      overage_rate_per_mb: 0.1024,
+    }, { returning: 'minimal' })
   })
 
   // Step 8: Create Package
@@ -141,7 +139,7 @@ async function main() {
       status: 'PUBLISHED',
       supplier_id: supplierId,
       service_type: 'DATA',
-      price_plan_version_id: pricePlanVersionId,
+      price_plan_id: pricePlanId,
       roaming_profile: { type: 'GLOBAL' },
     }, { returning: 'representation' })
     packageVersionId = rows?.[0]?.package_version_id

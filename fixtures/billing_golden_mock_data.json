@@ -42,7 +42,6 @@
       "package_version_id": "pkgv-golden-001",
       "package_id": "pkg-golden-001",
       "price_plan_id": "pp-golden-001",
-      "price_plan_version_id": "ppv-golden-001",
       "status": "PUBLISHED",
       "roaming_profile": {
         "type": "MCCMNC_ALLOWLIST",

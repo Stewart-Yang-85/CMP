@@ -1015,6 +1015,7 @@ export async function listApnProfiles({
   supabase,
   supplierId,
   operatorId,
+  apnProfileId,
   status,
   page,
   pageSize,
@@ -1022,6 +1023,7 @@ export async function listApnProfiles({
   supabase: SupabaseClient
   supplierId?: string | null
   operatorId?: string | null
+  apnProfileId?: string | null
   status?: string | null
   page?: string | number | null
   pageSize?: string | number | null
@@ -1029,8 +1031,15 @@ export async function listApnProfiles({
   const filters = []
   const supplierIdValue = supplierId ? String(supplierId) : null
   const operatorIdValue = operatorId ? String(operatorId) : null
-  if (!supplierIdValue && !operatorIdValue) {
-    return toError(400, 'BAD_REQUEST', 'supplierId or operatorId is required.')
+  const apnProfileIdValue = apnProfileId ? String(apnProfileId).trim() : null
+  if (!supplierIdValue && !operatorIdValue && !apnProfileIdValue) {
+    return toError(400, 'BAD_REQUEST', 'supplierId, operatorId, or apnProfileId is required.')
+  }
+  if (apnProfileIdValue && !isValidUuid(apnProfileIdValue)) {
+    return toError(400, 'BAD_REQUEST', 'apnProfileId must be a valid uuid.')
+  }
+  if (apnProfileIdValue) {
+    filters.push(`apn_profile_id=eq.${encodeURIComponent(apnProfileIdValue)}`)
   }
   if (supplierIdValue) {
     await backfillApnProfilesFromSims(supabase, supplierIdValue)
@@ -1087,6 +1096,7 @@ export async function listRoamingProfiles({
   supabase,
   supplierId,
   operatorId,
+  roamingProfileId,
   status,
   page,
   pageSize,
@@ -1094,6 +1104,7 @@ export async function listRoamingProfiles({
   supabase: SupabaseClient
   supplierId?: string | null
   operatorId?: string | null
+  roamingProfileId?: string | null
   status?: string | null
   page?: string | number | null
   pageSize?: string | number | null
@@ -1101,8 +1112,15 @@ export async function listRoamingProfiles({
   const filters = []
   const supplierIdValue = supplierId ? String(supplierId) : null
   const operatorIdValue = operatorId ? String(operatorId) : null
-  if (!supplierIdValue && !operatorIdValue) {
-    return toError(400, 'BAD_REQUEST', 'supplierId or operatorId is required.')
+  const roamingProfileIdValue = roamingProfileId ? String(roamingProfileId).trim() : null
+  if (!supplierIdValue && !operatorIdValue && !roamingProfileIdValue) {
+    return toError(400, 'BAD_REQUEST', 'supplierId, operatorId, or roamingProfileId is required.')
+  }
+  if (roamingProfileIdValue && !isValidUuid(roamingProfileIdValue)) {
+    return toError(400, 'BAD_REQUEST', 'roamingProfileId must be a valid uuid.')
+  }
+  if (roamingProfileIdValue) {
+    filters.push(`roaming_profile_id=eq.${encodeURIComponent(roamingProfileIdValue)}`)
   }
   if (supplierIdValue) filters.push(`supplier_id=eq.${encodeURIComponent(supplierIdValue)}`)
   if (operatorIdValue) {

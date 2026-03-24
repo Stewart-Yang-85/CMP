@@ -19,6 +19,9 @@ import { registerReconciliationRoutes } from './routes/reconciliation.js'
 import { registerWebhookRoutes } from './routes/webhooks.js'
 import { registerEventRoutes } from './routes/events.js'
 import { registerVendorMappingRoutes } from './routes/vendorMappings.js'
+import { registerPublicInfoRoutes } from './routes/publicInfos.js'
+import { registerGapRoutes } from './routes/gapSupplement.js'
+import { registerEsimRoutes } from './routes/esimProfiles.js'
 import { createSubscription, switchSubscription, cancelSubscription, listSimSubscriptions, listSubscriptions, getSubscription } from './services/subscription.js'
 import { parseSimIdentifier } from './services/simLifecycle.js'
 import { runBillingGenerate } from './services/billingGenerate.js'
@@ -463,9 +466,11 @@ const defaultPermissionsByRoleScope = {
     'bills.export',
     'bills.mark_paid',
     'bills.adjust',
+    'bills.write_off',
     'sims.list',
     'sims.read',
     'sims.export',
+    'sims.update',
     'sims.connectivity.read',
     'sims.location.read',
     'sims.location.history',
@@ -624,6 +629,7 @@ function resolvePermissionForRequest(req) {
   if (/\/sims\/[^/]+:deactivate$/.test(path)) return 'sims.deactivate'
   if (/\/sims\/[^/]+:reactivate$/.test(path)) return 'sims.reactivate'
   if (/\/sims\/[^/]+:retire$/.test(path)) return 'sims.retire'
+  if (method === 'PATCH' && /\/sims\/[^/]+$/.test(path)) return 'sims.update'
   if (/\/sims\/[^/]+\/state-history$/.test(path)) return 'sims.read'
   if (path.includes('/subscriptions:switch')) return 'subscriptions.switch'
   if (/\/subscriptions\/[^/]+:cancel$/.test(path)) return 'subscriptions.cancel'
@@ -636,6 +642,7 @@ function resolvePermissionForRequest(req) {
     return 'billing.generate'
   }
   if (/\/bills\/[^/]+:mark-paid$/.test(path)) return 'bills.mark_paid'
+  if (/\/bills\/[^/]+:write-off$/.test(path)) return 'bills.write_off'
   if (/\/bills\/[^/]+:adjust$/.test(path)) return 'bills.adjust'
   if (path.endsWith('/bills:csv') || path.endsWith('/v1/bills:csv')) return 'bills.export'
   if (/\/bills\/[^/]+$/.test(path)) return 'bills.read'
@@ -779,7 +786,7 @@ function getTestPeriodDays() {
 }
 
 function getTestQuotaMb() {
-  const n = getEnvNumber('TEST_QUOTA_KB', 102400)
+  const n = getEnvNumber('TEST_QUOTA_MB', 102400)
   return Math.max(0, n)
 }
 
@@ -1046,7 +1053,7 @@ function authGuard(req, res, next) {
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     supabase.select(
       'customers',
-      `select=customer_id,id,reseller_id,api_secret_hash,status&api_key=eq.${encodeURIComponent(apiKey)}&limit=1`
+      `select=customer_id,id,reseller_tenant_id,api_secret_hash,status&api_key=eq.${encodeURIComponent(apiKey)}&limit=1`
     ).then((rows) => {
       const row = Array.isArray(rows) ? rows[0] : null
       if (!row || String(row.status || '').toLowerCase() !== 'active') {
@@ -1060,7 +1067,7 @@ function authGuard(req, res, next) {
         enterpriseId: customerId ? String(customerId) : null,
         clientId: String(customerId ?? apiKey),
         customerId: customerId ? String(customerId) : null,
-        resellerId: row.reseller_id ? String(row.reseller_id) : null,
+        resellerId: row.reseller_tenant_id ? String(row.reseller_tenant_id) : null,
         roleScope: 'customer',
         role: 'customer_m2m',
         userId: null,
@@ -1442,8 +1449,10 @@ export function createApp() {
     }
   })
   app.use('/v1/bills/:billId\\:mark-paid', writeLimiter)
+  app.use('/v1/bills/:billId\\:write-off', writeLimiter)
   app.use('/v1/bills/:billId\\:adjust', writeLimiter)
   app.use('/bills/:billId\\:mark-paid', writeLimiter)
+  app.use('/bills/:billId\\:write-off', writeLimiter)
   app.use('/bills/:billId\\:adjust', writeLimiter)
  
   const metrics = {
@@ -1879,6 +1888,20 @@ export function createApp() {
         return sendError(res, 401, 'UNAUTHORIZED', 'Invalid credentials.')
       }
       const enterpriseId = row.enterprise_id ? String(row.enterprise_id) : null
+      // Phase 24: Resolve reseller tenant_id from customer's reseller_tenant_id
+      let resellerId = null
+      if (enterpriseId) {
+        try {
+          const custRows = await supabase.select(
+            'customers',
+            `select=reseller_tenant_id&id=eq.${encodeURIComponent(enterpriseId)}&limit=1`
+          )
+          const custRow = Array.isArray(custRows) ? custRows[0] : null
+          if (custRow && custRow.reseller_tenant_id) {
+            resellerId = String(custRow.reseller_tenant_id)
+          }
+        } catch {}
+      }
       const payload = {
         iss: 'iot-cmp-api',
         sub: String(email),
@@ -1888,6 +1911,7 @@ export function createApp() {
         roleScope: 'customer',
         role: 'customer_m2m',
         ...(enterpriseId ? { enterpriseId, customerId: enterpriseId } : {}),
+        ...(resellerId ? { resellerId } : {}),
       }
       const token = signJwtHs256(payload, getEnvTrim('AUTH_TOKEN_SECRET'))
       return res.json({
@@ -1899,7 +1923,7 @@ export function createApp() {
           email,
           role: 'customer_m2m',
           roleScope: 'customer',
-          resellerId: null,
+          resellerId,
           customerId: enterpriseId,
         },
       })
@@ -2764,7 +2788,7 @@ export function createApp() {
           usageCharge: meta.usageCharge ?? 0,
           overageCharge: meta.overageCharge ?? 0,
           subtotal: meta.subtotal ?? Number(item.amount ?? 0),
-          usageKb: meta.usageKb ?? 0,
+          usageMb: meta.usageMb ?? 0,
           groupKey: item.group_key ?? null,
           groupType: item.group_type ?? null,
         }
@@ -2860,15 +2884,15 @@ export function createApp() {
         const zoneFilter = zone ? `&visited_mccmnc=eq.${encodeURIComponent(zone)}` : ''
         const usageRows = await supabase.select(
           'usage_daily_summary',
-          `select=visited_mccmnc,total_kb&sim_id=eq.${encodeURIComponent(sim.sim_id)}&usage_day=gte.${encodeURIComponent(start.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(end.toISOString().slice(0, 10))}${zoneFilter}`
+          `select=visited_mccmnc,total_mb&sim_id=eq.${encodeURIComponent(sim.sim_id)}&usage_day=gte.${encodeURIComponent(start.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(end.toISOString().slice(0, 10))}${zoneFilter}`
         )
         const usageList = Array.isArray(usageRows) ? usageRows : []
         const usageByZone = new Map()
         for (const row of usageList) {
           const key = String(row.visited_mccmnc || '')
           if (!key) continue
-          const current = usageByZone.get(key) || { visitedMccMnc: key, usageKb: 0 }
-          current.usageKb += Number(row.total_kb ?? 0)
+          const current = usageByZone.get(key) || { visitedMccMnc: key, usageMb: 0 }
+          current.usageMb += Number(row.total_mb ?? 0)
           usageByZone.set(key, current)
         }
         const ratingRows = await supabase.select(
@@ -2943,12 +2967,12 @@ export function createApp() {
           return {
             visitedMccMnc: entry.visitedMccMnc,
             countryName: matchedPackage ? null : null,
-            usageKb: Number(entry.usageKb ?? 0),
+            usageMb: Number(entry.usageMb ?? 0),
             matchedPackage,
             matchType,
           }
         })
-        const totalUsageKb = Array.from(usageByZone.values()).reduce((sum, entry) => sum + Number(entry.usageKb ?? 0), 0)
+        const totalUsageMb = Array.from(usageByZone.values()).reduce((sum, entry) => sum + Number(entry.usageMb ?? 0), 0)
         const mccmncPairs = Array.from(new Set(byZone.map((z) => String(z.visitedMccMnc || '')).filter(Boolean)))
         if (mccmncPairs.length) {
           const pairs = mccmncPairs.map((pair) => pair.split('-')).filter((p) => p.length === 2)
@@ -2974,7 +2998,7 @@ export function createApp() {
           simId: sim.sim_id,
           iccid: sim.iccid,
           period,
-          totalUsageKb: Math.floor(totalUsageKb),
+          totalUsageMb: Math.floor(totalUsageMb),
           byZone,
         })
         return
@@ -2996,7 +3020,7 @@ export function createApp() {
       const baseFilter = `iccid=eq.${encodeURIComponent(sim.iccid)}${tenantFilter}&usage_day=gte.${encodeURIComponent(startDay.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(endDay.toISOString().slice(0, 10))}`
       const { data, total } = await supabase.selectWithCount(
         'usage_daily_summary',
-        `select=usage_day,uplink_kb,downlink_kb,total_kb,created_at&${baseFilter}&order=usage_day.asc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
+        `select=usage_day,uplink_mb,downlink_mb,total_mb,created_at&${baseFilter}&order=usage_day.asc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
       )
 
       const rawRows = Array.isArray(data) ? data : []
@@ -3006,9 +3030,9 @@ export function createApp() {
         return {
           periodStart: day.toISOString(),
           periodEnd: next.toISOString(),
-          uplinkBytes: Number(r.uplink_kb ?? 0) * 1024,
-          downlinkBytes: Number(r.downlink_kb ?? 0) * 1024,
-          totalBytes: Number(r.total_kb ?? 0) * 1024,
+          uplinkBytes: Number(r.uplink_mb ?? 0) * 1024,
+          downlinkBytes: Number(r.downlink_mb ?? 0) * 1024,
+          totalBytes: Number(r.total_mb ?? 0) * 1024,
           sessionCount: 0,
         }
       })
@@ -3058,10 +3082,10 @@ export function createApp() {
       const end = new Date(Date.UTC(year, month, 0))
       const usageRows = await supabase.select(
         'usage_daily_summary',
-        `select=total_kb&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&usage_day=gte.${encodeURIComponent(start.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(end.toISOString().slice(0, 10))}`
+        `select=total_mb&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&usage_day=gte.${encodeURIComponent(start.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(end.toISOString().slice(0, 10))}`
       )
       const usageList = Array.isArray(usageRows) ? usageRows : []
-      const totalUsageKb = usageList.reduce((sum, row) => sum + Number(row.total_kb ?? 0), 0)
+      const totalUsageMb = usageList.reduce((sum, row) => sum + Number(row.total_mb ?? 0), 0)
       const simsRows = await supabase.select(
         'sims',
         `select=sim_id,status&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&status=eq.ACTIVATED`
@@ -3086,7 +3110,7 @@ export function createApp() {
         const idFilter = packageVersionIds.map((id) => encodeURIComponent(id)).join(',')
         const pkgRows = await supabase.select(
           'package_versions',
-          `select=package_version_id,package_id,price_plan_version_id,packages(name)&package_version_id=in.(${idFilter})`
+          `select=package_version_id,package_id,price_plan_id,packages(name)&package_version_id=in.(${idFilter})`
         )
         const pkgList = Array.isArray(pkgRows) ? pkgRows : []
         for (const pkg of pkgList) {
@@ -3094,45 +3118,45 @@ export function createApp() {
             packageMeta.set(String(pkg.package_version_id), {
               packageId: pkg.package_id ?? null,
               packageName: pkg?.packages?.name ?? null,
-              pricePlanVersionId: pkg.price_plan_version_id ?? null,
+              pricePlanId: pkg.price_plan_id ?? null,
             })
           }
         }
-        const pricePlanVersionIds = Array.from(new Set(pkgList.map((p) => p.price_plan_version_id).filter(Boolean).map(String)))
-        if (pricePlanVersionIds.length) {
-          const planFilter = pricePlanVersionIds.map((id) => encodeURIComponent(id)).join(',')
+        const pricePlanIds = Array.from(new Set(pkgList.map((p) => p.price_plan_id).filter(Boolean).map(String)))
+        if (pricePlanIds.length) {
+          const planFilter = pricePlanIds.map((id) => encodeURIComponent(id)).join(',')
           const planRows = await supabase.select(
-            'price_plan_versions',
-            `select=price_plan_version_id,quota_mb,total_quota_mb,per_sim_quota_mb&price_plan_version_id=in.(${planFilter})`
+            'price_plans',
+            `select=price_plan_id,quota_mb,total_quota_mb,per_sim_quota_mb&price_plan_id=in.(${planFilter})`
           )
           const planList = Array.isArray(planRows) ? planRows : []
           for (const plan of planList) {
-            if (plan?.price_plan_version_id) {
-              pricePlanMeta.set(String(plan.price_plan_version_id), plan)
+            if (plan?.price_plan_id) {
+              pricePlanMeta.set(String(plan.price_plan_id), plan)
             }
           }
         }
       }
-      const byPackage = Array.from(packageUsage.entries()).map(([pkgVersionId, usedKb]) => {
+      const byPackage = Array.from(packageUsage.entries()).map(([pkgVersionId, usedMb]) => {
         const meta = packageMeta.get(pkgVersionId) || {}
-        const plan = meta.pricePlanVersionId ? pricePlanMeta.get(String(meta.pricePlanVersionId)) : null
+        const plan = meta.pricePlanId ? pricePlanMeta.get(String(meta.pricePlanId)) : null
         const quotaMb = Number(plan?.total_quota_mb ?? plan?.per_sim_quota_mb ?? plan?.quota_mb ?? 0)
         const quotaValue = Number.isFinite(quotaMb) && quotaMb > 0 ? quotaMb : null
-        const usagePercent = quotaValue ? Number(((usedKb / quotaValue) * 100).toFixed(2)) : null
-        const overageKb = quotaValue ? Math.max(0, Number(usedKb) - quotaValue) : 0
+        const usagePercent = quotaValue ? Number(((usedMb / quotaValue) * 100).toFixed(2)) : null
+        const overageMb = quotaValue ? Math.max(0, Number(usedMb) - quotaValue) : 0
         return {
           packageId: meta.packageId ?? null,
           packageName: meta.packageName ?? null,
           quotaMb: quotaValue ?? null,
-          usedKb: Math.floor(Number(usedKb ?? 0)),
+          usedMb: Math.floor(Number(usedMb ?? 0)),
           usagePercent,
-          overageKb: Math.floor(Number(overageKb)),
+          overageMb: Math.floor(Number(overageMb)),
         }
       })
       res.json({
         enterpriseId,
         period,
-        totalUsageKb: Math.floor(totalUsageKb),
+        totalUsageMb: Math.floor(totalUsageMb),
         activatedSimCount,
         byPackage,
       })
@@ -3176,6 +3200,11 @@ export function createApp() {
           secret
         )
         csvUrl += `?downloadToken=${encodeURIComponent(downloadToken)}`
+      }
+      // T160: Support ?format=pdf|csv query param
+      const format = req.query?.format ? String(req.query.format).toLowerCase() : null
+      if (format === 'pdf') {
+        return sendError(res, 501, 'NOT_IMPLEMENTED', 'PDF bill download is not yet available.')
       }
       res.json({
         pdfUrl: null,
@@ -3318,6 +3347,43 @@ export function createApp() {
         paidAmount: typeof v.total_amount === 'number' ? Number(v.total_amount) : (v.paid_amount ?? null),
         paymentRef: v.payment_ref ?? (paymentRef ?? null),
         paidAt: v.paid_at ?? (paidAt ?? null),
+      }
+      res.json(response)
+    })
+
+    // Phase 22: POST /v1/bills/:billId:write-off
+    // TODO: T120 — add to OpenAPI spec (iot-cmp-api.yaml)
+    app.post(`${prefix}/bills/:billId\\:write-off`, async (req, res) => {
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      const billId = String(req.params.billId)
+      const { reason } = req.body ?? {}
+      const rows = await loadBillScope(supabase, billId)
+      const bill = Array.isArray(rows) ? rows[0] : null
+      if (!bill) {
+        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
+      }
+      const auth = await resolveBillWriteAuth(req, res, supabase, bill)
+      if (!auth) return
+      if (!reason) {
+        return sendError(res, 400, 'BAD_REQUEST', 'reason is required for write-off.')
+      }
+      const result = await transitionBillStatus({
+        supabase,
+        billId,
+        action: 'write_off',
+        actorUserId: auth.userId ?? null,
+        requestId: getTraceId(res),
+      })
+      if (!result.ok) {
+        return sendError(res, result.status, result.code, result.message)
+      }
+      const v = result.value || {}
+      const response = {
+        billId: v.bill_id ?? v.billId ?? billId,
+        status: v.status ?? null,
+        totalAmount: typeof v.total_amount === 'number' ? Number(v.total_amount) : null,
+        reason,
+        writtenOffAt: v.written_off_at ?? new Date().toISOString(),
       }
       res.json(response)
     })
@@ -3514,22 +3580,12 @@ export function createApp() {
       sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
       return null
     }
-    const resolveResellerIdentity = async (supabase, rawResellerId) => {
-      if (!rawResellerId || !/^[0-9a-f-]{36}$/i.test(String(rawResellerId))) return null
-      const id = String(rawResellerId).trim()
-      const rows = await supabase.select(
-        'resellers',
-        `select=id,tenant_id&or=(id.eq.${encodeURIComponent(id)},tenant_id.eq.${encodeURIComponent(id)})&limit=1`
-      )
-      const row = Array.isArray(rows) && rows[0] ? rows[0] : null
-      if (!row) return null
-      return { resellerId: row.id ? String(row.id) : null, tenantId: row.tenant_id ? String(row.tenant_id) : null }
-    }
+    // Phase 24: resolveResellerIdentity removed — auth.resellerId is always tenants.tenant_id
     const resolveEnterpriseForReseller = async (req, res, supabase, enterpriseId) => {
       const auth = getAuth(req)
       if (auth.roleScope !== 'reseller') return enterpriseId
-      const rawResellerId = auth.resellerId
-      if (!rawResellerId) {
+      const resellerTenantId = auth.resellerId
+      if (!resellerTenantId) {
         sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
         return null
       }
@@ -3537,8 +3593,6 @@ export function createApp() {
         sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required for reseller scope.')
         return null
       }
-      const resolved = await resolveResellerIdentity(supabase, rawResellerId)
-      const resellerTenantId = resolved?.tenantId || rawResellerId
       const rows = await supabase.select('tenants', `select=tenant_id,parent_id,tenant_type&tenant_id=eq.${encodeURIComponent(enterpriseId)}&tenant_type=eq.ENTERPRISE&limit=1`)
       const row = Array.isArray(rows) ? rows[0] : null
       if (!row || String(row.parent_id || '') !== String(resellerTenantId)) {
@@ -3686,6 +3740,40 @@ export function createApp() {
         getTraceId,
         sendError,
         ensurePlatformAdmin,
+        isValidUuid,
+      },
+    })
+    registerPublicInfoRoutes({
+      app,
+      prefix,
+      deps: {
+        createSupabaseRestClient,
+        getTraceId,
+        sendError,
+        ensurePlatformAdmin,
+        isValidUuid,
+      },
+    })
+    registerGapRoutes({
+      app,
+      prefix,
+      deps: {
+        createSupabaseRestClient,
+        getTraceId,
+        sendError,
+        ensurePlatformAdmin,
+        isValidUuid,
+      },
+    })
+    registerEsimRoutes({
+      app,
+      prefix,
+      deps: {
+        createSupabaseRestClient,
+        getTraceId,
+        sendError,
+        getRoleScope,
+        ensureResellerAdmin,
         isValidUuid,
       },
     })
@@ -4215,7 +4303,7 @@ export function createApp() {
       const baseFilter = `iccid=eq.${encodeURIComponent(iccid)}${tenantFilter}&usage_day=gte.${encodeURIComponent(startDay.toISOString().slice(0, 10))}&usage_day=lte.${encodeURIComponent(endDay.toISOString().slice(0, 10))}`
       const { data, total } = await supabase.selectWithCount(
         'usage_daily_summary',
-        `select=usage_day,uplink_kb,downlink_kb,total_kb,created_at&${baseFilter}&order=usage_day.asc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
+        `select=usage_day,uplink_mb,downlink_mb,total_mb,created_at&${baseFilter}&order=usage_day.asc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
       )
 
       const rawRows = Array.isArray(data) ? data : []
@@ -4225,9 +4313,9 @@ export function createApp() {
         return {
           periodStart: day.toISOString(),
           periodEnd: next.toISOString(),
-          uplinkBytes: Number(r.uplink_kb ?? 0) * 1024,
-          downlinkBytes: Number(r.downlink_kb ?? 0) * 1024,
-          totalBytes: Number(r.total_kb ?? 0) * 1024,
+          uplinkBytes: Number(r.uplink_mb ?? 0) * 1024,
+          downlinkBytes: Number(r.downlink_mb ?? 0) * 1024,
+          totalBytes: Number(r.total_mb ?? 0) * 1024,
           sessionCount: 0,
         }
       })
@@ -4901,7 +4989,7 @@ export function createApp() {
       }
       const rows = await supabase.select(
         'usage_daily_summary',
-        `select=usage_day,total_kb&${filters.join('&')}&order=usage_day.asc&limit=10000`
+        `select=usage_day,total_mb&${filters.join('&')}&order=usage_day.asc&limit=10000`
       )
       const data = Array.isArray(rows) ? rows : []
       const bucket = new Map()
@@ -4910,11 +4998,11 @@ export function createApp() {
         if (!day) continue
         const key = granularity === 'month' ? day.slice(0, 7) : day
         const current = bucket.get(key) || 0
-        bucket.set(key, current + Number(r?.total_kb ?? 0))
+        bucket.set(key, current + Number(r?.total_mb ?? 0))
       }
       const items = Array.from(bucket.entries())
         .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
-        .map(([periodKey, totalKb]) => ({ period: periodKey, totalKb: Number(totalKb.toFixed(2)) }))
+        .map(([periodKey, totalMb]) => ({ period: periodKey, totalMb: Number(totalMb.toFixed(2)) }))
       res.json({
         granularity,
         startDate: startDay,
@@ -4950,7 +5038,7 @@ export function createApp() {
       }
       const rows = await supabase.select(
         'usage_daily_summary',
-        `select=iccid,total_kb&${filters.join('&')}&limit=50000`
+        `select=iccid,total_mb&${filters.join('&')}&limit=50000`
       )
       const data = Array.isArray(rows) ? rows : []
       const totals = new Map()
@@ -4958,12 +5046,12 @@ export function createApp() {
         const iccid = r?.iccid ? String(r.iccid) : null
         if (!iccid) continue
         const current = totals.get(iccid) || 0
-        totals.set(iccid, current + Number(r?.total_kb ?? 0))
+        totals.set(iccid, current + Number(r?.total_mb ?? 0))
       }
       const items = Array.from(totals.entries())
         .sort((a, b) => b[1] - a[1])
         .slice(0, limitValue)
-        .map(([iccid, totalKb]) => ({ iccid, totalKb: Number(totalKb.toFixed(2)) }))
+        .map(([iccid, totalMb]) => ({ iccid, totalMb: Number(totalMb.toFixed(2)) }))
       res.json({
         startDate: startDay,
         endDate: endDay,
@@ -5092,6 +5180,41 @@ export function createApp() {
   }
 
   function mountAdminRoutes(prefix) {
+    // Phase 23: RBAC management API (platform_admin only)
+    app.get(`${prefix}/admin/roles`, async (req, res) => {
+      if (!requireAdminApiKey(req, res)) return
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      try {
+        const rows = await supabase.select('roles', 'select=id,code,name,description,scope&order=scope,code')
+        res.json({ items: Array.isArray(rows) ? rows : [] })
+      } catch (err) {
+        sendError(res, 500, 'INTERNAL_ERROR', 'Failed to fetch roles.')
+      }
+    })
+
+    app.get(`${prefix}/admin/roles/:code/permissions`, async (req, res) => {
+      if (!requireAdminApiKey(req, res)) return
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      const code = String(req.params.code || '').trim()
+      if (!code) return sendError(res, 400, 'BAD_REQUEST', 'Role code is required.')
+      try {
+        const roleRows = await supabase.select('roles', `select=id,code,name,scope&code=eq.${encodeURIComponent(code)}&limit=1`)
+        const roleRow = Array.isArray(roleRows) && roleRows[0] ? roleRows[0] : null
+        if (!roleRow) return sendError(res, 404, 'NOT_FOUND', `Role '${code}' not found.`)
+        const rpRows = await supabase.select('role_permissions', `select=permission_id&role_id=eq.${encodeURIComponent(String(roleRow.id))}`)
+        const permIds = (Array.isArray(rpRows) ? rpRows : []).map((r) => r.permission_id).filter(Boolean)
+        let permissions = []
+        if (permIds.length > 0) {
+          const idFilter = permIds.map((id) => encodeURIComponent(id)).join(',')
+          const permRows = await supabase.select('permissions', `select=id,code,name,category&id=in.(${idFilter})&order=category,code`)
+          permissions = Array.isArray(permRows) ? permRows : []
+        }
+        res.json({ role: roleRow, permissions })
+      } catch (err) {
+        sendError(res, 500, 'INTERNAL_ERROR', 'Failed to fetch role permissions.')
+      }
+    })
+
     app.get(`${prefix}/admin/api-clients`, async (req, res) => {
       if (!requireAdminApiKey(req, res)) return
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
@@ -5497,23 +5620,23 @@ export function createApp() {
       }
       const usageDay = req.body?.usageDay ? String(req.body.usageDay).slice(0, 10) : new Date().toISOString().slice(0, 10)
       const visited = req.body?.visitedMccMnc ? String(req.body.visitedMccMnc) : '204-08'
-      const totalKbReq = req.body?.totalKb !== undefined && req.body?.totalKb !== null ? Number(req.body.totalKb) : null
-      const uplinkKbReq = req.body?.uplinkKb !== undefined && req.body?.uplinkKb !== null ? Number(req.body.uplinkKb) : null
-      const downlinkKbReq = req.body?.downlinkKb !== undefined && req.body?.downlinkKb !== null ? Number(req.body.downlinkKb) : null
-      let uplinkKb = uplinkKbReq ?? Math.floor(((totalKbReq ?? 200000) * 0.6))
-      let downlinkKb = downlinkKbReq ?? Math.floor(((totalKbReq ?? 200000) * 0.4))
-      let totalKb = totalKbReq ?? (uplinkKb + downlinkKb)
-      if (!Number.isFinite(uplinkKb) || uplinkKb < 0) uplinkKb = 0
-      if (!Number.isFinite(downlinkKb) || downlinkKb < 0) downlinkKb = 0
-      if (!Number.isFinite(totalKb) || totalKb < 0) totalKb = uplinkKb + downlinkKb
+      const totalMbReq = req.body?.totalMb !== undefined && req.body?.totalMb !== null ? Number(req.body.totalMb) : null
+      const uplinkMbReq = req.body?.uplinkMb !== undefined && req.body?.uplinkMb !== null ? Number(req.body.uplinkMb) : null
+      const downlinkMbReq = req.body?.downlinkMb !== undefined && req.body?.downlinkMb !== null ? Number(req.body.downlinkMb) : null
+      let uplinkMb = uplinkMbReq ?? Math.floor(((totalMbReq ?? 200000) * 0.6))
+      let downlinkMb = downlinkMbReq ?? Math.floor(((totalMbReq ?? 200000) * 0.4))
+      let totalMb = totalMbReq ?? (uplinkMb + downlinkMb)
+      if (!Number.isFinite(uplinkMb) || uplinkMb < 0) uplinkMb = 0
+      if (!Number.isFinite(downlinkMb) || downlinkMb < 0) downlinkMb = 0
+      if (!Number.isFinite(totalMb) || totalMb < 0) totalMb = uplinkMb + downlinkMb
       const match = `iccid=eq.${encodeURIComponent(iccid)}&usage_day=eq.${encodeURIComponent(usageDay)}&visited_mccmnc=eq.${encodeURIComponent(visited)}`
       const existing = await supabase.select('usage_daily_summary', `select=usage_id&${match}&limit=1`)
       if (Array.isArray(existing) && existing.length > 0) {
         const usageId = existing[0]?.usage_id
         await supabase.update('usage_daily_summary', `usage_id=eq.${encodeURIComponent(String(usageId))}`, {
-          uplink_kb: Math.max(0, Math.floor(uplinkKb)),
-          downlink_kb: Math.max(0, Math.floor(downlinkKb)),
-          total_kb: Math.max(0, Math.floor(totalKb)),
+          uplink_mb: Math.max(0, Math.floor(uplinkMb)),
+          downlink_mb: Math.max(0, Math.floor(downlinkMb)),
+          total_mb: Math.max(0, Math.floor(totalMb)),
           apn: sim.apn ?? null,
           rat: null,
           input_ref: getTraceId(res) ?? null,
@@ -5526,9 +5649,9 @@ export function createApp() {
           iccid,
           usage_day: usageDay,
           visited_mccmnc: visited,
-          uplink_kb: Math.max(0, Math.floor(uplinkKb)),
-          downlink_kb: Math.max(0, Math.floor(downlinkKb)),
-          total_kb: Math.max(0, Math.floor(totalKb)),
+          uplink_mb: Math.max(0, Math.floor(uplinkMb)),
+          downlink_mb: Math.max(0, Math.floor(downlinkMb)),
+          total_mb: Math.max(0, Math.floor(totalMb)),
           apn: sim.apn ?? null,
           rat: null,
           input_ref: getTraceId(res) ?? null,
@@ -5542,15 +5665,15 @@ export function createApp() {
         target_id: iccid,
         request_id: getTraceId(res),
         source_ip: req.ip,
-        after_data: { iccid, usageDay, visited, uplinkKb, downlinkKb, totalKb },
+        after_data: { iccid, usageDay, visited, uplinkMb, downlinkMb, totalMb },
       }, { returning: 'minimal' })
       res.json({
         iccid,
         usageDay,
         visitedMccMnc: visited,
-        uplinkKb,
-        downlinkKb,
-        totalKb,
+        uplinkMb,
+        downlinkMb,
+        totalMb,
         seeded: true,
       })
     })
@@ -5585,18 +5708,18 @@ export function createApp() {
         if (!startTimeIso) continue
         const startTime = new Date(startTimeIso)
         const expireByPeriod = Date.now() >= addDaysUtc(startTime, periodDays).getTime()
-        let totalKb = 0
+        let totalMb = 0
         const startDay = startOfDayUtc(startTime)
         const usageRows = await supabase.select(
           'usage_daily_summary',
-          `select=total_kb,usage_day&iccid=eq.${encodeURIComponent(sim.iccid)}${sim.enterprise_id ? `&enterprise_id=eq.${encodeURIComponent(sim.enterprise_id)}` : ''}&usage_day=gte.${encodeURIComponent(startDay.toISOString().slice(0, 10))}`
+          `select=total_mb,usage_day&iccid=eq.${encodeURIComponent(sim.iccid)}${sim.enterprise_id ? `&enterprise_id=eq.${encodeURIComponent(sim.enterprise_id)}` : ''}&usage_day=gte.${encodeURIComponent(startDay.toISOString().slice(0, 10))}`
         )
         if (Array.isArray(usageRows)) {
           for (const r of usageRows) {
-            totalKb += Number(r.total_kb ?? 0)
+            totalMb += Number(r.total_mb ?? 0)
           }
         }
-        const expireByQuota = quotaMbLimit > 0 ? totalKb >= quotaMbLimit : false
+        const expireByQuota = quotaMbLimit > 0 ? totalMb >= quotaMbLimit : false
         const shouldExpire = cond === 'PERIOD_ONLY' ? expireByPeriod : cond === 'QUOTA_ONLY' ? expireByQuota : (expireByPeriod || expireByQuota)
         if (!shouldExpire) continue
         const nowIso = new Date().toISOString()
@@ -5624,7 +5747,7 @@ export function createApp() {
             afterStatus: 'ACTIVATED',
             reason: 'TEST_EXPIRY',
             expiryBy: expireByPeriod && expireByQuota ? 'PERIOD_OR_QUOTA' : expireByPeriod ? 'PERIOD' : 'QUOTA',
-            totalKb,
+            totalMb,
             periodDays,
             quotaMbLimit,
             startTime: startTimeIso,
@@ -6997,16 +7120,16 @@ export function createApp() {
           if (!startTimeIso) continue
           const startTime = new Date(startTimeIso)
           const expireByPeriod = Date.now() >= addDaysUtc(startTime, periodDays).getTime()
-          let totalKb = 0
+          let totalMb = 0
           const startDay = startOfDayUtc(startTime)
           const usageRows = await supabase.select(
             'usage_daily_summary',
-            `select=total_kb,usage_day&iccid=eq.${encodeURIComponent(sim.iccid)}${sim.enterprise_id ? `&enterprise_id=eq.${encodeURIComponent(sim.enterprise_id)}` : ''}&usage_day=gte.${encodeURIComponent(startDay.toISOString().slice(0, 10))}`
+            `select=total_mb,usage_day&iccid=eq.${encodeURIComponent(sim.iccid)}${sim.enterprise_id ? `&enterprise_id=eq.${encodeURIComponent(sim.enterprise_id)}` : ''}&usage_day=gte.${encodeURIComponent(startDay.toISOString().slice(0, 10))}`
           )
           if (Array.isArray(usageRows)) {
-            for (const r of usageRows) totalKb += Number(r.total_kb ?? 0)
+            for (const r of usageRows) totalMb += Number(r.total_mb ?? 0)
           }
-          const expireByQuota = quotaMbLimit > 0 ? totalKb >= quotaMbLimit : false
+          const expireByQuota = quotaMbLimit > 0 ? totalMb >= quotaMbLimit : false
           const shouldExpire = cond === 'PERIOD_ONLY' ? expireByPeriod : cond === 'QUOTA_ONLY' ? expireByQuota : (expireByPeriod || expireByQuota)
           if (!shouldExpire) continue
           const nowIso = new Date().toISOString()
@@ -7034,7 +7157,7 @@ export function createApp() {
               afterStatus: 'ACTIVATED',
               reason: 'TEST_EXPIRY_JOB',
               expiryBy: expireByPeriod && expireByQuota ? 'PERIOD_OR_QUOTA' : expireByPeriod ? 'PERIOD' : 'QUOTA',
-              totalKb,
+              totalMb,
               periodDays,
               quotaMbLimit,
               startTime: startTimeIso,
@@ -7187,9 +7310,9 @@ export function createApp() {
             const iccid = String(r.iccid || r.msisdn || '')
             if (!iccid) continue
             const usedFlow = Number(r.usedFlow ?? r.totalFlow ?? 0)
-            const totalKb = Math.max(0, Math.floor(usedFlow))
-            const uplinkKb = 0
-            const downlinkKb = totalKb
+            const totalMb = Math.max(0, Math.floor(usedFlow))
+            const uplinkMb = 0
+            const downlinkMb = totalMb
             const apn = r.apn ? String(r.apn) : null
             const rat = r.rat ? String(r.rat) : null
             const sim = simMap.get(iccid)
@@ -7201,9 +7324,9 @@ export function createApp() {
             if (Array.isArray(existing) && existing.length > 0) {
               const usageId = existing[0]?.usage_id
               await supabase.update('usage_daily_summary', `usage_id=eq.${encodeURIComponent(String(usageId))}`, {
-                uplink_kb: uplinkKb,
-                downlink_kb: downlinkKb,
-                total_kb: totalKb,
+                uplink_mb: uplinkMb,
+                downlink_mb: downlinkMb,
+                total_mb: totalMb,
                 apn: apn ?? null,
                 rat: rat ?? null,
                 input_ref: jobId ?? null,
@@ -7217,9 +7340,9 @@ export function createApp() {
                 iccid,
                 usage_day: usageDay,
                 visited_mccmnc: visited,
-                uplink_kb: uplinkKb,
-                downlink_kb: downlinkKb,
-                total_kb: totalKb,
+                uplink_mb: uplinkMb,
+                downlink_mb: downlinkMb,
+                total_mb: totalMb,
                 apn: apn ?? null,
                 rat: rat ?? null,
                 input_ref: jobId ?? null,
@@ -13087,7 +13210,7 @@ export function createApp() {
       const filterQs = filters.length ? `&${filters.join('&')}` : ''
       const { data, total } = await supabase.selectWithCount(
         'package_versions',
-        `select=package_version_id,package_id,operator_id,status,effective_from,service_type,apn,price_plan_version_id&order=${encodeURIComponent(sortCol)}.${encodeURIComponent(sortDir)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
+        `select=package_version_id,package_id,operator_id,status,effective_from,service_type,apn,price_plan_id&order=${encodeURIComponent(sortCol)}.${encodeURIComponent(sortDir)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
       )
       const nameMap = packageList.reduce((m, p) => { m[String(p.package_id)] = p.name; return m }, {})
       const operatorIds = Array.isArray(data) ? Array.from(new Set(data.map((r) => r.operator_id).filter(Boolean).map((id) => String(id)))) : []
@@ -13264,7 +13387,7 @@ export function createApp() {
       const filterQs = filters.length ? `&${filters.join('&')}` : ''
       const { data } = await supabase.selectWithCount(
         'package_versions',
-        `select=package_version_id,package_id,operator_id,status,effective_from,service_type,apn,price_plan_version_id&order=${encodeURIComponent(sortCol)}.${encodeURIComponent(sortDir)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
+        `select=package_version_id,package_id,operator_id,status,effective_from,service_type,apn,price_plan_id&order=${encodeURIComponent(sortCol)}.${encodeURIComponent(sortDir)}&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
       )
       const nameMap = packageList.reduce((m, p) => { m[String(p.package_id)] = p.name; return m }, {})
       const operatorIds = Array.isArray(data) ? Array.from(new Set(data.map((r) => r.operator_id).filter(Boolean).map((id) => String(id)))) : []

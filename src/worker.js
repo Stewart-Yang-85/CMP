@@ -3,6 +3,7 @@ import cron from 'node-cron'
 import { createSupabaseRestClient } from './supabaseRest.js'
 import { ensureValidCronExpression, resolveSystemTimeZone } from './utils/timezone.js'
 import { createWxzhonggengClient } from './vendors/wxzhonggeng.js'
+import { checkOperationSupported } from './vendors/registry.js'
 import { runBillingTask } from './billing.js'
 import { runBillingGenerate } from './services/billingGenerate.js'
 import { handleLateCdr } from './services/lateCdr.js'
@@ -515,6 +516,9 @@ async function processJobs() {
         case 'SIM_RESET_CONNECTION':
           await handleSimResetConnectionJob(job)
           break;
+        case 'SIM_STATUS_CHANGE':
+          await handleSimStatusChangeJob(job)
+          break;
         case 'WEBHOOK_DELIVERY':
           await handleWebhookDeliveryJob(job)
           break;
@@ -649,6 +653,120 @@ async function handleSimResetConnectionJob(job) {
   const payload = job.payload || {}
   const iccid = payload.iccid ? String(payload.iccid) : null
   console.log(`[Job ${job.job_id}] Resetting connection${iccid ? ` for ${iccid}` : ''}...`)
+}
+
+// --- Phase 25: SIM Status Change Job Handler (T141a, T141b, T141c) ---
+const SIM_STATUS_CHANGE_MAX_RETRIES = resolveNumber(process.env.SIM_STATUS_CHANGE_MAX_RETRIES, 3)
+
+async function computeExponentialBackoffMs(attempt) {
+  const baseMs = 1000
+  const jitter = Math.random() * 500
+  return Math.min(baseMs * Math.pow(2, attempt) + jitter, 30000)
+}
+
+async function handleSimStatusChangeJob(job) {
+  const payload = job.payload || {}
+  const iccid = payload.iccid ? String(payload.iccid) : null
+  const targetStatus = payload.targetStatus ? String(payload.targetStatus).toUpperCase() : null
+  const supplierId = payload.supplierId ? String(payload.supplierId) : null
+  const requestId = payload.requestId ?? job.request_id ?? null
+  const idempotencyKey = payload.idempotencyKey ?? null
+  const traceId = `worker-sim-status-change-${job.job_id}`
+
+  console.log(`[${traceId}] Processing SIM status change: iccid=${iccid} target=${targetStatus} supplier=${supplierId}`)
+
+  if (!iccid) {
+    throw new Error('Missing iccid in payload')
+  }
+  if (!targetStatus) {
+    throw new Error('Missing targetStatus in payload')
+  }
+
+  // T141b: Idempotency check
+  if (idempotencyKey) {
+    const existingJob = await findIdempotentJobByKey('SIM_STATUS_CHANGE', idempotencyKey)
+    if (existingJob && existingJob.job_id !== job.job_id && existingJob.status === 'SUCCEEDED') {
+      console.log(`[${traceId}] Idempotent duplicate detected, skipping. existing_job=${existingJob.job_id}`)
+      return
+    }
+  }
+
+  // T141c: Check if SPI adapter exists and supports the operation
+  const capCheck = checkOperationSupported({ supplierId, operation: 'SIM_STATUS_CHANGE' })
+  if (!capCheck.supported) {
+    const reason = capCheck.reason || 'UPSTREAM_NOT_SUPPORTED'
+    console.warn(`[${traceId}] No upstream capability for SIM_STATUS_CHANGE: ${reason}`)
+    await supabase.update('jobs', `job_id=eq.${encodeURIComponent(job.job_id)}`, {
+      status: 'FAILED',
+      finished_at: new Date().toISOString(),
+      error_summary: reason,
+    }, { returning: 'minimal' })
+    throw new Error(reason)
+  }
+
+  const adapter = capCheck.adapter
+
+  // T141b: Exponential backoff retry logic
+  const retryCount = Number(payload.retryCount ?? 0)
+  let lastError = null
+
+  for (let attempt = retryCount; attempt < SIM_STATUS_CHANGE_MAX_RETRIES; attempt++) {
+    try {
+      // T141a: Route to the appropriate SPI adapter method based on targetStatus
+      let result = null
+      const adapterParams = { iccid, idempotencyKey: idempotencyKey ?? `sim-status-${iccid}-${Date.now()}` }
+
+      switch (targetStatus) {
+        case 'ACTIVATED':
+          result = await adapter.activateSim(adapterParams)
+          break
+        case 'SUSPENDED':
+          result = await adapter.suspendSim(adapterParams)
+          break
+        default:
+          // For other status changes, try updateCardStatus directly if available
+          if (typeof adapter.updateCardStatus === 'function') {
+            result = { ok: true, status: 'COMPLETED', raw: await adapter.updateCardStatus(iccid, targetStatus) }
+          } else {
+            throw new Error(`Unsupported target status: ${targetStatus}`)
+          }
+      }
+
+      if (!result?.ok) {
+        throw new Error(result?.message || `Upstream returned failure for ${targetStatus}`)
+      }
+
+      console.log(`[${traceId}] SIM status change succeeded: iccid=${iccid} target=${targetStatus} attempt=${attempt + 1}`)
+
+      // Update SIM record in DB
+      const nowIso = new Date().toISOString()
+      await supabase.update('sims', `iccid=eq.${encodeURIComponent(iccid)}`, {
+        upstream_status: targetStatus,
+        upstream_status_updated_at: nowIso,
+      }, { returning: 'minimal' })
+
+      return // Success
+    } catch (err) {
+      lastError = err
+      console.error(`[${traceId}] Attempt ${attempt + 1}/${SIM_STATUS_CHANGE_MAX_RETRIES} failed: ${err.message}`)
+
+      if (attempt + 1 < SIM_STATUS_CHANGE_MAX_RETRIES) {
+        const backoffMs = await computeExponentialBackoffMs(attempt)
+        console.log(`[${traceId}] Retrying in ${Math.round(backoffMs)}ms...`)
+        await new Promise((resolve) => setTimeout(resolve, backoffMs))
+      }
+    }
+  }
+
+  // T141b: Max retries exhausted - dead-letter state
+  console.error(`[${traceId}] Retry exhausted after ${SIM_STATUS_CHANGE_MAX_RETRIES} attempts.`)
+  const errorMessage = `retry_exhausted: ${String(lastError?.message ?? 'unknown').slice(0, 500)}`
+  await supabase.update('jobs', `job_id=eq.${encodeURIComponent(job.job_id)}`, {
+    status: 'FAILED',
+    finished_at: new Date().toISOString(),
+    error_summary: errorMessage,
+  }, { returning: 'minimal' })
+  throw new Error(errorMessage)
 }
 
 async function handleWebhookDeliveryJob(job) {

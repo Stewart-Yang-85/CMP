@@ -20,11 +20,6 @@ export function roundAmount(value) {
   return Math.round(value * factor + Number.EPSILON) / factor
 }
 
-// Helper: Convert MB to KB with Ceiling
-function convertMbToKbCeil(mb, mbToKb = 1024) {
-  return Math.ceil(mb * mbToKb)
-}
-
 function normalizeVisitedMccMnc(value) {
   const raw = String(value || '').trim()
   if (!raw) return raw
@@ -120,8 +115,8 @@ function selectMatchingPackage(subscriptions, visitedMccMnc, packageDetailsMap) 
 }
 
 // Helper: Resolve PAYG rate
-function resolvePaygRatePerKb(mainPkg, visitedMccMnc) {
-  const planVersion = mainPkg?.resolved_price_plan_version ?? mainPkg?.price_plan_versions ?? null
+function resolvePaygRatePerMb(mainPkg, visitedMccMnc) {
+  const planVersion = mainPkg?.resolved_price_plan_version ?? mainPkg?.price_plans ?? null
   if (!mainPkg || !planVersion || !planVersion.payg_rates) return null
   
   const zones = planVersion.payg_rates.zones
@@ -214,14 +209,14 @@ function isSubscriptionActiveInPeriod(sub, rangeStart, rangeEnd) {
   return true
 }
 
-function resolveQuotaKb(pricePlan) {
+function resolveQuotaMb(pricePlan) {
   if (!pricePlan) return null
   const quotaMb = Number(pricePlan.quota_mb ?? pricePlan.per_sim_quota_mb ?? null)
   if (Number.isNaN(quotaMb) || quotaMb === null) return null
   return quotaMb
 }
 
-function resolveOverageRatePerKb(pricePlan) {
+function resolveOverageRatePerMb(pricePlan) {
   if (!pricePlan) return null
   const rate = Number(pricePlan.overage_rate_per_mb ?? null)
   if (Number.isNaN(rate) || rate === null) return null
@@ -316,7 +311,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
   // 3. Pre-fetch Packages and Price Plans (unchanged — these are global/small sets)
   const packagesData = await supabase.select(
     'package_versions',
-    'select=*,packages(*),price_plan_id,price_plan_version_id'
+    'select=*,packages(*),price_plan_id'
   )
 
   const packageMap = {}
@@ -331,50 +326,23 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
     .filter(Boolean)
     .map((id) => String(id))
   const uniquePlanIds = Array.from(new Set(pricePlanIds))
-  const versionIds = Object.values(packageMap)
-    .map((p) => p?.price_plan_version_id)
-    .filter(Boolean)
-    .map((id) => String(id))
-  const uniqueVersionIds = Array.from(new Set(versionIds))
   const latestPlanVersionMap = new Map()
-  const versionByIdMap = new Map()
   if (uniquePlanIds.length) {
     const idFilter = uniquePlanIds.map((id) => encodeURIComponent(id)).join(',')
     const rows = await supabase.select(
-      'price_plan_versions',
-      `select=price_plan_version_id,price_plan_id,version,payg_rates,monthly_fee,deactivated_monthly_fee,quota_mb,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers&price_plan_id=in.(${idFilter})&order=version.desc`
+      'price_plans',
+      `select=price_plan_id,version,payg_rates,monthly_fee,deactivated_monthly_fee,quota_mb,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers&price_plan_id=in.(${idFilter})`
     )
     const versions = Array.isArray(rows) ? rows : []
     for (const version of versions) {
-      if (version?.price_plan_version_id) {
-        versionByIdMap.set(String(version.price_plan_version_id), version)
-      }
-      if (version?.price_plan_id && !latestPlanVersionMap.has(String(version.price_plan_id))) {
+      if (version?.price_plan_id) {
         latestPlanVersionMap.set(String(version.price_plan_id), version)
-      }
-    }
-  }
-  if (uniqueVersionIds.length) {
-    const missing = uniqueVersionIds.filter((id) => !versionByIdMap.has(id))
-    if (missing.length) {
-      const idFilter = missing.map((id) => encodeURIComponent(id)).join(',')
-      const rows = await supabase.select(
-        'price_plan_versions',
-        `select=price_plan_version_id,price_plan_id,version,payg_rates,monthly_fee,deactivated_monthly_fee,quota_mb,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers&price_plan_version_id=in.(${idFilter})`
-      )
-      const versions = Array.isArray(rows) ? rows : []
-      for (const version of versions) {
-        if (version?.price_plan_version_id) versionByIdMap.set(String(version.price_plan_version_id), version)
-        if (version?.price_plan_id && !latestPlanVersionMap.has(String(version.price_plan_id))) {
-          latestPlanVersionMap.set(String(version.price_plan_id), version)
-        }
       }
     }
   }
   for (const pkg of Object.values(packageMap)) {
     const planId = pkg?.price_plan_id ? String(pkg.price_plan_id) : null
-    const versionId = pkg?.price_plan_version_id ? String(pkg.price_plan_version_id) : null
-    const resolved = (planId ? latestPlanVersionMap.get(planId) : null) || (versionId ? versionByIdMap.get(versionId) : null) || null
+    const resolved = planId ? latestPlanVersionMap.get(planId) : null
     if (resolved) pkg.resolved_price_plan_version = resolved
   }
   const pricePlanMap = new Map()
@@ -478,7 +446,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
 
   const packagePool = new Map()
   for (const [packageVersionId, pkg] of Object.entries(packageMap)) {
-    const pricePlanVersion = pkg?.resolved_price_plan_version ?? pkg?.price_plan_versions ?? null
+    const pricePlanVersion = pkg?.resolved_price_plan_version ?? pkg?.price_plans ?? null
     const pricePlanId = pkg?.price_plan_id
       ? String(pkg.price_plan_id)
       : pricePlanVersion?.price_plan_id
@@ -495,15 +463,15 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
     } else if (planType === 'FIXED_BUNDLE') {
       totalQuotaMb = Number(pricePlanVersion?.total_quota_mb ?? null)
     } else {
-      totalQuotaMb = resolveQuotaKb(pricePlanVersion)
+      totalQuotaMb = resolveQuotaMb(pricePlanVersion)
     }
     packagePool.set(packageVersionId, {
       planType,
       currency,
       totalQuotaMb,
-      overageRatePerMb: resolveOverageRatePerKb(pricePlanVersion),
+      overageRatePerMb: resolveOverageRatePerMb(pricePlanVersion),
       tiers: pricePlanVersion?.tiers ?? null,
-      pricePlanVersionId: pricePlanVersion?.price_plan_version_id ?? null,
+      pricePlanId: pricePlanVersion?.price_plan_id ?? null,
       pricePlanId,
     })
   }
@@ -519,7 +487,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
       for (const sub of subs) {
         const pkg = packageMap[sub.package_version_id]
         if (!pkg) continue
-        const pricePlanVersion = pkg?.resolved_price_plan_version ?? pkg?.price_plan_versions ?? null
+        const pricePlanVersion = pkg?.resolved_price_plan_version ?? pkg?.price_plans ?? null
         const pricePlanId = pkg?.price_plan_id
           ? String(pkg.price_plan_id)
           : pricePlanVersion?.price_plan_id
@@ -548,7 +516,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
               description: `${feeType} - ${pkg.packages?.name || pkg.package_version_id}`,
               currency: resolvePlanCurrency(planRow),
               chargeType: feeType,
-              pricePlanVersionId: pricePlanVersion?.price_plan_version_id ?? null,
+              pricePlanId: pricePlanVersion?.price_plan_id ?? null,
             },
           })
           totalBillAmount += fee
@@ -583,7 +551,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
         let rateApplied = null
         let matchedPackageVersionId = null
         let matchedSubscriptionId = null
-        let matchedPricePlanVersionId = null
+        let matchedPricePlanId = null
         let deductFromPackageVersionId = null
         let inProfile = false
         let alerts = []
@@ -593,8 +561,8 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
           inProfile = true
           matchedPackageVersionId = match.pkg?.package_version_id ?? null
           matchedSubscriptionId = match.sub?.subscription_id ?? null
-          const matchedPlanVersion = match.pkg?.resolved_price_plan_version ?? match.pkg?.price_plan_versions ?? null
-          matchedPricePlanVersionId = matchedPlanVersion?.price_plan_version_id ?? match.pkg?.price_plan_version_id ?? null
+          const matchedPlanVersion = match.pkg?.resolved_price_plan_version ?? match.pkg?.price_plans ?? null
+          matchedPricePlanId = matchedPlanVersion?.price_plan_id ?? match.pkg?.price_plan_id ?? null
           const pool = matchedPackageVersionId ? packagePool.get(String(matchedPackageVersionId)) : null
           const planType = pool?.planType ?? null
           if (planType === 'TIERED_VOLUME_PRICING') {
@@ -623,8 +591,8 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
             }
             currency = pool?.currency ?? currencyFallback
           } else {
-            const pricePlan = match.pkg?.resolved_price_plan_version ?? match.pkg?.price_plan_versions ?? null
-            const quotaMb = resolveQuotaKb(pricePlan)
+            const pricePlan = match.pkg?.resolved_price_plan_version ?? match.pkg?.price_plans ?? null
+            const quotaMb = resolveQuotaMb(pricePlan)
             const usageKey = `${sim.sim_id}:${matchedPackageVersionId || 'unknown'}`
             const usedKb = Number(usageByPackage.get(usageKey) || 0)
             if (quotaMb === null) {
@@ -634,7 +602,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
             } else {
               const remainingKb = Math.max(0, quotaMb - usedKb)
               const overKb = Math.max(0, totalKb - remainingKb)
-              const overageRate = resolveOverageRatePerKb(pricePlan) ?? 0
+              const overageRate = resolveOverageRatePerMb(pricePlan) ?? 0
               chargeType = overKb > 0 ? 'OVERAGE' : 'IN_PACKAGE'
               rateApplied = overKb > 0 ? overageRate : null
               chargeAmount = overKb > 0 ? roundAmount(overKb * overageRate) : 0
@@ -646,9 +614,9 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
         } else {
           const mainSub = validSubs.find(s => s.subscription_kind === 'MAIN') || activeSubs.find(s => s.subscription_kind === 'MAIN')
           const mainPkg = mainSub ? packageMap[mainSub.package_version_id] : null
-          const rate = resolvePaygRatePerKb(mainPkg, visitedMccMnc)
-          const mainPlanVersion = mainPkg?.resolved_price_plan_version ?? mainPkg?.price_plan_versions ?? null
-          matchedPricePlanVersionId = mainPlanVersion?.price_plan_version_id ?? mainPkg?.price_plan_version_id ?? null
+          const rate = resolvePaygRatePerMb(mainPkg, visitedMccMnc)
+          const mainPlanVersion = mainPkg?.resolved_price_plan_version ?? mainPkg?.price_plans ?? null
+          matchedPricePlanId = mainPlanVersion?.price_plan_id ?? mainPkg?.price_plan_id ?? null
           const mainPlanId = mainPkg?.price_plan_id ?? mainPlanVersion?.price_plan_id ?? null
           currency = resolvePlanCurrency(pricePlanMap.get(String(mainPlanId ?? '')))
           if (rate !== null) {
@@ -664,7 +632,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
 
         ratingResults.push({
           calculation_id: calcId,
-          rule_version_id: matchedPricePlanVersionId,
+          rule_version_id: matchedPricePlanId,
           enterprise_id: sim.enterprise_id ?? null,
           sim_id: sim.sim_id ?? null,
           iccid: sim.iccid ?? null,
@@ -673,7 +641,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
           input_ref: log.input_ref ?? null,
           matched_subscription_id: matchedSubscriptionId,
           matched_package_version_id: matchedPackageVersionId,
-          matched_price_plan_version_id: matchedPricePlanVersionId,
+          matched_price_plan_id: matchedPricePlanId,
           classification: chargeType,
           charged_mb: Math.max(0, Math.floor(totalKb)),
           rate_per_mb: rateApplied,
@@ -724,7 +692,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
         chargeType: 'TIERED_VOLUME',
         chargedMb: Number(usedKb || 0),
         matchedPackageVersionId: packageVersionId,
-        pricePlanVersionId: pool.pricePlanVersionId ?? null,
+        pricePlanId: pool.pricePlanId ?? null,
       },
     })
     totalBillAmount += amount

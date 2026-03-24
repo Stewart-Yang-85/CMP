@@ -38,6 +38,23 @@ function loadWxzhonggengConfig() {
   return config
 }
 
+const DEFAULT_SUPPORTED_OPERATIONS = Object.freeze([
+  'ACTIVATE',
+  'SUSPEND',
+  'RESUME',
+  'DEACTIVATE',
+  'GET_USAGE',
+  'SIM_STATUS_CHANGE',
+])
+
+function normalizeSupportedOperations(config) {
+  const raw = config?.capabilities?.supportedOperations
+  if (Array.isArray(raw) && raw.length > 0) {
+    return Object.freeze(raw.map((op) => String(op).trim().toUpperCase()).filter(Boolean))
+  }
+  return DEFAULT_SUPPORTED_OPERATIONS
+}
+
 function normalizeCapabilities(config) {
   const cap = config?.capabilities ?? {}
   const maxBatchSize = Number(cap.maxBatchSize)
@@ -47,6 +64,7 @@ function normalizeCapabilities(config) {
     supportsSftp: Boolean(cap.supportsSftp),
     supportsWebhookNotification: Boolean(cap.supportsWebhookNotification),
     maxBatchSize: Number.isFinite(maxBatchSize) && maxBatchSize > 0 ? Math.floor(maxBatchSize) : 1,
+    supportedOperations: normalizeSupportedOperations(config),
   }
 }
 
@@ -433,6 +451,15 @@ export function createWxzhonggengAdapter() {
     }
   }
 
+  function getCapabilities() {
+    return capabilities
+  }
+
+  function supportsOperation(operation) {
+    const op = String(operation ?? '').trim().toUpperCase()
+    return capabilities.supportedOperations.includes(op)
+  }
+
   return {
     supplierKey: 'wxzhonggeng',
     capabilities,
@@ -443,5 +470,7 @@ export function createWxzhonggengAdapter() {
     getDailyUsage,
     fetchCdrFiles,
     mapVendorProduct,
+    getCapabilities,
+    supportsOperation,
   }
 }
