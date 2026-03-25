@@ -48,6 +48,7 @@ export function registerGapRoutes({ app, prefix, deps }) {
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const query = req.query ?? {}
     const supplierId = query.supplierId ? String(query.supplierId).trim() : null
+    const operatorId = query.operatorId ? String(query.operatorId).trim() : null
     const status = query.status ? String(query.status).trim().toUpperCase() : null
     const p = normalizePage(query.page, 1)
     const ps = normalizePageSize(query.pageSize, 20)
@@ -60,6 +61,12 @@ export function registerGapRoutes({ app, prefix, deps }) {
       }
       filters.push(`supplier_id=eq.${encodeURIComponent(supplierId)}`)
     }
+    if (operatorId) {
+      if (!isValidUuid(operatorId)) {
+        return sendError(res, 400, 'BAD_REQUEST', 'operatorId must be a valid uuid.')
+      }
+      filters.push(`operator_id=eq.${encodeURIComponent(operatorId)}`)
+    }
     if (status) {
       filters.push(`status=eq.${encodeURIComponent(status)}`)
     }
@@ -67,16 +74,19 @@ export function registerGapRoutes({ app, prefix, deps }) {
 
     const { data, total } = await supabase.selectWithCount(
       'upstream_integrations',
-      `select=integration_id,supplier_id,name,type,config,status,created_at,updated_at&order=created_at.desc&limit=${ps}&offset=${offset}${filterQs}`
+      `select=integration_id,supplier_id,operator_id,name,type,config,status,api_endpoint,enabled,created_at,updated_at&order=created_at.desc&limit=${ps}&offset=${offset}${filterQs}`
     )
     const rows = Array.isArray(data) ? data : []
     const items = rows.map((row) => ({
       integrationId: row.integration_id,
       supplierId: row.supplier_id,
+      operatorId: row.operator_id ?? null,
       name: row.name,
       type: row.type,
       config: row.config ?? {},
       status: row.status,
+      apiEndpoint: row.api_endpoint ?? null,
+      enabled: row.enabled ?? true,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }))
@@ -89,25 +99,38 @@ export function registerGapRoutes({ app, prefix, deps }) {
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const body = req.body ?? {}
     const supplierId = body.supplierId ? String(body.supplierId).trim() : null
+    const operatorId = body.operatorId ? String(body.operatorId).trim() : null
     const name = body.name ? String(body.name).trim() : null
     const type = body.type ? String(body.type).trim().toUpperCase() : 'API'
     const config = body.config && typeof body.config === 'object' ? body.config : {}
     const status = body.status ? String(body.status).trim().toUpperCase() : 'ACTIVE'
+    const apiEndpoint = body.apiEndpoint ? String(body.apiEndpoint).trim() : null
+    const enabled = body.enabled !== undefined ? Boolean(body.enabled) : true
 
     if (!supplierId || !isValidUuid(supplierId)) {
       return sendError(res, 400, 'BAD_REQUEST', 'supplierId is required and must be a valid uuid.')
+    }
+    if (operatorId && !isValidUuid(operatorId)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'operatorId must be a valid uuid.')
     }
     if (!name) {
       return sendError(res, 400, 'BAD_REQUEST', 'name is required.')
     }
 
-    const rows = await supabase.insert('upstream_integrations', {
+    const insertPayload = {
       supplier_id: supplierId,
       name,
       type,
       config,
       status,
-    }, { returning: 'representation' })
+      api_endpoint: apiEndpoint,
+      enabled,
+    }
+    if (operatorId) {
+      insertPayload.operator_id = operatorId
+    }
+
+    const rows = await supabase.insert('upstream_integrations', insertPayload, { returning: 'representation' })
     const row = Array.isArray(rows) ? rows[0] : null
     if (!row) {
       return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create upstream integration.')
@@ -115,10 +138,13 @@ export function registerGapRoutes({ app, prefix, deps }) {
     res.status(201).json({
       integrationId: row.integration_id,
       supplierId: row.supplier_id,
+      operatorId: row.operator_id ?? null,
       name: row.name,
       type: row.type,
       config: row.config ?? {},
       status: row.status,
+      apiEndpoint: row.api_endpoint ?? null,
+      enabled: row.enabled ?? true,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     })
@@ -162,12 +188,26 @@ export function registerGapRoutes({ app, prefix, deps }) {
       })
     )
 
+    // byType: group open (non-acknowledged) alerts by alert_type
+    const { data: typeRows } = await supabase.selectWithCount(
+      'alerts',
+      `select=alert_type&status=eq.OPEN`
+    )
+    const typeCountMap = {}
+    const typeRowsArr = Array.isArray(typeRows) ? typeRows : []
+    for (const row of typeRowsArr) {
+      const t = row.alert_type ?? 'UNKNOWN'
+      typeCountMap[t] = (typeCountMap[t] ?? 0) + 1
+    }
+    const byType = Object.entries(typeCountMap).map(([type, count]) => ({ type, count }))
+
     const totalOpen = statusCounts.find((s) => s.status === 'OPEN')?.count ?? 0
 
     res.json({
       totalOpen,
       byStatus: statusCounts,
       bySeverity: severityCounts,
+      byType,
     })
   })
 

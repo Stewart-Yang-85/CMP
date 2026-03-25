@@ -52,16 +52,19 @@ export function parseSimIdentifier(value) {
 export async function loadSim(supabase, idField, idValue, tenantQs) {
   const rows = await supabase.select(
     'sims',
-    `select=sim_id,iccid,primary_imsi,msisdn,status,apn,activation_date,bound_imei,form_factor,activation_code,upstream_status,upstream_status_updated_at,supplier_id,operator_id,enterprise_id,department_id,created_at&${idField}=eq.${encodeURIComponent(idValue)}${tenantQs}&limit=1`
+    `select=sim_id,iccid,primary_imsi,msisdn,status,lifecycle_sub_status,apn,activation_date,bound_imei,form_factor,activation_code,upstream_status,upstream_status_updated_at,supplier_id,operator_id,enterprise_id,department_id,created_at&${idField}=eq.${encodeURIComponent(idValue)}${tenantQs}&limit=1`
   )
   return Array.isArray(rows) ? rows[0] : null
 }
 
-async function updateSimStatus({ supabase, sim, newStatus, source, requestId, reason, actorRole, sourceIp, emitEvent = true }) {
+async function updateSimStatus({ supabase, sim, newStatus, source, requestId, reason, actorRole, sourceIp, emitEvent = true, lifecycleSubStatus }) {
   const nowIso = new Date().toISOString()
   const update = {
     status: newStatus,
     last_status_change_at: nowIso,
+  }
+  if (lifecycleSubStatus !== undefined) {
+    update.lifecycle_sub_status = lifecycleSubStatus
   }
   if (newStatus === 'ACTIVATED' && !sim.activation_date) {
     update.activation_date = nowIso
@@ -177,15 +180,23 @@ async function loadEnterpriseStatus(supabase, enterpriseId) {
   return row?.enterprise_status ? String(row.enterprise_status) : null
 }
 
-export async function fetchSimStateHistory({ supabase, simIdentifier, tenantQs, page, limit }) {
+export async function fetchSimStateHistory({ supabase, simIdentifier, tenantQs, page, limit, from, to }) {
   const sim = await loadSim(supabase, simIdentifier.field, simIdentifier.value, tenantQs)
   if (!sim) {
     return toError(404, 'RESOURCE_NOT_FOUND', 'sim not found.')
   }
   const offset = Math.max(0, (Math.max(1, page) - 1) * Math.max(0, limit))
+  const dateFilters = []
+  if (from) {
+    dateFilters.push(`start_time=gte.${encodeURIComponent(from)}`)
+  }
+  if (to) {
+    dateFilters.push(`start_time=lte.${encodeURIComponent(to)}`)
+  }
+  const dateFilterQs = dateFilters.length ? `&${dateFilters.join('&')}` : ''
   const { data, total } = await supabase.selectWithCount(
     'sim_state_history',
-    `select=before_status,after_status,start_time,source,request_id&sim_id=eq.${encodeURIComponent(sim.sim_id)}&order=start_time.desc&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`
+    `select=before_status,after_status,start_time,source,request_id&sim_id=eq.${encodeURIComponent(sim.sim_id)}${dateFilterQs}&order=start_time.desc&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`
   )
   const rows = Array.isArray(data) ? data : []
   return {
@@ -274,8 +285,14 @@ export async function changeSimStatus({
   })
   const job = Array.isArray(jobRows) ? jobRows[0] : null
   const jobId = job?.job_id ?? null
+  const isActivation = newStatus === 'ACTIVATED'
   let succeeded = true
   try {
+    if (isActivation) {
+      await supabase.update('sims', `sim_id=eq.${encodeURIComponent(sim.sim_id)}`, {
+        lifecycle_sub_status: 'activating',
+      }, { returning: 'minimal' })
+    }
     await updateSimStatus({
       supabase,
       sim,
@@ -285,6 +302,7 @@ export async function changeSimStatus({
       reason: reason ?? null,
       actorRole: actor?.role ?? actor?.roleScope ?? null,
       sourceIp,
+      lifecycleSubStatus: isActivation ? 'normal' : undefined,
     })
     if (pushSimStatusToUpstream) {
       await pushSimStatusToUpstream({
@@ -296,6 +314,12 @@ export async function changeSimStatus({
     }
   } catch {
     succeeded = false
+    if (isActivation) {
+      await supabase.update('sims', `sim_id=eq.${encodeURIComponent(sim.sim_id)}`, {
+        lifecycle_sub_status: 'activation_failed',
+        status: sim.status,
+      }, { returning: 'minimal' })
+    }
   }
   if (jobId) {
     await supabase.update('jobs', `job_id=eq.${encodeURIComponent(jobId)}`, {

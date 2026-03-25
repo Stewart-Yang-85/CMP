@@ -730,7 +730,7 @@ describe('phase5', () => {
     expect(result.ok).toBe(false)
     if (!result.ok) {
       expect(result.code).toBe('BAD_REQUEST')
-      expect(result.message).toBe('supplierId or operatorId is required.')
+      expect(result.message).toBe('supplierId, operatorId, or apnProfileId is required.')
     }
   })
 
@@ -804,7 +804,7 @@ describe('phase5', () => {
     expect(result.ok).toBe(false)
     if (!result.ok) {
       expect(result.code).toBe('BAD_REQUEST')
-      expect(result.message).toBe('supplierId or operatorId is required.')
+      expect(result.message).toBe('supplierId, operatorId, or roamingProfileId is required.')
     }
   })
 
@@ -2111,6 +2111,7 @@ describe('phase5', () => {
       enterprise_id: enterpriseId,
       subscription_kind: 'MAIN',
       state: 'ACTIVE',
+      effective_at: new Date().toISOString(),
     })
     const result = await createSubscription({
       supabase,
@@ -2158,7 +2159,7 @@ describe('phase5', () => {
     })
     expect(result.ok).toBe(true)
     const oldSub = supabase.getTable('subscriptions').find((r) => r.subscription_id === oldSubId)
-    expect(oldSub?.state).toBe('EXPIRED')
+    expect(oldSub?.state).toBe('ACTIVE')
     const newSub = supabase.getTable('subscriptions').find((r) => r.subscription_id !== oldSubId)
     expect(newSub?.state).toBe('PENDING')
   })
@@ -2168,7 +2169,7 @@ describe('phase5', () => {
     supabase.getTable('subscriptions').push({
       subscription_id: subId,
       enterprise_id: enterpriseId,
-      state: 'ACTIVE',
+      state: 'PENDING',
     })
     const result = await cancelSubscription({
       supabase,

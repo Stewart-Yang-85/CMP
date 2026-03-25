@@ -1286,3 +1286,326 @@ export async function publishRoamingProfile({
   })
   return result
 }
+
+export async function cloneApnProfile({
+  supabase,
+  apnProfileId,
+  payload,
+  audit,
+}: {
+  supabase: SupabaseClient
+  apnProfileId: string
+  payload?: any
+  audit?: AuditContext
+}): Promise<ServiceResult<Record<string, unknown>>> {
+  if (!isValidUuid(apnProfileId)) return toError(400, 'BAD_REQUEST', 'apnProfileId must be a valid uuid.')
+  const source = await loadProfile(supabase, 'apn_profiles', 'apn_profile_id', apnProfileId)
+  if (!source) return toError(404, 'NOT_FOUND', 'Source APN profile not found.')
+  const name = payload?.name ? String(payload.name).trim() : `${(source as any).name} (Copy)`
+  const rows = await supabase.insert(
+    'apn_profiles',
+    {
+      name,
+      apn: (source as any).apn,
+      auth_type: (source as any).auth_type,
+      username: (source as any).username ?? null,
+      password_ref: (source as any).password_ref ?? null,
+      supplier_id: (source as any).supplier_id,
+      operator_id: (source as any).operator_id,
+      status: 'ACTIVE',
+    },
+    { returning: 'representation' }
+  )
+  const cloned = Array.isArray(rows) ? rows[0] as any : null
+  if (!cloned?.apn_profile_id) return toError(500, 'INTERNAL_ERROR', 'Failed to clone APN profile.')
+  const latestVersion = await loadLatestProfileVersion(supabase, 'APN', apnProfileId)
+  const config = (latestVersion as any)?.config ?? {
+    apn: (source as any).apn,
+    authType: (source as any).auth_type,
+    username: (source as any).username ?? null,
+    passwordRef: (source as any).password_ref ?? null,
+  }
+  const versionRows = await insertProfileVersionWithFallback(
+    supabase,
+    {
+      profile_type: 'APN',
+      profile_id: cloned.apn_profile_id,
+      version: 1,
+      status: 'DRAFT',
+      config,
+    },
+    'representation'
+  )
+  const version = Array.isArray(versionRows) ? versionRows[0] as any : null
+  await writeAuditLog(supabase, {
+    actor_user_id: audit?.actorUserId ?? null,
+    actor_role: audit?.actorRole ?? null,
+    tenant_id: null,
+    action: 'APN_PROFILE_CLONED',
+    target_type: 'APN_PROFILE',
+    target_id: cloned.apn_profile_id,
+    request_id: audit?.requestId ?? null,
+    source_ip: audit?.sourceIp ?? null,
+    after_data: {
+      apnProfileId: cloned.apn_profile_id,
+      sourceApnProfileId: apnProfileId,
+      profileVersionId: version?.profile_version_id ?? null,
+    },
+  })
+  return {
+    ok: true,
+    value: {
+      profileId: cloned.apn_profile_id,
+      apnProfileId: cloned.apn_profile_id,
+      sourceApnProfileId: apnProfileId,
+      profileVersionId: version?.profile_version_id ?? null,
+      version: version?.version ?? 1,
+      status: 'DRAFT',
+      createdAt: cloned.created_at,
+    },
+  }
+}
+
+export async function cloneRoamingProfile({
+  supabase,
+  roamingProfileId,
+  payload,
+  audit,
+}: {
+  supabase: SupabaseClient
+  roamingProfileId: string
+  payload?: any
+  audit?: AuditContext
+}): Promise<ServiceResult<Record<string, unknown>>> {
+  if (!isValidUuid(roamingProfileId)) return toError(400, 'BAD_REQUEST', 'roamingProfileId must be a valid uuid.')
+  const source = await loadProfile(supabase, 'roaming_profiles', 'roaming_profile_id', roamingProfileId)
+  if (!source) return toError(404, 'NOT_FOUND', 'Source roaming profile not found.')
+  const name = payload?.name ? String(payload.name).trim() : `${(source as any).name} (Copy)`
+  const rows = await supabase.insert(
+    'roaming_profiles',
+    {
+      name,
+      mccmnc_list: (source as any).mccmnc_list,
+      supplier_id: (source as any).supplier_id,
+      operator_id: (source as any).operator_id,
+      status: 'ACTIVE',
+    },
+    { returning: 'representation' }
+  )
+  const cloned = Array.isArray(rows) ? rows[0] as any : null
+  if (!cloned?.roaming_profile_id) return toError(500, 'INTERNAL_ERROR', 'Failed to clone roaming profile.')
+  const latestVersion = await loadLatestProfileVersion(supabase, 'ROAMING', roamingProfileId)
+  const config = (latestVersion as any)?.config ?? { mccmncList: (source as any).mccmnc_list }
+  const versionRows = await insertProfileVersionWithFallback(
+    supabase,
+    {
+      profile_type: 'ROAMING',
+      profile_id: cloned.roaming_profile_id,
+      version: 1,
+      status: 'DRAFT',
+      config,
+    },
+    'representation'
+  )
+  const version = Array.isArray(versionRows) ? versionRows[0] as any : null
+  await writeAuditLog(supabase, {
+    actor_user_id: audit?.actorUserId ?? null,
+    actor_role: audit?.actorRole ?? null,
+    tenant_id: null,
+    action: 'ROAMING_PROFILE_CLONED',
+    target_type: 'ROAMING_PROFILE',
+    target_id: cloned.roaming_profile_id,
+    request_id: audit?.requestId ?? null,
+    source_ip: audit?.sourceIp ?? null,
+    after_data: {
+      roamingProfileId: cloned.roaming_profile_id,
+      sourceRoamingProfileId: roamingProfileId,
+      profileVersionId: version?.profile_version_id ?? null,
+    },
+  })
+  return {
+    ok: true,
+    value: {
+      profileId: cloned.roaming_profile_id,
+      roamingProfileId: cloned.roaming_profile_id,
+      sourceRoamingProfileId: roamingProfileId,
+      profileVersionId: version?.profile_version_id ?? null,
+      version: version?.version ?? 1,
+      status: 'DRAFT',
+      createdAt: cloned.created_at,
+    },
+  }
+}
+
+export async function updateApnProfile({
+  supabase,
+  apnProfileId,
+  payload,
+  audit,
+}: {
+  supabase: SupabaseClient
+  apnProfileId: string
+  payload?: any
+  audit?: AuditContext
+}): Promise<ServiceResult<Record<string, unknown>>> {
+  if (!isValidUuid(apnProfileId)) return toError(400, 'BAD_REQUEST', 'apnProfileId must be a valid uuid.')
+  const profile = await loadProfile(supabase, 'apn_profiles', 'apn_profile_id', apnProfileId) as any
+  if (!profile) return toError(404, 'NOT_FOUND', 'APN profile not found.')
+  const latestVersion = await loadLatestProfileVersion(supabase, 'APN', apnProfileId) as any
+  if (latestVersion && latestVersion.status !== 'DRAFT') {
+    return toError(409, 'INVALID_STATUS', 'Only DRAFT APN profiles can be updated. Create a new version first.')
+  }
+  const updates: Record<string, unknown> = {}
+  if (payload?.name !== undefined) updates.name = String(payload.name).trim()
+  if (payload?.apn !== undefined) updates.apn = String(payload.apn).trim()
+  if (payload?.authType !== undefined) updates.auth_type = String(payload.authType)
+  if (payload?.username !== undefined) updates.username = payload.username ? String(payload.username) : null
+  if (payload?.passwordRef !== undefined) updates.password_ref = payload.passwordRef ? String(payload.passwordRef) : null
+  if (!Object.keys(updates).length) {
+    return toError(400, 'BAD_REQUEST', 'At least one field must be provided for update.')
+  }
+  updates.updated_at = new Date().toISOString()
+  await supabase.update(
+    'apn_profiles',
+    `apn_profile_id=eq.${encodeURIComponent(apnProfileId)}`,
+    updates,
+    { returning: 'minimal' }
+  )
+  if (latestVersion?.profile_version_id) {
+    const config = {
+      apn: (updates.apn as string) ?? profile.apn,
+      authType: (updates.auth_type as string) ?? profile.auth_type,
+      username: updates.username !== undefined ? updates.username : profile.username,
+      passwordRef: updates.password_ref !== undefined ? updates.password_ref : profile.password_ref,
+    }
+    await supabase.update(
+      'profile_versions',
+      `profile_version_id=eq.${encodeURIComponent(latestVersion.profile_version_id)}`,
+      { config },
+      { returning: 'minimal' }
+    )
+  }
+  const refreshed = await loadProfile(supabase, 'apn_profiles', 'apn_profile_id', apnProfileId) as any
+  await writeAuditLog(supabase, {
+    actor_user_id: audit?.actorUserId ?? null,
+    actor_role: audit?.actorRole ?? null,
+    tenant_id: null,
+    action: 'APN_PROFILE_UPDATED',
+    target_type: 'APN_PROFILE',
+    target_id: apnProfileId,
+    request_id: audit?.requestId ?? null,
+    source_ip: audit?.sourceIp ?? null,
+    before_data: {
+      name: profile.name,
+      apn: profile.apn,
+      authType: profile.auth_type,
+    },
+    after_data: {
+      name: refreshed?.name,
+      apn: refreshed?.apn,
+      authType: refreshed?.auth_type,
+    },
+  })
+  const versions = await loadProfileVersions(supabase, 'APN', apnProfileId)
+  return {
+    ok: true,
+    value: {
+      apnProfileId: refreshed.apn_profile_id,
+      name: refreshed.name,
+      apn: refreshed.apn,
+      authType: refreshed.auth_type,
+      username: refreshed.username,
+      passwordRef: refreshed.password_ref,
+      supplierId: refreshed.supplier_id,
+      operatorId: refreshed.operator_id,
+      status: refreshed.status,
+      createdAt: refreshed.created_at,
+      updatedAt: refreshed.updated_at,
+      currentVersion: mapProfileVersion(versions[0] ?? null),
+    },
+  }
+}
+
+export async function updateRoamingProfile({
+  supabase,
+  roamingProfileId,
+  payload,
+  audit,
+}: {
+  supabase: SupabaseClient
+  roamingProfileId: string
+  payload?: any
+  audit?: AuditContext
+}): Promise<ServiceResult<Record<string, unknown>>> {
+  if (!isValidUuid(roamingProfileId)) return toError(400, 'BAD_REQUEST', 'roamingProfileId must be a valid uuid.')
+  const profile = await loadProfile(supabase, 'roaming_profiles', 'roaming_profile_id', roamingProfileId) as any
+  if (!profile) return toError(404, 'NOT_FOUND', 'Roaming profile not found.')
+  const latestVersion = await loadLatestProfileVersion(supabase, 'ROAMING', roamingProfileId) as any
+  if (latestVersion && latestVersion.status !== 'DRAFT') {
+    return toError(409, 'INVALID_STATUS', 'Only DRAFT roaming profiles can be updated. Create a new version first.')
+  }
+  const updates: Record<string, unknown> = {}
+  if (payload?.name !== undefined) updates.name = String(payload.name).trim()
+  let normalizedList: unknown[] | null = null
+  if (payload?.mccmncList !== undefined) {
+    const list = Array.isArray(payload.mccmncList) ? payload.mccmncList : []
+    if (!list.length) return toError(400, 'BAD_REQUEST', 'mccmncList must not be empty.')
+    const normalized = normalizeRoamingEntryList(list)
+    if (!normalized.ok) return toError(400, 'BAD_REQUEST', (normalized as any).message)
+    normalizedList = (normalized as any).value
+    updates.mccmnc_list = normalizedList
+  }
+  if (!Object.keys(updates).length) {
+    return toError(400, 'BAD_REQUEST', 'At least one field must be provided for update.')
+  }
+  updates.updated_at = new Date().toISOString()
+  await supabase.update(
+    'roaming_profiles',
+    `roaming_profile_id=eq.${encodeURIComponent(roamingProfileId)}`,
+    updates,
+    { returning: 'minimal' }
+  )
+  if (normalizedList && latestVersion?.profile_version_id) {
+    await supabase.update(
+      'profile_versions',
+      `profile_version_id=eq.${encodeURIComponent(latestVersion.profile_version_id)}`,
+      { config: { mccmncList: normalizedList } },
+      { returning: 'minimal' }
+    )
+  }
+  const refreshed = await loadProfile(supabase, 'roaming_profiles', 'roaming_profile_id', roamingProfileId) as any
+  await writeAuditLog(supabase, {
+    actor_user_id: audit?.actorUserId ?? null,
+    actor_role: audit?.actorRole ?? null,
+    tenant_id: null,
+    action: 'ROAMING_PROFILE_UPDATED',
+    target_type: 'ROAMING_PROFILE',
+    target_id: roamingProfileId,
+    request_id: audit?.requestId ?? null,
+    source_ip: audit?.sourceIp ?? null,
+    before_data: {
+      name: profile.name,
+      mccmncList: profile.mccmnc_list,
+    },
+    after_data: {
+      name: refreshed?.name,
+      mccmncList: refreshed?.mccmnc_list,
+    },
+  })
+  const versions = await loadProfileVersions(supabase, 'ROAMING', roamingProfileId)
+  return {
+    ok: true,
+    value: {
+      roamingProfileId: refreshed.roaming_profile_id,
+      name: refreshed.name,
+      mccmncList: refreshed.mccmnc_list,
+      supplierId: refreshed.supplier_id,
+      operatorId: refreshed.operator_id ?? null,
+      carrierId: refreshed.operator_id ?? null,
+      status: refreshed.status,
+      createdAt: refreshed.created_at,
+      updatedAt: refreshed.updated_at,
+      currentVersion: mapProfileVersion(versions[0] ?? null),
+    },
+  }
+}

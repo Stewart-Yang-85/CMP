@@ -49,11 +49,8 @@ const basePermissions = [
 ]
 
 const defaultPermissionsByRoleScope: Record<string, string[]> = {
-  customer: basePermissions.slice(),
+  customer: basePermissions.filter((p) => !p.startsWith('bills.')),
   department: [
-    'bills.list',
-    'bills.read',
-    'bills.export',
     'sims.list',
     'sims.read',
     'sims.export',
@@ -243,14 +240,14 @@ export function buildTenantFilter(auth: AuthContext, opts: { field?: string } = 
     return `${field}=eq.${encodeURIComponent(customerId)}`
   }
 
-  // Reseller scope: filter by reseller's tenant_id (parent of customer tenants)
+  // Reseller scope: requires async DB lookup to resolve child enterprise IDs.
+  // The sync version cannot do this correctly — return deny-all to avoid data leakage.
+  // Callers handling reseller scope MUST use buildTenantFilterAsync instead.
   if (roleScope === 'reseller') {
-    const resellerId = auth.resellerId
-    if (!resellerId) return `${field}=eq.00000000-0000-0000-0000-000000000000` // deny all
-    // For reseller, we need to filter by the reseller's child enterprise IDs
-    // This requires a sub-query approach or pre-fetched enterprise list
-    // Using reseller_id field if available on the table, otherwise enterprise_id filter
-    return `${field}=eq.${encodeURIComponent(resellerId)}`
+    console.warn(
+      'buildTenantFilter sync does not support reseller scope correctly, use buildTenantFilterAsync instead'
+    )
+    return `${field}=eq.00000000-0000-0000-0000-000000000000`
   }
 
   // Unknown scope: deny all

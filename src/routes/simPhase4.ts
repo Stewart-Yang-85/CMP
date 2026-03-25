@@ -884,7 +884,9 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
       if (actionValue === 'RETIRE' && body.confirm !== true) {
         return sendError(reply, 400, 'BAD_REQUEST', 'confirm must be true.')
       }
-      const simIds = Array.isArray(body.simIds) ? body.simIds.map((v) => String(v)) : []
+      // Accept both simIds (spec) and iccids (legacy) for backward compatibility.
+      const ids = body.simIds || body.iccids
+      const simIds = Array.isArray(ids) ? (ids as unknown[]).map((v) => String(v)) : []
       if (simIds.length === 0) {
         return sendError(reply, 400, 'BAD_REQUEST', 'simIds must be a non-empty array.')
       }

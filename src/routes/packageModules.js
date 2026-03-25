@@ -2,10 +2,14 @@ import {
   createCarrierService,
   createCommercialTerms,
   createControlPolicy,
+  cloneCommercialTerms,
+  cloneControlPolicy,
   getCarrierServiceDetail,
   getCommercialTermsDetail,
   getControlPolicyDetail,
   listCarrierServices,
+  listCommercialTerms,
+  listControlPolicies,
   updateCarrierService,
   updateCommercialTerms,
   updateControlPolicy,
@@ -71,6 +75,41 @@ export function registerPackageModuleRoutes({ app, prefix, deps }) {
     res.json(result.value)
   })
 
+  app.get(`${prefix}/commercial-terms`, async (req, res) => {
+    const auth = ensureResellerSales(req, res)
+    if (!auth) return
+    const { status, page, pageSize, enterpriseId: enterpriseIdRaw } = req.query ?? {}
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    let enterpriseId = enterpriseIdRaw ? String(enterpriseIdRaw).trim() : null
+    if (auth.scope === 'reseller') {
+      if (!enterpriseId || !isValidUuid(enterpriseId)) {
+        return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+      }
+      enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, enterpriseId)
+      if (!enterpriseId) return
+    } else if (enterpriseId && !isValidUuid(enterpriseId)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+    }
+    const result = await listCommercialTerms({ supabase, status, page, pageSize, enterpriseId })
+    if (!result.ok) return sendError(res, result.status, result.code, result.message)
+    res.json(result.value)
+  })
+
+  app.post(`${prefix}/commercial-terms/:commercialTermsId\\:clone`, async (req, res) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const commercialTermsId = String(req.params.commercialTermsId || '').trim()
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const result = await cloneCommercialTerms({
+      supabase,
+      commercialTermsId,
+      payload: req.body ?? {},
+      audit: buildAudit(req, auth),
+    })
+    if (!result.ok) return sendError(res, result.status, result.code, result.message)
+    res.status(201).json(result.value)
+  })
+
   app.post(`${prefix}/control-policies:validate`, async (req, res) => {
     const auth = ensureResellerAdmin(req, res)
     if (!auth) return
@@ -110,6 +149,41 @@ export function registerPackageModuleRoutes({ app, prefix, deps }) {
     const result = await getControlPolicyDetail({ supabase, controlPolicyId: req.params?.controlPolicyId })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
     res.json(result.value)
+  })
+
+  app.get(`${prefix}/control-policies`, async (req, res) => {
+    const auth = ensureResellerSales(req, res)
+    if (!auth) return
+    const { status, page, pageSize, enterpriseId: enterpriseIdRaw } = req.query ?? {}
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    let enterpriseId = enterpriseIdRaw ? String(enterpriseIdRaw).trim() : null
+    if (auth.scope === 'reseller') {
+      if (!enterpriseId || !isValidUuid(enterpriseId)) {
+        return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+      }
+      enterpriseId = await resolveEnterpriseForReseller(req, res, supabase, enterpriseId)
+      if (!enterpriseId) return
+    } else if (enterpriseId && !isValidUuid(enterpriseId)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+    }
+    const result = await listControlPolicies({ supabase, status, page, pageSize, enterpriseId })
+    if (!result.ok) return sendError(res, result.status, result.code, result.message)
+    res.json(result.value)
+  })
+
+  app.post(`${prefix}/control-policies/:controlPolicyId\\:clone`, async (req, res) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const controlPolicyId = String(req.params.controlPolicyId || '').trim()
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const result = await cloneControlPolicy({
+      supabase,
+      controlPolicyId,
+      payload: req.body ?? {},
+      audit: buildAudit(req, auth),
+    })
+    if (!result.ok) return sendError(res, result.status, result.code, result.message)
+    res.status(201).json(result.value)
   })
 
   app.post(`${prefix}/carrier-services:validate`, async (req, res) => {

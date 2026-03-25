@@ -235,6 +235,7 @@ describe('assign departments route', () => {
           userId: listUserId,
           enterpriseId,
           email: 'ops@example.com',
+          name: 'Ops User',
           displayName: 'Ops User',
           role: 'customer_ops',
           status: 'ACTIVE',

@@ -363,7 +363,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
 
     const filterQs = filters.length ? `&${filters.join('&')}` : ''
     const simSelectFields = [
-      'sim_id', 'iccid', 'primary_imsi', 'msisdn', 'status', 'apn', 'activation_date', 'bound_imei', 'activation_code',
+      'sim_id', 'iccid', 'primary_imsi', 'msisdn', 'status', 'lifecycle_sub_status', 'apn', 'activation_date', 'bound_imei', 'activation_code',
       'supplier_id', 'operator_id',
       ...(hasSimResellerColumn ? ['reseller_id'] : []),
       'enterprise_id', 'department_id', 'form_factor', 'upstream_status', 'upstream_status_updated_at', 'remark', 'created_at',
@@ -458,7 +458,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
         escapeCsv(r.primary_imsi ?? ''),
         escapeCsv(r.msisdn ?? ''),
         escapeCsv(r.status ?? ''),
-        escapeCsv(''),
+        escapeCsv(r.lifecycle_sub_status || 'normal'),
         escapeCsv(r.upstream_status ?? ''),
         escapeCsv(toIsoDateTime(r.upstream_status_updated_at) ?? ''),
         escapeCsv(r.form_factor ?? ''),
@@ -806,7 +806,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
 
     const { data, total } = await supabase.selectWithCount(
       'sims',
-      `select=sim_id,iccid,primary_imsi,msisdn,status,apn,activation_date,bound_imei,activation_code,supplier_id,operator_id,enterprise_id,department_id,form_factor,upstream_status,upstream_status_updated_at,remark,created_at,suppliers(name),operators(name)&order=iccid.asc&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
+      `select=sim_id,iccid,primary_imsi,msisdn,status,lifecycle_sub_status,apn,activation_date,bound_imei,activation_code,supplier_id,operator_id,enterprise_id,department_id,form_factor,upstream_status,upstream_status_updated_at,remark,created_at,suppliers(name),operators(name)&order=iccid.asc&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}${filterQs}`
     )
 
     const rows = Array.isArray(data) ? data : []
@@ -832,7 +832,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       imsi: r.primary_imsi,
       msisdn: r.msisdn,
       status: r.status,
-      lifecycleSubStatus: null,
+      lifecycleSubStatus: r.lifecycle_sub_status || 'normal',
       upstreamStatus: r.upstream_status ?? null,
       upstreamStatusUpdatedAt: r.upstream_status_updated_at ?? null,
       formFactor: r.form_factor ?? null,
@@ -1045,7 +1045,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     const filterQs = filters.length ? `&${filters.join('&')}` : ''
 
     const simSelectFields = [
-      'sim_id', 'iccid', 'primary_imsi', 'msisdn', 'status', 'apn', 'activation_date', 'bound_imei', 'activation_code',
+      'sim_id', 'iccid', 'primary_imsi', 'msisdn', 'status', 'lifecycle_sub_status', 'apn', 'activation_date', 'bound_imei', 'activation_code',
       'supplier_id', 'operator_id',
       ...(hasSimResellerColumn ? ['reseller_id'] : []),
       'enterprise_id', 'department_id', 'form_factor', 'upstream_status', 'upstream_status_updated_at', 'remark', 'created_at',
@@ -1116,7 +1116,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
         imsi: r.primary_imsi,
         msisdn: r.msisdn,
         status: r.status,
-        lifecycleSubStatus: null,
+        lifecycleSubStatus: r.lifecycle_sub_status || 'normal',
         upstreamStatus: r.upstream_status ?? null,
         upstreamStatusUpdatedAt: r.upstream_status_updated_at ?? null,
         formFactor: r.form_factor ?? null,
@@ -1177,14 +1177,14 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
 
     const rows = await supabase.select(
       'sims',
-      `select=sim_id,iccid,primary_imsi,msisdn,status,apn,activation_date,bound_imei,activation_code,supplier_id,operator_id,enterprise_id,department_id,form_factor,upstream_status,upstream_status_updated_at,remark,created_at,suppliers(name),operators(name)&${simIdResult.field}=eq.${encodeURIComponent(simIdResult.value)}&limit=1`
+      `select=sim_id,iccid,primary_imsi,msisdn,status,lifecycle_sub_status,apn,activation_date,bound_imei,activation_code,supplier_id,operator_id,enterprise_id,department_id,form_factor,upstream_status,upstream_status_updated_at,remark,created_at,suppliers(name),operators(name)&${simIdResult.field}=eq.${encodeURIComponent(simIdResult.value)}&limit=1`
     )
     let sim = Array.isArray(rows) ? rows[0] : null
     if (!sim && simIdResult.field === 'iccid') {
       const iccidValue = String(simIdResult.value || '').trim()
       const fallbackRows = await supabase.select(
         'sims',
-        `select=sim_id,iccid,primary_imsi,msisdn,status,apn,activation_date,bound_imei,activation_code,supplier_id,operator_id,enterprise_id,department_id,form_factor,upstream_status,upstream_status_updated_at,remark,created_at,suppliers(name),operators(name)&iccid=ilike.${encodeURIComponent(`%${iccidValue}%`)}&limit=20`
+        `select=sim_id,iccid,primary_imsi,msisdn,status,lifecycle_sub_status,apn,activation_date,bound_imei,activation_code,supplier_id,operator_id,enterprise_id,department_id,form_factor,upstream_status,upstream_status_updated_at,remark,created_at,suppliers(name),operators(name)&iccid=ilike.${encodeURIComponent(`%${iccidValue}%`)}&limit=20`
       )
       const candidates = Array.isArray(fallbackRows) ? fallbackRows : []
       const normalizeDigits = (value) => String(value || '').replace(/\D/g, '')
@@ -1263,7 +1263,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       imsi: sim.primary_imsi,
       msisdn: sim.msisdn,
       status: sim.status,
-      lifecycleSubStatus: null,
+      lifecycleSubStatus: sim.lifecycle_sub_status || 'normal',
       upstreamStatus: sim.upstream_status ?? null,
       upstreamStatusUpdatedAt: sim.upstream_status_updated_at ?? null,
       formFactor: sim.form_factor ?? null,
@@ -1310,6 +1310,8 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     const pageSize = req.query.pageSize ? Number(req.query.pageSize) : (req.query.limit ? Number(req.query.limit) : 20)
     const page = req.query.page ? Number(req.query.page) : 1
     const limit = Math.min(100, Math.max(1, pageSize))
+    const from = req.query.from ? String(req.query.from) : null
+    const to = req.query.to ? String(req.query.to) : null
     const tenantQs = buildSimTenantFilter(req, enterpriseId)
     const result = await fetchSimStateHistory({
       supabase,
@@ -1317,6 +1319,8 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       tenantQs,
       page,
       limit,
+      from,
+      to,
     })
     if (!result.ok) {
       return sendError(res, result.status, result.code, result.message)
@@ -1450,7 +1454,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     const auth = ensureSimReadAccess(req, res)
     if (!auth) return
     const actor = req?.cmpAuth ?? null
-    const { action, iccids, reason, enterpriseId: enterpriseIdBody, commitmentExempt, confirm } = req.body ?? {}
+    const { action, iccids, simIds: simIdsBody, reason, enterpriseId: enterpriseIdBody, commitmentExempt, confirm } = req.body ?? {}
     const actionValue = String(action || '').trim().toUpperCase()
     if (!actionValue) {
       return sendError(res, 400, 'BAD_REQUEST', 'action is required.')
@@ -1459,8 +1463,10 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       return sendError(res, 400, 'BAD_REQUEST', 'confirm must be true.')
     }
     // List of ICCIDs (18-20 digits) to process.
+    // Accept both simIds (spec) and iccids (legacy) for backward compatibility.
     // Format: ["89860012345678901234", "89860012345678901235"]
-    const rawIccids = Array.isArray(iccids) ? iccids : []
+    const ids = simIdsBody || iccids
+    const rawIccids = Array.isArray(ids) ? ids : []
     if (rawIccids.length === 0) {
       return sendError(res, 400, 'BAD_REQUEST', 'iccids must be a non-empty array.')
     }

@@ -32,7 +32,7 @@
 | ENUM | 值 | 用途 |
 |------|-----|------|
 | `reseller_status` | active, deactivated, suspended | 代理商状态 |
-| `customer_status` | active, overdue, terminated | 客户（企业）状态 |
+| `customer_status` | ACTIVE, INACTIVE, SUSPENDED | 客户（企业）状态（行政管控；overdue 移至 Dunning 层） |
 | `operator_status` | active, deprecated, error | 运营商状态（含废弃工作流） |
 | `sim_form_factor` | consumer_removable, industrial_removable, consumer_embedded, industrial_embedded | SIM 卡形态 |
 | `cdr_method` | sftp, api | CDR 话单拉取方式 |
@@ -254,7 +254,7 @@ sim_cards ──1:N──> rating_results
 | id | uuid | PK, default gen_random_uuid() | 客户 ID |
 | reseller_id | uuid | NOT NULL, FK→resellers | 所属代理商 |
 | name | text | NOT NULL | 客户名称 |
-| status | customer_status | NOT NULL, default 'active' | active / overdue / terminated |
+| status | customer_status | NOT NULL, default 'ACTIVE' | ACTIVE / INACTIVE / SUSPENDED（行政管控；overdue 移至 Dunning 层） |
 | api_key | text | UNIQUE, nullable | M2M API Key（企业自助接入） |
 | api_secret_hash | bytea | — | API Secret 哈希（bcrypt/scrypt） |
 | webhook_url | text | — | 事件回调 URL |
@@ -1264,16 +1264,16 @@ ALTER TABLE bills
 
 **用途**: 补充代理商维度和逾期追踪字段。
 
-### 6.2 `bill_line_items` 新增字段（L2 分组支持）
+### 6.2 `bill_line_items` 新增字段（L2 交叉分组支持）
 
 ```sql
 ALTER TABLE bill_line_items
-  ADD COLUMN IF NOT EXISTS group_key text,       -- 分组键：department_id / package_id
-  ADD COLUMN IF NOT EXISTS group_type text,      -- 'DEPARTMENT' / 'PACKAGE'
-  ADD COLUMN IF NOT EXISTS group_subtotal numeric(12,2);
+  ADD COLUMN IF NOT EXISTS department_id uuid REFERENCES departments(id),  -- L2 分组：部门维度
+  ADD COLUMN IF NOT EXISTS package_id uuid,                                -- L2 分组：产品包维度
+  ADD COLUMN IF NOT EXISTS group_subtotal numeric(12,2);                   -- L2 分组小计
 ```
 
-**用途**: 支持 L2 分组汇总层（US6, FR-030）。
+**用途**: 支持 L2 交叉分组汇总层（`department_id × package_id`）。每条 L3 明细行同时记录 `department_id` 和 `package_id`，L2 汇总视图按此二维度 GROUP BY 生成（US6, FR-030）。
 
 ### 6.3 `jobs` 新增字段
 

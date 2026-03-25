@@ -78,7 +78,9 @@ function denormalizePaygRates(paygRates: any) {
 }
 
 function resolveVersionStatus(version: any) {
-  if (!version || !version.effective_from) return 'DRAFT'
+  if (!version) return 'DRAFT'
+  if (version.deprecated_at) return 'DEPRECATED'
+  if (!version.effective_from) return 'DRAFT'
   const now = Date.now()
   const effective = new Date(version.effective_from).getTime()
   if (Number.isNaN(effective)) return 'DRAFT'
@@ -678,7 +680,7 @@ function validatePayload(
 async function loadPricePlan(supabase: SupabaseClient, pricePlanId: string) {
   const rows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
+    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,deprecated_at,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
   )
   return Array.isArray(rows) ? rows[0] : null
 }
@@ -686,7 +688,7 @@ async function loadPricePlan(supabase: SupabaseClient, pricePlanId: string) {
 async function loadLatestVersion(supabase: SupabaseClient, pricePlanId: string) {
   const rows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
+    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,deprecated_at,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
   )
   return Array.isArray(rows) ? rows[0] : null
 }
@@ -847,7 +849,7 @@ export async function listPricePlans({
   }
   const planRows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&enterprise_id=eq.${encodeURIComponent(enterpriseId)}${type ? `&type=eq.${encodeURIComponent(type)}` : ''}&order=created_at.desc`
+    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,deprecated_at,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&enterprise_id=eq.${encodeURIComponent(enterpriseId)}${type ? `&type=eq.${encodeURIComponent(type)}` : ''}&order=created_at.desc`
   )
   const plans = Array.isArray(planRows) ? planRows : []
   let items = plans.map((plan: any) => {
@@ -883,7 +885,7 @@ export async function getPricePlanDetail({ supabase, pricePlanId }: { supabase: 
   // In snapshot model, the plan itself contains the version data
   const cloneRows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&source_price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc`
+    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,deprecated_at,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&source_price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc`
   )
   const clones = Array.isArray(cloneRows) ? cloneRows : []
   const allSnapshots = [plan, ...clones]

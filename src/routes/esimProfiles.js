@@ -38,7 +38,7 @@ export function registerEsimRoutes({ app, prefix, deps }) {
       eid: String(eid).trim(),
       smdp_system_id: smdpSystemId ?? null,
       activation_code: activationCode ?? null,
-      status: status ?? 'AVAILABLE',
+      status: status ?? 'INVENTORY',
       remark: remark ? String(remark).slice(0, 1000) : null,
     }
     const created = await supabase.insert('esim_profiles', row, { returning: 'representation' })
@@ -94,12 +94,59 @@ export function registerEsimRoutes({ app, prefix, deps }) {
     })
   })
 
+  // ── PATCH /v1/esim-profiles/:profileId — update remark ─────
+  app.patch(`${prefix}/esim-profiles/:profileId`, async (req, res) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const profileId = String(req.params.profileId)
+    if (!isValidUuid(profileId)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'profileId must be a valid uuid.')
+    }
+    const body = req.body ?? {}
+    const allowedFields = new Set(['remark'])
+    const patchKeys = Object.keys(body).filter((k) => allowedFields.has(k))
+    if (patchKeys.length === 0) {
+      return sendError(res, 400, 'BAD_REQUEST', 'No updatable fields provided. Supported: remark.')
+    }
+    const patch = {}
+    if ('remark' in body) {
+      const remarkValue = body.remark === null ? null : String(body.remark).slice(0, 1000)
+      patch.remark = remarkValue
+    }
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const rows = await supabase.select(
+      'esim_profiles',
+      `select=profile_id,iccid,eid,status&profile_id=eq.${encodeURIComponent(profileId)}&limit=1`
+    )
+    const profile = Array.isArray(rows) ? rows[0] : null
+    if (!profile) {
+      return sendError(res, 404, 'NOT_FOUND', 'eSIM profile not found.')
+    }
+    const updatedRows = await supabase.update(
+      'esim_profiles',
+      `profile_id=eq.${encodeURIComponent(profileId)}`,
+      patch,
+      { returning: 'representation' }
+    )
+    const updated = Array.isArray(updatedRows) ? updatedRows[0] : null
+    if (!updated) {
+      return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to update eSIM profile.')
+    }
+    res.json({
+      profileId: updated.profile_id,
+      iccid: updated.iccid,
+      eid: updated.eid,
+      remark: updated.remark ?? null,
+    })
+  })
+
   // ── T171: eSIM status change routes ──────────────────────────
 
   const esimStatusActions = [
-    { action: 'activate', from: ['AVAILABLE', 'DEACTIVATED'], to: 'ACTIVATED' },
-    { action: 'deactivate', from: ['ACTIVATED'], to: 'DEACTIVATED' },
-    { action: 'retire', from: ['AVAILABLE', 'ACTIVATED', 'DEACTIVATED'], to: 'RETIRED' },
+    { action: 'activate', from: ['INVENTORY', 'TEST_READY', 'DEACTIVATED'], to: 'ACTIVATED' },
+    { action: 'deactivate', from: ['ACTIVATED', 'TEST_READY'], to: 'DEACTIVATED' },
+    { action: 'retire', from: ['DEACTIVATED'], to: 'RETIRED' },
+    { action: 'test-ready', from: ['INVENTORY'], to: 'TEST_READY' },
   ]
 
   for (const { action, from, to } of esimStatusActions) {

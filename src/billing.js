@@ -246,7 +246,7 @@ function calculateProratedFee({ fee, effectiveAt, rangeStart, rangeEnd }) {
   return roundAmount(perDayFee * activeDays)
 }
 
-function calculateTieredCharge(usageKb, tiers) {
+function calculateTieredCharge(usageMb, tiers) {
   const list = Array.isArray(tiers) ? tiers : []
   if (!list.length) return 0
   const sorted = list
@@ -258,7 +258,7 @@ function calculateTieredCharge(usageKb, tiers) {
     .filter((t) => Number.isFinite(t.fromMb) && Number.isFinite(t.toMb) && t.toMb > t.fromMb && Number.isFinite(t.ratePerMb) && t.ratePerMb >= 0)
     .sort((a, b) => a.fromMb - b.fromMb)
   if (!sorted.length) return 0
-  let remaining = Math.max(0, usageKb)
+  let remaining = Math.max(0, usageMb)
   let total = 0
   for (const tier of sorted) {
     if (remaining <= 0) break
@@ -526,8 +526,8 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
 
     if (usageLogs && usageLogs.length > 0) {
       for (const log of usageLogs) {
-        const totalKb = Number(log.total_kb || 0)
-        if (totalKb <= 0) continue
+        const totalMb = Number(log.total_mb ?? 0)
+        if (totalMb <= 0) continue
 
         const visitedMccMnc = normalizeVisitedMccMnc(log.visited_mccmnc)
         const dayStart = new Date(`${log.usage_day}T00:00:00Z`)
@@ -567,47 +567,47 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
           const planType = pool?.planType ?? null
           if (planType === 'TIERED_VOLUME_PRICING') {
             const used = Number(tieredUsageByPackage.get(String(matchedPackageVersionId)) || 0)
-            tieredUsageByPackage.set(String(matchedPackageVersionId), used + totalKb)
+            tieredUsageByPackage.set(String(matchedPackageVersionId), used + totalMb)
             chargeType = 'TIERED_VOLUME'
             deductFromPackageVersionId = matchedPackageVersionId
             currency = pool?.currency ?? currencyFallback
           } else if (planType === 'SIM_DEPENDENT_BUNDLE' || planType === 'FIXED_BUNDLE') {
             const usageKey = String(matchedPackageVersionId)
-            const usedKb = Number(poolUsageByPackage.get(usageKey) || 0)
+            const usedMb = Number(poolUsageByPackage.get(usageKey) || 0)
             const totalQuotaMb = pool?.totalQuotaMb
             if (totalQuotaMb === null || !Number.isFinite(totalQuotaMb)) {
               chargeType = 'IN_PACKAGE'
               deductFromPackageVersionId = matchedPackageVersionId
-              poolUsageByPackage.set(usageKey, usedKb + totalKb)
+              poolUsageByPackage.set(usageKey, usedMb + totalMb)
             } else {
-              const remainingKb = Math.max(0, totalQuotaMb - usedKb)
-              const overKb = Math.max(0, totalKb - remainingKb)
+              const remainingMb = Math.max(0, totalQuotaMb - usedMb)
+              const overMb = Math.max(0, totalMb - remainingMb)
               const overageRate = pool?.overageRatePerMb ?? 0
-              chargeType = overKb > 0 ? 'OVERAGE' : 'IN_PACKAGE'
-              rateApplied = overKb > 0 ? overageRate : null
-              chargeAmount = overKb > 0 ? roundAmount(overKb * overageRate) : 0
+              chargeType = overMb > 0 ? 'OVERAGE' : 'IN_PACKAGE'
+              rateApplied = overMb > 0 ? overageRate : null
+              chargeAmount = overMb > 0 ? roundAmount(overMb * overageRate) : 0
               deductFromPackageVersionId = matchedPackageVersionId
-              poolUsageByPackage.set(usageKey, usedKb + totalKb)
+              poolUsageByPackage.set(usageKey, usedMb + totalMb)
             }
             currency = pool?.currency ?? currencyFallback
           } else {
             const pricePlan = match.pkg?.resolved_price_plan_version ?? match.pkg?.price_plans ?? null
             const quotaMb = resolveQuotaMb(pricePlan)
             const usageKey = `${sim.sim_id}:${matchedPackageVersionId || 'unknown'}`
-            const usedKb = Number(usageByPackage.get(usageKey) || 0)
+            const usedMb = Number(usageByPackage.get(usageKey) || 0)
             if (quotaMb === null) {
               chargeType = 'IN_PACKAGE'
               deductFromPackageVersionId = matchedPackageVersionId
-              usageByPackage.set(usageKey, usedKb + totalKb)
+              usageByPackage.set(usageKey, usedMb + totalMb)
             } else {
-              const remainingKb = Math.max(0, quotaMb - usedKb)
-              const overKb = Math.max(0, totalKb - remainingKb)
+              const remainingMb = Math.max(0, quotaMb - usedMb)
+              const overMb = Math.max(0, totalMb - remainingMb)
               const overageRate = resolveOverageRatePerMb(pricePlan) ?? 0
-              chargeType = overKb > 0 ? 'OVERAGE' : 'IN_PACKAGE'
-              rateApplied = overKb > 0 ? overageRate : null
-              chargeAmount = overKb > 0 ? roundAmount(overKb * overageRate) : 0
+              chargeType = overMb > 0 ? 'OVERAGE' : 'IN_PACKAGE'
+              rateApplied = overMb > 0 ? overageRate : null
+              chargeAmount = overMb > 0 ? roundAmount(overMb * overageRate) : 0
               deductFromPackageVersionId = matchedPackageVersionId
-              usageByPackage.set(usageKey, usedKb + totalKb)
+              usageByPackage.set(usageKey, usedMb + totalMb)
             }
             currency = pool?.currency ?? currencyFallback
           }
@@ -620,7 +620,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
           const mainPlanId = mainPkg?.price_plan_id ?? mainPlanVersion?.price_plan_id ?? null
           currency = resolvePlanCurrency(pricePlanMap.get(String(mainPlanId ?? '')))
           if (rate !== null) {
-            chargeAmount = roundAmount(totalKb * rate)
+            chargeAmount = roundAmount(totalMb * rate)
             chargeType = simActive ? 'PAYG' : 'PAYG_INACTIVE'
             rateApplied = rate
             alerts = simActive ? ['UNEXPECTED_ROAMING'] : ['INACTIVE_USAGE', 'UNEXPECTED_ROAMING']
@@ -643,7 +643,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
           matched_package_version_id: matchedPackageVersionId,
           matched_price_plan_id: matchedPricePlanId,
           classification: chargeType,
-          charged_mb: Math.max(0, Math.floor(totalKb)),
+          charged_mb: Math.max(0, Math.floor(totalMb)),
           rate_per_mb: rateApplied,
           amount: chargeAmount,
           currency,
@@ -661,7 +661,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
               chargeType,
               inProfile,
               visitedMccMnc,
-              chargedMb: totalKb,
+              chargedMb: totalMb,
               ratePerMb: rateApplied,
               matchedPackageVersionId,
               matchedSubscriptionId,
@@ -676,10 +676,10 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
     }
   }
 
-  for (const [packageVersionId, usedKb] of tieredUsageByPackage.entries()) {
+  for (const [packageVersionId, usedMb] of tieredUsageByPackage.entries()) {
     const pool = packagePool.get(String(packageVersionId))
     if (!pool) continue
-    const amount = calculateTieredCharge(Number(usedKb || 0), pool.tiers)
+    const amount = calculateTieredCharge(Number(usedMb || 0), pool.tiers)
     if (amount <= 0) continue
     lineItems.push({
       sim_id: null,
@@ -690,7 +690,7 @@ export async function computeMonthlyCharges({ enterpriseId, billPeriod, calculat
         description: `Tiered Usage - ${packageVersionId}`,
         currency: pool.currency,
         chargeType: 'TIERED_VOLUME',
-        chargedMb: Number(usedKb || 0),
+        chargedMb: Number(usedMb || 0),
         matchedPackageVersionId: packageVersionId,
         pricePlanId: pool.pricePlanId ?? null,
       },

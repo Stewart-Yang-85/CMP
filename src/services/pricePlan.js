@@ -60,7 +60,9 @@ function denormalizePaygRates(paygRates) {
 }
 
 function resolveVersionStatus(version) {
-  if (!version || !version.effective_from) return 'DRAFT'
+  if (!version) return 'DRAFT'
+  if (version.deprecated_at) return 'DEPRECATED'
+  if (!version.effective_from) return 'DRAFT'
   const now = Date.now()
   const effective = new Date(version.effective_from).getTime()
   if (Number.isNaN(effective)) return 'DRAFT'
@@ -626,7 +628,7 @@ function validatePayload(payload, options = {}) {
 async function loadPricePlan(supabase, pricePlanId) {
   const rows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
+    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,deprecated_at,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
   )
   return Array.isArray(rows) ? rows[0] : null
 }
@@ -634,7 +636,7 @@ async function loadPricePlan(supabase, pricePlanId) {
 async function loadLatestVersion(supabase, pricePlanId) {
   const rows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
+    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,deprecated_at,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
   )
   return Array.isArray(rows) ? rows[0] : null
 }
@@ -765,7 +767,7 @@ export async function listPricePlans({ supabase, enterpriseId, type, status, pag
   }
   let planRows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&enterprise_id=eq.${encodeURIComponent(enterpriseId)}${type ? `&type=eq.${encodeURIComponent(type)}` : ''}&order=created_at.desc`
+    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,deprecated_at,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&enterprise_id=eq.${encodeURIComponent(enterpriseId)}${type ? `&type=eq.${encodeURIComponent(type)}` : ''}&order=created_at.desc`
   )
   const plans = Array.isArray(planRows) ? planRows : []
   let items = plans.map((plan) => {
@@ -801,7 +803,7 @@ export async function getPricePlanDetail({ supabase, pricePlanId }) {
   // In snapshot model, the plan itself contains the version data
   const cloneRows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&source_price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc`
+    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,deprecated_at,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&source_price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc`
   )
   const clones = Array.isArray(cloneRows) ? cloneRows : []
   const allSnapshots = [plan, ...clones]
@@ -1170,6 +1172,51 @@ export async function publishPricePlan({ supabase, pricePlanId, audit }) {
     return {
       ok: true,
       value: mapVersionResponse(published),
+    }
+  } catch (error) {
+    return mapUpstreamFailure(error)
+  }
+}
+
+export async function deprecatePricePlan({ supabase, pricePlanId, audit }) {
+  if (!isValidUuid(pricePlanId)) {
+    return toError(400, 'BAD_REQUEST', 'pricePlanId must be a valid uuid.')
+  }
+  const plan = await loadPricePlan(supabase, pricePlanId)
+  if (!plan) return toError(404, 'NOT_FOUND', 'Price plan not found.')
+  const currentStatus = resolveVersionStatus(plan)
+  if (currentStatus !== 'PUBLISHED') {
+    return toError(409, 'CONFLICT', 'Only PUBLISHED price plans can be deprecated.')
+  }
+  try {
+    const deprecatedAt = new Date().toISOString()
+    const rows = await supabase.update(
+      'price_plans',
+      `price_plan_id=eq.${encodeURIComponent(pricePlanId)}`,
+      { deprecated_at: deprecatedAt },
+      { returning: 'representation' }
+    )
+    const deprecated = Array.isArray(rows) ? rows[0] : null
+    if (!deprecated?.price_plan_id) {
+      return toError(500, 'INTERNAL_ERROR', 'Failed to deprecate price plan.')
+    }
+    await writeAuditLog(supabase, {
+      actor_user_id: audit?.actorUserId ?? null,
+      actor_role: audit?.actorRole ?? null,
+      tenant_id: plan.enterprise_id ?? null,
+      action: 'PRICE_PLAN_DEPRECATED',
+      target_type: 'PRICE_PLAN',
+      target_id: deprecated.price_plan_id,
+      request_id: audit?.requestId ?? null,
+      source_ip: audit?.sourceIp ?? null,
+      after_data: {
+        pricePlanId: deprecated.price_plan_id,
+        deprecatedAt,
+      },
+    })
+    return {
+      ok: true,
+      value: mapVersionResponse(deprecated),
     }
   } catch (error) {
     return mapUpstreamFailure(error)

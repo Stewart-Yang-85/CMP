@@ -42,7 +42,7 @@
 | ENUM | 值 |
 |------|-----|
 | `reseller_status` | ACTIVE, DEACTIVATED, SUSPENDED |
-| `customer_status` | active, overdue, terminated |
+| `customer_status` | ACTIVE, INACTIVE, SUSPENDED |
 | `operator_status` | active, deprecated, error |
 | `permission_category` | tenant, sim, subscription, billing, reporting, integration, system, webhook |
 | `role_scope` | platform, reseller, customer |
@@ -71,7 +71,7 @@
 | 白标 | ❌ 不存在 | 需新增 `reseller_branding_configs` 表和域名映射 |
 | 上游运营商管理 | ❌ 旧 `carriers` + `supplier_carriers` 表 | 需拆分为 `operators` + `upstream_integrations`（CMP.xlsx Q3）；支持废弃流程和 API/CDR 配置 |
 | 审计日志 | ✅ `audit_logs` 表含完整字段 | 无 |
-| 企业状态管理 | ⚠️ 旧 `enterprise_status` ENUM | 需迁移为 `customer_status`（active/overdue/terminated），验证状态变更事件触发逻辑 |
+| 企业状态管理 | ⚠️ 旧 `enterprise_status` ENUM | 需迁移为 `customer_status`（ACTIVE/INACTIVE/SUSPENDED），验证状态变更事件触发逻辑 |
 | GSMA MCC/MNC 校验 | ⚠️ 旧 `carriers` 表存在 | 需迁移为 `operators` 表，增加 UNIQUE(mcc, mnc) + 废弃工作流（replaced_by_id, deprecation_reason） |
 | 企业 M2M 认证 | ❌ 不存在 | 需在 `customers` 表增加 api_key/api_secret_hash/webhook_url（CMP.xlsx Q5） |
 

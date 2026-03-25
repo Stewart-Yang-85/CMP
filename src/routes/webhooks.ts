@@ -286,7 +286,8 @@ export function registerWebhookRoutes({ app, prefix, deps }: { app: any; prefix:
     res.json(result.value)
   })
 
-  app.post(`${prefix}/webhook-deliveries/:deliveryId/retry`, async (req: any, res: any) => {
+  // Colon-action pattern (spec-compliant): :retry
+  app.post(`${prefix}/webhook-deliveries/:deliveryId\\:retry`, async (req: any, res: any) => {
     const scope = resolveScope(req, res, deps)
     if (!scope) return
     const deliveryId = req.params?.deliveryId ? String(req.params.deliveryId).trim() : ''
@@ -313,5 +314,12 @@ export function registerWebhookRoutes({ app, prefix, deps }: { app: any; prefix:
     const result = await retryWebhookDelivery({ supabase, deliveryId: Number(deliveryId) })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
     res.json(result.value)
+  })
+
+  // Backward-compatible: old /retry sub-path still works
+  app.post(`${prefix}/webhook-deliveries/:deliveryId/retry`, async (req: any, res: any) => {
+    // Rewrite deliveryId param and forward to the colon-action handler
+    req.url = `${prefix}/webhook-deliveries/${encodeURIComponent(req.params.deliveryId)}:retry`
+    app.handle(req, res)
   })
 }

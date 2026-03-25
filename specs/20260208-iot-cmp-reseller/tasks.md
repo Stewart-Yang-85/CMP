@@ -1,11 +1,18 @@
 # Tasks: IoT CMP Reseller System
 
-**Feature**: `iot-cmp-reseller` | **Date**: 2026-02-08 | **Last Updated**: 2026-03-24（Phase 19+19b 合并、T141 拆分、V1.1 部署编排、Gap 补充）
+**Feature**: `iot-cmp-reseller` | **Date**: 2026-02-08 | **Last Updated**: 2026-03-25（spec 全面清理：customer_status 统一、tenants 保留、lifecycle_sub_status 仅激活、ADD_ON 取消规则、L2 交叉分组）
 **Input**: spec.md, plan.md, data-model.md, research.md, contracts/
 
 **Tests**: Vitest 单元测试覆盖计费引擎核心逻辑；保留现有 API 烟测与 E2E 脚本用于回归。
 
 **Organization**: 任务按 User Story 分组，P1 优先级（US1-US6）在前，P2（US7-US11）在后。任务按 D-31 工程评审修正后的 MVP 范围执行。
+
+**2026-03-25 Spec 清理关键变更**：
+- `customer_status` ENUM 统一为 `ACTIVE/INACTIVE/SUSPENDED`（overdue 移至 Dunning 层）
+- `tenants` 表作为身份骨架保留，与独立域表并存（非废弃）
+- `lifecycle_sub_status` 仅覆盖激活方向（normal/activating/activation_failed），停机/复机/拆机用 status_sync_conflict
+- ADD_ON 月度循环订阅取消行为与 MAIN 一致（到本计费周期结束）
+- L2 账单分组为 `department_id × package_id` 交叉分组
 
 ## MVP 范围（D-31 修正）
 
@@ -15,7 +22,7 @@
 > |------|--------------|--------------|------|
 > | 角色 | hardcode reseller（不做 RBAC） | platform_admin / reseller_admin / customer_admin | 销售总监/销售/财务/运维细分 |
 > | 资费类型 | Fixed Bundle | + One-time | SIM Dependent Bundle / Tiered Pricing |
-> | 账单 | L1+L3（手动触发） | 自动 T+N 出账 | L2 分组 / PDF/CSV 导出 |
+> | 账单 | L1+L3（手动触发） | 自动 T+N 出账 | L2 交叉分组(dept×pkg) / PDF/CSV 导出 |
 > | SIM | CRUD + 状态变更 | + 批量导入 + WX 同步 | eSIM 生命周期 |
 > | 前端 | Swagger UI + Postman | — | Web Portal |
 > | 推迟 | — | — | 白标 / 多供应商 SPI / 告警去重 / GDPR |

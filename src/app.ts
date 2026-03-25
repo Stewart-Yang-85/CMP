@@ -577,24 +577,219 @@ function registerAuthRoutes({
     return sendError(res, 500, 'INTERNAL_ERROR', 'Auth is misconfigured.')
   }
 
-  const handleAuthLogin = async (req: any, res: any) => {
-    const email = typeof req.body?.email === 'string' ? req.body.email.trim() : ''
-    const password = typeof req.body?.password === 'string' ? req.body.password : ''
-    if (!email || !password) {
-      return sendError(res, 400, 'BAD_REQUEST', 'email and password are required.')
+  // ── Helper: determine roleScope from role name ──────────────────────
+  const roleScopeFromRole = (roleName: string): string => {
+    if (!roleName) return 'customer'
+    if (roleName === 'platform_admin') return 'platform'
+    if (roleName.startsWith('reseller_')) return 'reseller'
+    if (roleName.startsWith('customer_')) return 'customer'
+    return 'customer'
+  }
+
+  // ── Mode B helper: authenticate user via email + password ──────────
+  const authenticateUserByPassword = async (req: any, res: any, email: string, password: string) => {
+    const secret = getEnvTrim('AUTH_TOKEN_SECRET')
+    if (!secret) {
+      return sendError(res, 500, 'INTERNAL_ERROR', 'Auth is misconfigured.')
     }
+    if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      return sendError(res, 500, 'INTERNAL_ERROR', 'Database auth is not configured.')
+    }
+
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+
+    // Step 1: Look up user by email
+    const userRows = await supabase.select(
+      'users',
+      `select=user_id,tenant_id,email,display_name,status,password_hash&email=eq.${encodeURIComponent(email)}&limit=1`
+    )
+    const user = Array.isArray(userRows) ? userRows[0] : null
+    if (!user) {
+      return sendError(res, 401, 'UNAUTHORIZED', 'Invalid credentials.')
+    }
+
+    // Step 2: User must be ACTIVE
+    if ((user as any).status !== 'ACTIVE') {
+      return sendError(res, 401, 'UNAUTHORIZED', '账户已停用')
+    }
+
+    // Step 3: Verify password hash exists and matches
+    if (!(user as any).password_hash) {
+      return sendError(res, 401, 'UNAUTHORIZED', 'Invalid credentials.')
+    }
+    const passwordOk = verifySecretScrypt(String(password), String((user as any).password_hash))
+    if (!passwordOk) {
+      return sendError(res, 401, 'UNAUTHORIZED', 'Invalid credentials.')
+    }
+
+    const userId = String((user as any).user_id)
+    const tenantId = String((user as any).tenant_id)
+    const displayName = readString((user as any).display_name)
+
+    // Step 4: Load user's role from user_roles table
+    const roleRows = await supabase.select(
+      'user_roles',
+      `select=role_name&user_id=eq.${encodeURIComponent(userId)}&limit=1`
+    )
+    const roleRow = Array.isArray(roleRows) ? roleRows[0] : null
+    const role = roleRow ? String((roleRow as any).role_name) : 'customer_ops'
+    const roleScope = roleScopeFromRole(role)
+
+    // Step 5: Resolve resellerId and customerId from tenant hierarchy
+    let resellerId: string | null = null
+    let customerId: string | null = null
+
+    // Load the tenant to determine its type
+    const tenantRows = await supabase.select(
+      'tenants',
+      `select=tenant_id,tenant_type,parent_id,enterprise_status&tenant_id=eq.${encodeURIComponent(tenantId)}&limit=1`
+    )
+    const tenant = Array.isArray(tenantRows) ? tenantRows[0] : null
+
+    if (tenant) {
+      const tenantType = String((tenant as any).tenant_type)
+
+      if (tenantType === 'RESELLER') {
+        resellerId = tenantId
+
+        const resellerRows = await supabase.select(
+          'resellers',
+          `select=status&tenant_id=eq.${encodeURIComponent(tenantId)}&limit=1`
+        )
+        const reseller = Array.isArray(resellerRows) ? resellerRows[0] : null
+        if (reseller && (reseller as any).status === 'SUSPENDED') {
+          return sendError(res, 401, 'UNAUTHORIZED', '账户已停用')
+        }
+      } else if (tenantType === 'ENTERPRISE') {
+        customerId = tenantId
+
+        const custRows = await supabase.select(
+          'customers',
+          `select=reseller_tenant_id&tenant_id=eq.${encodeURIComponent(tenantId)}&limit=1`
+        )
+        const cust = Array.isArray(custRows) ? custRows[0] : null
+        if (cust && (cust as any).reseller_tenant_id) {
+          resellerId = String((cust as any).reseller_tenant_id)
+
+          const resellerRows = await supabase.select(
+            'resellers',
+            `select=status&tenant_id=eq.${encodeURIComponent(resellerId)}&limit=1`
+          )
+          const reseller = Array.isArray(resellerRows) ? resellerRows[0] : null
+          if (reseller && (reseller as any).status === 'SUSPENDED') {
+            return sendError(res, 401, 'UNAUTHORIZED', '账户已停用')
+          }
+        }
+
+        if ((tenant as any).enterprise_status === 'SUSPENDED' || (tenant as any).enterprise_status === 'INACTIVE') {
+          return sendError(res, 401, 'UNAUTHORIZED', '账户已停用')
+        }
+      } else if (tenantType === 'DEPARTMENT') {
+        if ((tenant as any).parent_id) {
+          customerId = String((tenant as any).parent_id)
+
+          const parentRows = await supabase.select(
+            'tenants',
+            `select=enterprise_status&tenant_id=eq.${encodeURIComponent(customerId)}&limit=1`
+          )
+          const parentTenant = Array.isArray(parentRows) ? parentRows[0] : null
+          if (parentTenant && ((parentTenant as any).enterprise_status === 'SUSPENDED' || (parentTenant as any).enterprise_status === 'INACTIVE')) {
+            return sendError(res, 401, 'UNAUTHORIZED', '账户已停用')
+          }
+
+          const custRows = await supabase.select(
+            'customers',
+            `select=reseller_tenant_id&tenant_id=eq.${encodeURIComponent(customerId)}&limit=1`
+          )
+          const cust = Array.isArray(custRows) ? custRows[0] : null
+          if (cust && (cust as any).reseller_tenant_id) {
+            resellerId = String((cust as any).reseller_tenant_id)
+
+            const resellerRows = await supabase.select(
+              'resellers',
+              `select=status&tenant_id=eq.${encodeURIComponent(resellerId)}&limit=1`
+            )
+            const reseller = Array.isArray(resellerRows) ? resellerRows[0] : null
+            if (reseller && (reseller as any).status === 'SUSPENDED') {
+              return sendError(res, 401, 'UNAUTHORIZED', '账户已停用')
+            }
+          }
+        }
+      }
+    }
+
+    // Step 6: Sign JWT
+    const ttlSeconds = getTokenTtlSeconds()
+    const now = Math.floor(Date.now() / 1000)
+
+    const payload = {
+      iss: 'iot-cmp-api',
+      sub: userId,
+      iat: now,
+      exp: now + ttlSeconds,
+      userId,
+      email,
+      role,
+      roleScope,
+      ...(resellerId ? { resellerId } : {}),
+      ...(customerId ? { customerId } : {}),
+    }
+    const token = signJwtHs256(payload, secret)
+
+    return res.json({
+      accessToken: token,
+      expiresIn: ttlSeconds,
+      tokenType: 'Bearer',
+      user: {
+        userId,
+        email,
+        displayName,
+        role,
+        roleScope,
+        resellerId,
+        customerId,
+      },
+    })
+  }
+
+  const handleAuthLogin = async (req: any, res: any) => {
+    const body = req.body ?? {}
+    const clientId = typeof body.clientId === 'string' ? body.clientId.trim() : ''
+    const clientSecret = typeof body.clientSecret === 'string' ? body.clientSecret : ''
+    const email = typeof body.email === 'string' ? body.email.trim() : ''
+    const password = typeof body.password === 'string' ? body.password : ''
+
+    // ── Mode detection ───────────────────────────────────────────────
+    const isM2M = Boolean(clientId && clientSecret)
+    const isUserLogin = Boolean(email && password)
+
+    if (!isM2M && !isUserLogin) {
+      return sendError(res, 400, 'BAD_REQUEST', 'Provide either {email, password} or {clientId, clientSecret}.')
+    }
+
+    // ── Mode B: User-password login ──────────────────────────────────
+    if (isUserLogin && !isM2M) {
+      try {
+        return await authenticateUserByPassword(req, res, email, password)
+      } catch (err: any) {
+        console.error('[auth/login] user login error:', err?.message ?? err)
+        return sendError(res, 401, 'UNAUTHORIZED', 'Invalid credentials.')
+      }
+    }
+
+    // ── Mode A: M2M client credentials (existing behavior) ──────────
     const ttlSeconds = getTokenTtlSeconds()
     const now = Math.floor(Date.now() / 1000)
 
     if (!isAuthConfigured() && !isDbAuthConfigured()) {
-      const token = Buffer.from(`${email}:${password}:${Date.now()}`).toString('base64url')
+      const token = Buffer.from(`${clientId}:${clientSecret}:${Date.now()}`).toString('base64url')
       return res.json({
         accessToken: token,
         expiresIn: ttlSeconds,
         tokenType: 'Bearer',
         user: {
-          userId: email,
-          email,
+          userId: clientId,
+          email: clientId,
           role: 'customer_m2m',
           roleScope: 'customer',
           resellerId: null,
@@ -606,7 +801,7 @@ function registerAuthRoutes({
     if (isAuthConfigured()) {
       const expectedClientId = getEnvTrim('AUTH_CLIENT_ID')
       const expectedClientSecret = getEnvTrim('AUTH_CLIENT_SECRET')
-      if (email !== expectedClientId || password !== expectedClientSecret) {
+      if (clientId !== expectedClientId || clientSecret !== expectedClientSecret) {
         return sendError(res, 401, 'UNAUTHORIZED', 'Invalid credentials.')
       }
       const enterpriseId = await resolveEnterpriseIdFromEnv(res)
@@ -614,10 +809,10 @@ function registerAuthRoutes({
       const role = enterpriseId ? 'customer_m2m' : 'platform_admin'
       const payload = {
         iss: 'iot-cmp-api',
-        sub: String(email),
+        sub: String(clientId),
         iat: now,
         exp: now + ttlSeconds,
-        email,
+        email: clientId,
         roleScope,
         role,
         ...(enterpriseId ? { enterpriseId, customerId: enterpriseId } : {}),
@@ -628,8 +823,8 @@ function registerAuthRoutes({
         expiresIn: ttlSeconds,
         tokenType: 'Bearer',
         user: {
-          userId: email,
-          email,
+          userId: clientId,
+          email: clientId,
           role,
           roleScope,
           resellerId: null,
@@ -642,13 +837,13 @@ function registerAuthRoutes({
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const rows = await supabase.select(
         'api_clients',
-        `select=client_id,secret_hash,enterprise_id,status&client_id=eq.${encodeURIComponent(String(email))}&limit=1`
+        `select=client_id,secret_hash,enterprise_id,status&client_id=eq.${encodeURIComponent(String(clientId))}&limit=1`
       )
       const row = Array.isArray(rows) ? rows[0] : null
       if (!row || (row as any).status !== 'ACTIVE') {
         return sendError(res, 401, 'UNAUTHORIZED', 'Invalid credentials.')
       }
-      const ok = verifySecretScrypt(String(password), String((row as any).secret_hash))
+      const ok = verifySecretScrypt(String(clientSecret), String((row as any).secret_hash))
       if (!ok) {
         return sendError(res, 401, 'UNAUTHORIZED', 'Invalid credentials.')
       }
@@ -669,10 +864,10 @@ function registerAuthRoutes({
       }
       const payload = {
         iss: 'iot-cmp-api',
-        sub: String(email),
+        sub: String(clientId),
         iat: now,
         exp: now + ttlSeconds,
-        email,
+        email: clientId,
         roleScope: 'customer',
         role: 'customer_m2m',
         ...(enterpriseId ? { enterpriseId, customerId: enterpriseId } : {}),
@@ -684,8 +879,8 @@ function registerAuthRoutes({
         expiresIn: ttlSeconds,
         tokenType: 'Bearer',
         user: {
-          userId: email,
-          email,
+          userId: clientId,
+          email: clientId,
           role: 'customer_m2m',
           roleScope: 'customer',
           resellerId,
@@ -1469,9 +1664,16 @@ function registerBillFileRoutes({
   app.get(`${prefix}/bills/:billId/files`, async (req: any, res: any) => {
     const billId = String(req.params.billId)
     const baseUrl = buildBaseUrl(req)
+    const csvUrl = `${baseUrl}${prefix}/bills/${billId}/files/csv`
+    const format = req.query?.format ? String(req.query.format).toLowerCase() : null
+    if (format === 'pdf') {
+      return sendError(res, 501, 'NOT_IMPLEMENTED', 'PDF bill download is not yet available.')
+    }
     res.json({
-      pdfUrl: null,
-      csvUrl: `${baseUrl}${prefix}/bills/${billId}/files/csv`,
+      downloadUrl: csvUrl,
+      expiresAt: null,
+      format: 'csv',
+      sizeBytes: null,
     })
   })
 
@@ -1802,6 +2004,26 @@ function registerResellerRoutes({
       currency,
     }, { returning: 'minimal' })
 
+    const auth = getAuthContext(req)
+    await supabase.insert('audit_logs', {
+      actor_user_id: auth.userId ? String(auth.userId) : null,
+      actor_role: auth.role ? String(auth.role) : null,
+      tenant_id: reseller.id,
+      action: 'RESELLER_CREATED',
+      target_type: 'RESELLER',
+      target_id: reseller.id,
+      request_id: getTraceId(res),
+      source_ip: req.ip,
+      before_data: null,
+      after_data: {
+        name,
+        currency,
+        contactEmail,
+        contactPhone,
+        brandingConfig: { logoUrl, primaryColor, customDomain },
+      },
+    }, { returning: 'minimal' })
+
     res.status(201).json({
       resellerId: reseller.id,
       name: reseller.name,
@@ -2044,6 +2266,29 @@ function registerResellerRoutes({
         }, { returning: 'minimal' })
       }
     }
+    const auth = getAuthContext(req)
+    await supabase.insert('audit_logs', {
+      actor_user_id: auth.userId ? String(auth.userId) : null,
+      actor_role: auth.role ? String(auth.role) : null,
+      tenant_id: resellerId,
+      action: 'RESELLER_UPDATED',
+      target_type: 'RESELLER',
+      target_id: resellerId,
+      request_id: getTraceId(res),
+      source_ip: req.ip,
+      before_data: {
+        name: reseller.name,
+        contactEmail: reseller.contact_email,
+        contactPhone: reseller.contact_phone,
+      },
+      after_data: {
+        name: name ?? reseller.name,
+        contactEmail: contactEmail !== null ? (contactEmail || null) : reseller.contact_email,
+        contactPhone: contactPhone !== null ? (contactPhone || null) : reseller.contact_phone,
+        brandingConfig: branding ? { logoUrl, primaryColor, customDomain } : undefined,
+      },
+    }, { returning: 'minimal' })
+
     res.json({
       resellerId,
       name: name ?? reseller.name,
@@ -2104,6 +2349,19 @@ function registerResellerRoutes({
     await supabase.update('resellers', `id=eq.${encodeURIComponent(resellerId)}`, {
       status: storageStatus,
       updated_at: nowIso,
+    }, { returning: 'minimal' })
+    const auth = getAuthContext(req)
+    await supabase.insert('audit_logs', {
+      actor_user_id: auth.userId ? String(auth.userId) : null,
+      actor_role: auth.role ? String(auth.role) : null,
+      tenant_id: auth.resellerId ? String(auth.resellerId) : 'platform',
+      action: 'RESELLER_STATUS_CHANGED',
+      target_type: 'RESELLER',
+      target_id: resellerId,
+      request_id: getTraceId(res),
+      source_ip: req.ip,
+      before_data: { status: previousStatus },
+      after_data: { status: mapStatusFromStorage(storageStatus), reason },
     }, { returning: 'minimal' })
     res.json({
       resellerId,
@@ -2469,6 +2727,8 @@ function registerEnterpriseRoutes({
       status,
       previousStatus,
       changedAt: nowIso,
+      changedBy: auth.userId,
+      reason,
     })
   })
 }
@@ -2526,14 +2786,27 @@ function registerDepartmentRoutes({
     if (!name || name.length < 2 || name.length > 100) {
       return sendError(res, 400, 'VALIDATION_ERROR', 'name must be 2-100 characters.')
     }
+    const parentDepartmentId = req.body?.parentDepartmentId ? String(req.body.parentDepartmentId) : null
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const access = await ensureEnterpriseAccess(supabase, auth, enterpriseId)
     if (!access.ok) {
       if (access.error === 'not_found') return sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
       return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
     }
+    let parentId = enterpriseId
+    if (parentDepartmentId) {
+      const parentDeptRows = await supabase.select(
+        'tenants',
+        `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(parentDepartmentId)}&tenant_type=eq.DEPARTMENT&limit=1`
+      )
+      const parentDept = Array.isArray(parentDeptRows) ? parentDeptRows[0] : null
+      if (!parentDept || String((parentDept as any).parent_id || '') !== enterpriseId) {
+        return sendError(res, 400, 'VALIDATION_ERROR', 'parentDepartmentId is invalid or does not belong to this enterprise.')
+      }
+      parentId = parentDepartmentId
+    }
     const inserted = await supabase.insert('tenants', {
-      parent_id: enterpriseId,
+      parent_id: parentId,
       tenant_type: 'DEPARTMENT',
       name,
     })
@@ -2550,11 +2823,12 @@ function registerDepartmentRoutes({
       target_id: row.tenant_id,
       request_id: getTraceId(res),
       source_ip: req.ip,
-      after_data: { name },
+      after_data: { name, parentDepartmentId },
     }, { returning: 'minimal' })
     res.status(201).json({
       departmentId: row.tenant_id,
       enterpriseId,
+      parentDepartmentId: parentDepartmentId ?? null,
       name: row.name,
       createdAt: row.created_at,
     })
@@ -3382,7 +3656,7 @@ function registerUserRoutes({
       return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
     }
     const email = typeof req.body?.email === 'string' ? req.body.email.trim() : ''
-    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : ''
+    const displayName = (typeof req.body?.name === 'string' ? req.body.name.trim() : '') || (typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '')
     const roleInput = typeof req.body?.role === 'string' ? req.body.role.trim() : ''
     const role = roleInput ? roleInput.toLowerCase() : ''
     const assignedEnterpriseIds = Array.isArray(req.body?.assignedEnterpriseIds)
@@ -3392,7 +3666,7 @@ function registerUserRoutes({
       return sendError(res, 400, 'VALIDATION_ERROR', 'email is invalid.')
     }
     if (!displayName) {
-      return sendError(res, 400, 'VALIDATION_ERROR', 'displayName is required.')
+      return sendError(res, 400, 'VALIDATION_ERROR', 'name (or displayName) is required.')
     }
     if (!resellerRoles.has(role)) {
       return sendError(res, 400, 'VALIDATION_ERROR', 'role is invalid for reseller users.')
@@ -3465,6 +3739,7 @@ function registerUserRoutes({
       userId: row.user_id,
       resellerId,
       email: row.email,
+      name: row.display_name,
       displayName: row.display_name,
       role,
       status: row.status,
@@ -3617,6 +3892,7 @@ function registerUserRoutes({
         userId: r.user_id,
         resellerId,
         email: r.email,
+        name: r.display_name,
         displayName: r.display_name,
         role: roleMap.get(r.user_id) ?? null,
         status: r.status,
@@ -3682,6 +3958,7 @@ function registerUserRoutes({
         userId: r.user_id,
         enterpriseId,
         email: r.email,
+        name: r.display_name,
         displayName: r.display_name,
         role: roleMap.get(r.user_id) ?? null,
         status: r.status,
@@ -3715,7 +3992,7 @@ function registerUserRoutes({
       return sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
     }
     const email = typeof req.body?.email === 'string' ? req.body.email.trim() : ''
-    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : ''
+    const displayName = (typeof req.body?.name === 'string' ? req.body.name.trim() : '') || (typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '')
     const roleInput = typeof req.body?.role === 'string' ? req.body.role.trim() : ''
     const role = roleInput ? roleInput.toLowerCase() : ''
     const departmentId = req.body?.departmentId ? String(req.body.departmentId) : null
@@ -3723,7 +4000,7 @@ function registerUserRoutes({
       return sendError(res, 400, 'VALIDATION_ERROR', 'email is invalid.')
     }
     if (!displayName) {
-      return sendError(res, 400, 'VALIDATION_ERROR', 'displayName is required.')
+      return sendError(res, 400, 'VALIDATION_ERROR', 'name (or displayName) is required.')
     }
     if (!enterpriseRoles.has(role)) {
       return sendError(res, 400, 'VALIDATION_ERROR', 'role is invalid for enterprise users.')
@@ -3785,6 +4062,7 @@ function registerUserRoutes({
       userId: row.user_id,
       enterpriseId,
       email: row.email,
+      name: row.display_name,
       displayName: row.display_name,
       role,
       status: row.status,

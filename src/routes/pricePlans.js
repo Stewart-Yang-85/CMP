@@ -1,4 +1,4 @@
-import { createPricePlan, listPricePlans, getPricePlanDetail, clonePricePlan, updatePricePlan, publishPricePlan } from '../services/pricePlan.js'
+import { createPricePlan, listPricePlans, getPricePlanDetail, clonePricePlan, updatePricePlan, publishPricePlan, deprecatePricePlan } from '../services/pricePlan.js'
 
 export function registerPricePlanRoutes({ app, prefix, deps }) {
   const {
@@ -108,6 +108,22 @@ export function registerPricePlanRoutes({ app, prefix, deps }) {
     }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const result = await publishPricePlan({ supabase, pricePlanId, audit })
+    if (!result.ok) return sendError(res, result.status, result.code, result.message)
+    res.json(result.value)
+  })
+
+  app.post(`${prefix}/price-plans/:pricePlanId\\:deprecate`, async (req, res) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const pricePlanId = String(req.params.pricePlanId || '').trim()
+    const audit = {
+      actorUserId: req?.cmpAuth?.userId ?? null,
+      actorRole: req?.cmpAuth?.role ?? null,
+      requestId: getTraceId(res),
+      sourceIp: req.ip,
+    }
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const result = await deprecatePricePlan({ supabase, pricePlanId, audit })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
     res.json(result.value)
   })

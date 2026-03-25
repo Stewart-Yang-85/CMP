@@ -197,13 +197,21 @@ export async function createSubscription({
   const now = new Date()
   const isImmediate = new Date(effectiveIso).getTime() <= now.getTime()
   const subKind = (kind && String(kind).toUpperCase() === 'ADD_ON') ? 'ADD_ON' : 'MAIN'
-  if (isImmediate && subKind === 'MAIN') {
-    const active = await supabase.select(
+  if (subKind === 'MAIN') {
+    const existing = await supabase.select(
       'subscriptions',
-      `select=subscription_id&sim_id=eq.${encodeURIComponent(String(sim.sim_id))}&state=eq.ACTIVE&subscription_kind=eq.MAIN&limit=1`
+      `select=subscription_id,state,effective_at,expires_at&sim_id=eq.${encodeURIComponent(String(sim.sim_id))}&state=in.(ACTIVE,PENDING)&subscription_kind=eq.MAIN&limit=10`
     )
-    if (Array.isArray(active) && active.length > 0) {
-      return toError(409, 'MAIN_SUBSCRIPTION_EXISTS', 'SIM already has an ACTIVE MAIN subscription.')
+    if (Array.isArray(existing)) {
+      const hasOverlap = existing.some((row) => {
+        const rowStart = new Date(row.effective_at).getTime()
+        const rowEnd = row.expires_at ? new Date(row.expires_at).getTime() : Infinity
+        const newStart = new Date(effectiveIso).getTime()
+        return newStart < rowEnd && rowStart < Infinity
+      })
+      if (hasOverlap) {
+        return toError(409, 'MAIN_SUBSCRIPTION_EXISTS', 'SIM already has an ACTIVE or PENDING MAIN subscription that overlaps with the requested period.')
+      }
     }
   }
   const terms = normalizeCommercialTerms(pkg.commercial_terms)
@@ -327,11 +335,43 @@ export async function switchSubscription({
       { state: 'CANCELLED', cancelled_at: nowIso, expires_at: nowIso }
     )
   } else {
+    const cycleEnd = endOfCurrentMonthUtc().toISOString()
     await supabase.update(
       'subscriptions',
       `subscription_id=eq.${encodeURIComponent(String(from.subscription_id))}`,
-      { state: 'EXPIRED', cancelled_at: null, expires_at: effectiveIso }
+      { expires_at: effectiveIso }
     )
+    let existingSchedule = null
+    try {
+      const schedRows = await supabase.select(
+        'subscription_cancel_schedules',
+        `select=schedule_id&subscription_id=eq.${encodeURIComponent(String(from.subscription_id))}&status=eq.PENDING&limit=1`
+      )
+      existingSchedule = Array.isArray(schedRows) ? schedRows[0] : null
+    } catch (err) {
+      if (String(err?.message || '').includes('subscription_cancel_schedules')) {
+        return toError(503, 'MIGRATION_REQUIRED', 'subscription_cancel_schedules table not found. Run migration 20260312100001_subscription_cancel_schedules.sql')
+      }
+      throw err
+    }
+    if (!existingSchedule) {
+      try {
+        await supabase.insert(
+          'subscription_cancel_schedules',
+          {
+            subscription_id: String(from.subscription_id),
+            scheduled_execute_at: cycleEnd,
+            status: 'PENDING',
+          },
+          { returning: 'minimal' }
+        )
+      } catch (err) {
+        if (String(err?.message || '').includes('subscription_cancel_schedules')) {
+          return toError(503, 'MIGRATION_REQUIRED', 'subscription_cancel_schedules table not found. Run migration 20260312100001_subscription_cancel_schedules.sql')
+        }
+        throw err
+      }
+    }
   }
   const terms = normalizeCommercialTerms(pkg.commercial_terms)
   const commitmentEndAt = computeCommitmentEndAt(effectiveIso, terms)

@@ -12,6 +12,7 @@ import { runReconciliation } from './services/reconciliation.js'
 import { runAlertEvaluation } from './services/alerting.js'
 import { retryWebhookDelivery } from './services/webhook.js'
 import { executeScheduledCancels } from './services/subscription.js'
+import { resolveBillingSchedule } from './services/billingSchedule.js'
 
 const supabase = createSupabaseRestClient({ useServiceRole: true })
 const wxClient = createWxzhonggengClient()
@@ -82,6 +83,8 @@ const ALERT_EVAL_CRON = process.env.ALERT_EVAL_CRON || '*/15 * * * *'
 const WEBHOOK_DELIVERY_CRON = process.env.WEBHOOK_DELIVERY_CRON || '*/1 * * * *'
 const TEST_EXPIRY_CHECK_CRON = process.env.TEST_EXPIRY_CHECK_CRON || '0 3 * * *'
 const SUBSCRIPTION_CANCEL_CRON = process.env.SUBSCRIPTION_CANCEL_CRON || '*/5 * * * *'
+const AUTO_BILLING_CRON = process.env.AUTO_BILLING_CRON || '15 3 * * *'
+const RECONCILIATION_CRON = process.env.RECONCILIATION_CRON || '45 4 * * *'
 const WEBHOOK_DELIVERY_BATCH_LIMIT = resolveNumber(process.env.WEBHOOK_DELIVERY_BATCH_LIMIT, 50)
 const ALERT_WINDOW_MINUTES = resolveNumber(process.env.ALERT_WINDOW_MINUTES, 60)
 const ALERT_SUPPRESS_MINUTES = resolveNumber(process.env.ALERT_SUPPRESS_MINUTES, 30)
@@ -114,6 +117,8 @@ console.log(`Alert Evaluation Schedule: ${ALERT_EVAL_CRON}`)
 console.log(`Webhook Delivery Schedule: ${WEBHOOK_DELIVERY_CRON}`)
 console.log(`Test Expiry Check Schedule: ${TEST_EXPIRY_CHECK_CRON}`)
 console.log(`Subscription Cancel Schedule: ${SUBSCRIPTION_CANCEL_CRON}`)
+console.log(`Auto Billing Schedule: ${AUTO_BILLING_CRON}`)
+console.log(`Reconciliation Schedule: ${RECONCILIATION_CRON}`)
 
 // --- Usage Sync Task ---
 async function syncUsageTask() {
@@ -187,7 +192,7 @@ async function syncUsageTask() {
         
         // Check existing
         const match = `iccid=eq.${encodeURIComponent(sim.iccid)}&usage_day=eq.${encodeURIComponent(usageDay)}&visited_mccmnc=eq.${encodeURIComponent(visited)}`
-        const existingRows = await supabase.select('usage_daily_summary', `select=usage_id,total_kb,uplink_kb,downlink_kb&${match}&limit=1`)
+        const existingRows = await supabase.select('usage_daily_summary', `select=usage_id,total_mb,uplink_mb,downlink_mb&${match}&limit=1`)
         const existing = Array.isArray(existingRows) ? existingRows[0] : null
 
         let newUplink = usage.uplink
@@ -201,14 +206,14 @@ async function syncUsageTask() {
             newUplink = usage.uplink
             newDownlink = usage.downlink
           } else {
-            newUplink += Number(existing.uplink_kb || 0)
-            newDownlink += Number(existing.downlink_kb || 0)
+            newUplink += Number(existing.uplink_mb || 0)
+            newDownlink += Number(existing.downlink_mb || 0)
           }
           
           await supabase.update('usage_daily_summary', `usage_id=eq.${encodeURIComponent(String(existing.usage_id))}`, {
-            uplink_kb: newUplink,
-            downlink_kb: newDownlink,
-            total_kb: newUplink + newDownlink,
+            uplink_mb: newUplink,
+            downlink_mb: newDownlink,
+            total_mb: newUplink + newDownlink,
             updated_at: new Date().toISOString() // Assuming we add updated_at or just rely on audit
           }, { returning: 'minimal' })
         } else {
@@ -219,9 +224,9 @@ async function syncUsageTask() {
             iccid: sim.iccid,
             usage_day: usageDay,
             visited_mccmnc: visited,
-            uplink_kb: newUplink,
-            downlink_kb: newDownlink,
-            total_kb: newUplink + newDownlink,
+            uplink_mb: newUplink,
+            downlink_mb: newDownlink,
+            total_mb: newUplink + newDownlink,
             apn: sim.apn ?? null,
             input_ref: 'worker_sync',
           }, { returning: 'minimal' })
@@ -456,6 +461,141 @@ async function subscriptionCancelTask() {
     } else {
       console.error(`[${traceId}] Subscription cancel task failed:`, err)
     }
+  }
+}
+
+// --- Auto-Billing Cron Task (T+N automatic billing) ---
+async function autoBillingTask() {
+  const traceId = `worker-auto-billing-${Date.now()}`
+  console.log(`[${traceId}] Starting auto-billing check...`)
+  try {
+    const today = new Date()
+    const todayDay = today.getDate()
+
+    // Query billing_config rows where auto_generate is true
+    const configRows = await supabase.select(
+      'billing_config',
+      'select=config_id,enterprise_id,bill_day,auto_generate,auto_publish,currency,time_zone&auto_generate=eq.true&limit=500'
+    )
+    const configs = Array.isArray(configRows) ? configRows : []
+    if (configs.length === 0) {
+      console.log(`[${traceId}] No enterprises configured for auto-billing.`)
+      return
+    }
+
+    // Determine current billing period (previous month)
+    const periodDate = new Date(today.getFullYear(), today.getMonth() - 1, 1)
+    const period = `${periodDate.getFullYear()}-${String(periodDate.getMonth() + 1).padStart(2, '0')}`
+
+    let queued = 0
+    let skipped = 0
+
+    for (const config of configs) {
+      try {
+        const billDay = Number(config.bill_day ?? 3)
+        if (todayDay < billDay) {
+          skipped += 1
+          continue
+        }
+
+        const enterpriseId = config.enterprise_id
+        if (!enterpriseId) {
+          skipped += 1
+          continue
+        }
+
+        // Idempotency: check if a BILLING_GENERATE job already exists for this enterprise + period
+        const idempotencyKey = `AUTO_BILLING:${enterpriseId}:${period}`
+        const existing = await findIdempotentJobByKey('BILLING_GENERATE', idempotencyKey)
+        if (existing && existing.status !== 'FAILED') {
+          skipped += 1
+          continue
+        }
+
+        await insertJobWithFallback({
+          job_type: 'BILLING_GENERATE',
+          status: 'QUEUED',
+          progress_processed: 0,
+          progress_total: 0,
+          request_id: traceId,
+          idempotency_key: idempotencyKey,
+          payload: {
+            enterpriseId,
+            period,
+            autoPublish: config.auto_publish === true,
+            actorRole: 'SYSTEM',
+            requestId: traceId,
+          },
+        })
+        queued += 1
+      } catch (err) {
+        console.error(`[${traceId}] Failed to queue auto-billing for enterprise ${config.enterprise_id}:`, err.message)
+      }
+    }
+    console.log(`[${traceId}] Auto-billing check completed. queued=${queued} skipped=${skipped}`)
+  } catch (err) {
+    console.error(`[${traceId}] Auto-billing check failed:`, err)
+  }
+}
+
+// --- Reconciliation Cron Task ---
+async function reconciliationTask() {
+  const traceId = `worker-reconciliation-${Date.now()}`
+  console.log(`[${traceId}] Starting reconciliation scheduling...`)
+  try {
+    // Query active suppliers
+    const supplierRows = await supabase.select(
+      'suppliers',
+      'select=supplier_id,name&status=eq.ACTIVE&limit=500'
+    )
+    const suppliers = Array.isArray(supplierRows) ? supplierRows : []
+    if (suppliers.length === 0) {
+      console.log(`[${traceId}] No active suppliers for reconciliation.`)
+      return
+    }
+
+    const today = new Date().toISOString().slice(0, 10)
+    let queued = 0
+    let skipped = 0
+
+    for (const supplier of suppliers) {
+      try {
+        const supplierId = supplier.supplier_id
+        if (!supplierId) {
+          skipped += 1
+          continue
+        }
+
+        // Idempotency: check if a RECONCILIATION_RUN job already exists for this supplier + date
+        const idempotencyKey = `RECONCILIATION:${supplierId}:${today}`
+        const existing = await findIdempotentJobByKey('RECONCILIATION_RUN', idempotencyKey)
+        if (existing && existing.status !== 'FAILED') {
+          skipped += 1
+          continue
+        }
+
+        await insertJobWithFallback({
+          job_type: 'RECONCILIATION_RUN',
+          status: 'QUEUED',
+          progress_processed: 0,
+          progress_total: 0,
+          request_id: traceId,
+          idempotency_key: idempotencyKey,
+          payload: {
+            supplierId,
+            date: today,
+            scope: 'INCREMENTAL',
+            traceId,
+          },
+        })
+        queued += 1
+      } catch (err) {
+        console.error(`[${traceId}] Failed to queue reconciliation for supplier ${supplier.supplier_id}:`, err.message)
+      }
+    }
+    console.log(`[${traceId}] Reconciliation scheduling completed. queued=${queued} skipped=${skipped}`)
+  } catch (err) {
+    console.error(`[${traceId}] Reconciliation scheduling failed:`, err)
   }
 }
 
@@ -808,6 +948,8 @@ scheduleCron('ALERT_EVAL_CRON', ALERT_EVAL_CRON, alertEvaluationTask)
 scheduleCron('WEBHOOK_DELIVERY_CRON', WEBHOOK_DELIVERY_CRON, webhookDeliveryTask)
 scheduleCron('TEST_EXPIRY_CHECK_CRON', TEST_EXPIRY_CHECK_CRON, testExpiryCheckTask)
 scheduleCron('SUBSCRIPTION_CANCEL_CRON', SUBSCRIPTION_CANCEL_CRON, subscriptionCancelTask)
+scheduleCron('AUTO_BILLING_CRON', AUTO_BILLING_CRON, autoBillingTask)
+scheduleCron('RECONCILIATION_CRON', RECONCILIATION_CRON, reconciliationTask)
 
 // Polling for jobs
 let isProcessing = false

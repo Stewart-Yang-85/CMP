@@ -38,9 +38,9 @@
 **权限边界**：平台按"系统管理员 / 代理商组织 / 企业组织 / 部门"分层隔离与授权，数据默认最小可见、最小可操作。
 
 **实体建模**（CMP.xlsx 对齐）：
-- 采用**独立表**建模策略，废弃通用 tenants 表
+- 采用**独立表**建模策略。`tenants` 表作为统一身份标识与层级查询基础表保留，各域表（resellers/customers/suppliers）保持独立字段与状态管理。`create_reseller()`/`create_customer()` 原子创建 tenants + 域表记录。`buildTenantFilterAsync()` 基于 `tenants.tenant_id` + `parent_id` 实现租户隔离。
 - `resellers` 表：id（系统生成，唯一）、name（非空且全局唯一）、status（ACTIVE/DEACTIVATED/SUSPENDED，默认 ACTIVE）、contact_email、contact_phone、created_by、created_at、updated_at。created_by 保留审计引用（用户被删除不影响记录）。
-- `customers` 表：id、reseller_id (FK)、name、status (active/overdue/terminated)、api_key (UNIQUE)、api_secret_hash (BYTEA)、webhook_url、created_by、created_at、updated_at。UNIQUE(reseller_id, name)。terminated 为终态。
+- `customers` 表：id、reseller_id (FK)、name、status (ACTIVE/INACTIVE/SUSPENDED)、api_key (UNIQUE)、api_secret_hash (BYTEA)、webhook_url、created_by、created_at、updated_at。UNIQUE(reseller_id, name)。SUSPENDED 为可恢复冻结态，不设终态。
 - `suppliers` 表：id（系统生成，唯一）、name（非空且全局唯一）、status（ACTIVE/SUSPENDED，默认 ACTIVE）、created_by、created_at、updated_at。created_by 保留审计引用（用户被删除不影响记录）。
 - `public_infos` 表：schema `public` 下**完全独立**的 3GPP 公开参考目录（E.212 MCC+MNC、国家、名称、频段等），**仅供用户查阅**。**不得**与业务运营商主数据、业务 `operator_id` 链路建立任何产品层关联：禁止与 `business_operators` 外键/同步/对照校验；禁止在 SIM、资费、订阅、计费、库存、状态机等流程中读取或 JOIN `public_infos`。与 `business_operators` / `operators.operator_id` **无任何关系**（历史库若存在指向本表的 FK，须在 V1.1 移除，见 FR-057）。
 - `business_operators` 表：业务运营商字典（operator_id、mcc、mnc、name），业务侧查询与过滤与 **`public_infos` 无关**。
@@ -199,7 +199,7 @@
 **生命周期状态机**（5 状态）：
 
 - **INVENTORY**（库存，初始状态）：导入系统默认进入；允许分配/销售给企业
-- **TEST_READY**（测试期）：由产品包 Commercial Terms 定义测试期与配额；到期条件（PERIOD_ONLY/QUOTA_ONLY/PERIOD_OR_QUOTA 默认）
+- **TEST_READY**（测试期）：由产品包 Commercial Terms 定义测试期与配额；到期条件（PERIOD_ONLY/QUOTA_ONLY/PERIOD_OR_QUOTA，默认 PERIOD_OR_QUOTA）
   - 迁移：INVENTORY -> TEST_READY（销售/分配）、TEST_READY -> ACTIVATED（到期自动或手工提前激活）、TEST_READY -> DEACTIVATED（手工停机）
   - 子状态：
     - normal：可用且未发起激活
@@ -221,7 +221,7 @@
 
 **状态漂移与冲突标记**：当本地状态与上游状态不一致时，标记 status_sync_conflict=true；对上游执行重试，超过最大次数仍失败则触发告警并冻结状态变更操作，直至人工或自动修复完成。
 
-**状态变更幂等与异步确认**：所有状态变更 API 必须幂等；本地发起变更时先进入过渡子状态（如 deactivating/activating/reactivating/retiring），收到上游成功回执后再切换为目标状态；超时/失败则回滚或标记冲突。
+**状态变更幂等与异步确认**：所有状态变更 API 必须幂等；激活方向（TEST_READY→ACTIVATED）先进入过渡子状态（activating），收到上游成功回执后再切换为目标状态；超时/失败则保持 activation_failed。停机/复机/拆机方向使用同步 API 调用处理，上游失败通过 `status_sync_conflict=true` 标志位标记并触发告警，冻结状态变更操作直至修复。
 
 **激活容错与重试**：
 - activateSim 发起后，若上游返回 pending 或超时，保持 TEST_READY + sub_status=activating
@@ -280,10 +280,6 @@
 7. **Given** 本地已停机但上游仍为 ACTIVE, **When** 同步重试超过最大次数仍失败, **Then** 标记 status_sync_conflict 并触发告警，冻结状态变更操作
 8. **Given** 测试期到期且 Test Expiry Action=DEACTIVATED, **When** 到期条件满足, **Then** 自动进入 DEACTIVATED
 9. **Given** SIM 处于 DEACTIVATED 且申请豁免拆机, **When** 代理商管理员或系统管理员确认原因, **Then** 跳过承诺期校验并进入 RETIRED
-
-**V1.1 推迟需求 — SIM/eSIM 备注（remark）**：
-- **字段**：SIM 卡与 eSIM Profile 均新增 `remark` (TEXT, nullable)，用于标识主要用途（如「研发工程师测试用 SIM」「车载设备预置 Profile」），便于用户在 Web Portal 上直接理解。
-- **接口**：`PATCH /v1/sims/{iccid}` 支持 `remark` 字段更新；`PATCH /v1/esim-profiles/{profileId}` 支持 `remark` 字段更新。供 Web Portal 前端直接编辑。
 
 ---
 
@@ -377,7 +373,7 @@
 **商业条款（Commercial Terms）**：
 - Test Period（测试期）
 - Test Quota（测试期流量配额，MB 向上取整）
-- Test Expiry Condition：PERIOD_ONLY / QUOTA_ONLY / PERIOD_OR_QUOTA（默认）
+- Test Expiry Condition：PERIOD_ONLY / QUOTA_ONLY / PERIOD_OR_QUOTA（默认 PERIOD_OR_QUOTA）
 - Test Expiry Action：ACTIVATED / DEACTIVATED（默认 ACTIVATED）
 - Commitment Period（承诺期）
 
@@ -407,9 +403,8 @@
 
 - 产品包版本由四个模块共同组成：Price Plan + Carrier Service + Commercial Terms + Control Policy
 - 产品包以 ID 索引四个模块：`pricePlanId`、`carrierServiceId`、`controlPolicyId`、`commercialTermsId`
-- 产品包变更次月生效
+- 产品包变更次月生效（仅对新订阅生效；已有订阅需通过订阅变更接口单独处理）
 - APN 来源：运营商 APN 目录，供应商支持验证
-- 停机保号费与月租费互斥
 - 反向引用查询能力：
   - Network Profiles 域支持通过 `apnProfileId` / `roamingProfileId` 查询 Carrier Service
   - Price Plans 域支持通过 `pricePlanId` / `commercialTermsId` / `controlPolicyId` 查询 Package
@@ -564,7 +559,8 @@
     - 已生效（ACTIVE）：无法立即取消，必须到本计费周期结束时才能取消；取消请求插入队列，由定时任务在周期末执行
     - 未生效（PENDING）：可立即取消
   - **ADD_ON 订阅**：
-    - 已生效（ACTIVE）：无法立即取消，必须到其到期截止时才能取消；取消请求插入队列，由定时任务在到期时执行
+    - 已生效（ACTIVE）+ ONE_TIME 类型：到其有效期截止时（`effectiveAt + validityDays`）才取消；取消请求插入队列，由定时任务在到期时执行
+    - 已生效（ACTIVE）+ 月度循环类型（SIM_DEPENDENT_BUNDLE / FIXED_BUNDLE / TIERED_PRICING）：与 MAIN 一致，到本计费周期结束才取消；当月全额计费、配额保留至月底
     - 未生效（PENDING）：可立即取消
 
 **计数口径**：订阅生效时间决定月初取数与月内新增计数。
@@ -714,7 +710,7 @@
 
 **账单结构**：
 - L1 汇总账单（Account Summary）：企业维度总览，上期余额/本期费用/已付/应付/Due Date
-- L2 分组汇总（Group Summary）：按部门、按产品包
+- L2 分组汇总（Group Summary）：按部门 × 产品包交叉分组（每条 L2 行 = 1 个 department_id + 1 个 package_id 的费用小计），支持按部门展开或按产品包展开两种视角
 - L3 费用明细（Line Items）：按 SIM 维度（ICCID/MSISDN/部门/产品包/月租/用量/套外/小计）
 
 **账单状态**：GENERATED -> PUBLISHED -> PAID / OVERDUE / WRITTEN_OFF
@@ -791,7 +787,6 @@
 
 **Technical Implementation**:
 
-- `autoSuspendEnabled` 保留字段，默认 Disabled，当前版本不参与自动状态控制
 - Dunning Process 仅维护催收等级与通知，不触发企业状态变更与批量停机
 - 复机：不自动批量复机，防止瞬间大额流量
 
@@ -1041,39 +1036,26 @@
 
 ### Session 2026-03-24
 
-- Q: 需要独立表记录 3GPP 运营商公开信息，与核心业务无逻辑耦合，支持按名称模糊、按 MCC/MNC 精确查询，返回名称/国家/MCC/MNC/频段；仅系统管理员可写入，其余用户只读。如何与现有数据模型对齐？ → A: 采用现有 Supabase 表 **`public.public_infos`**（迁移 `20260311100004_sim_connectivity.sql` 已创建；兼容视图 `public.carriers`）。产品定位：**辅助查阅**，不参与计费/订阅等业务判定。权限：**platform_admin** 可 INSERT/UPDATE/DELETE；**其他已认证用户**（reseller/customer 等）仅只读查询 API 或直接受 RLS 约束的 SELECT。查询语义：**name 模糊** + **mcc+mnc 精确**（AND 组合）。实现侧需补充：只读搜索 API + 管理端写 API（或 admin 路由）+ RLS/permissionGuard，详见 `contracts/public-info-api.md` 与 `tasks.md` Phase 27。
-- Q: 再次强调 `public_infos` 与 `business_operators`、业务中频繁使用的 `operator_id` 等必须无任何关系。 → A: **产品语义**：`public_infos` 与 `business_operators`、SIM/资费/订阅/计费等依赖的 **`operators.operator_id` 链路零关联**——禁止外键、禁止业务 JOIN、禁止用公开目录校验或同步业务运营商。**数据层**：若历史迁移中 `operators.carrier_id` 曾 FK 至 `public_infos`，视为技术债，**V1.1 必须删除该外键并 `DROP COLUMN operators.carrier_id`（物理删列，硬性验收）**；应用层不得再建立二者关联。删除 `public_infos` 行时**不得**再依赖「业务表是否引用」作为约束（业务表不应引用）。详见 **FR-057**、`data-model.md` ER 图修正与 `tasks.md` **T153**。
-- Q: Phase 24 (Reseller 身份统一) 中 `customers.reseller_id` 迁移策略采用哪种方案？ → A: 方案 A — 新增 `reseller_tenant_id` FK→tenants(tenant_id)，数据迁移完成后**弃用 `reseller_id`**（彻底统一，消除双标识歧义）。同理 `reseller_suppliers.reseller_id` 也应迁移为 FK→tenants(tenant_id)。
-- Q: Phase 19b (KB→MB 单位统一) 涉及 API 字段名 `*Kb` 改为 `*Mb`，对已有外部客户端的兼容策略？ → A: **一次性 Breaking Change** — V1.1 发布时统一切换为 MB 字段名（`quotaMb`、`ratePerMb`、`chargedMb` 等），不提供兼容层。发布前需提前通知所有 API 消费方（企业 M2M 客户端）升级。OpenAPI spec 同步更新，旧 `gen/ts-fetch/` 客户端重新生成。
-- Q: Phase 19 (Price Plan 快照模式重构) 将双表合并为单表快照模型，涉及大量 FK 变更，迁移失败时的回滚策略？ → A: **停机迁移 + 备份回滚** — V1.1 部署时短暂停机，迁移前执行全量 DB 备份（`pg_dump`），迁移脚本在事务中执行，失败则还原备份。需在 staging 环境充分验证迁移脚本后再上 production。迁移窗口需提前通知运维与客户。
-- Q: Phase 17 T078「Capability Negotiation 需在 V1.1 实现」被标记为已完成，实际状态？ → A: **T078 未完成** — 标记有误，Capability Negotiation 尚未实现，仍为 V1.1 待办任务。需取消勾选并保留在 V1.1 范围内。
-- Q: V1.1 各 Phase 的推荐执行顺序？ → A: **先基础设施再功能** — Phase 24（Reseller 身份统一）→ Phase 23（RBAC DB 权限配置）→ Phase 19+19b（Price Plan 快照重构 + KB→MB 统一）→ Phase 21/22/25/26/27（功能扩展：remark/write-off/SIM 同步/按包查询/public_infos）。理由：身份与权限是所有业务功能的前置依赖，计费重构影响范围大需集中处理，功能扩展相互独立可灵活排列。
-- Q: Phase 19（Price Plan 快照重构）和 Phase 19b（KB→MB）修改相同文件集（pricePlan.js、billing.js、package.js 等），分批上线会产生无意义中间态返工，如何处理？ → A: **合并为单个 Phase 19**（原子部署单元）— 两项重构统一实施、统一测试、单次停机部署。tasks.md 中原 Phase 19b 的任务合并到 Phase 19 下，消除中间态。
-- Q: Phase 24（Reseller 身份统一）部署时，已签发的旧 JWT（payload.resellerId 为 resellers.id）仍在流通，如何处理兼容？ → A: **强制重登录** — 部署时修改 JWT_SECRET（或增加 JWT 版本号校验），使所有旧 JWT 失效，用户重新登录获取包含 `tenants.tenant_id` 的新 token。此方案简单可靠，无需维护过渡映射逻辑。部署窗口需在低峰期执行并提前通知用户。
-- Q: Phase 23（RBAC DB 驱动）seed 脚本如果权限数据有误，DB 优先逻辑会绕过硬编码兜底导致权限缺失，是否需要功能开关？ → A: **不加功能开关，依赖测试覆盖** — seed 脚本在 staging 环境充分验证（集成测试覆盖全部 6 种角色 × 38+ 权限码组合），验证通过后直接上线。出问题时通过重新部署回退。保持代码简单，不引入额外的配置复杂度。
-- Q: Phase 25 T141（SIM 上游状态同步）实际隐含路由/幂等/无能力处理三个独立关注点，单任务是否足够？ → A: **拆分为 3 个子任务** — (1) T141a：适配器路由逻辑（按 `supplier_id` 选择 SPI 适配器）；(2) T141b：幂等与重试策略（`idempotency_key` 校验 + 指数退避 + 最大 3 次 + 死信队列）；(3) T141c：无上游能力处理（标记 `FAILED` + reason=`UPSTREAM_NOT_SUPPORTED`，不阻塞 job 队列，运维可按 reason 过滤排查）。
-- Q: V1.1 三个破坏性变更 Phase（24 身份统一/23 RBAC DB/19 计费重构+KB→MB）分别独立部署会导致多次服务中断，如何编排？ → A: **单次大版本发布（V1.1 Release）** — Phase 24+23+19 合并为一次停机窗口（约 30-60 分钟），一次性完成全部基础设施破坏性变更（JWT 失效重登录 + DB 迁移 + 字段重命名）。功能扩展 Phase（21/22/25/26/27）可后续零停机增量发布。部署脚本按依赖顺序执行：Phase 24 迁移 → Phase 23 seed → Phase 19 快照+KB→MB 迁移 → 验证 → 启动服务。
+- Q: 需要独立表记录 3GPP 运营商公开信息，与核心业务无逻辑耦合，支持按名称模糊、按 MCC/MNC 精确查询，返回名称/国家/MCC/MNC/频段；仅系统管理员可写入，其余用户只读。如何与现有数据模型对齐？ → A: 采用现有 Supabase 表 **`public.public_infos`**（迁移 `20260311100004_sim_connectivity.sql` 已创建；兼容视图 `public.carriers`）。产品定位：**辅助查阅**，不参与计费/订阅等业务判定。权限：**platform_admin** 可 INSERT/UPDATE/DELETE；**其他已认证用户**（reseller/customer 等）仅只读查询 API 或直接受 RLS 约束的 SELECT。查询语义：**name 模糊** + **mcc+mnc 精确**（AND 组合）。
+- Q: `public_infos` 与 `business_operators`、`operator_id` 必须无任何关系。 → A: `public_infos` 与 `business_operators`、`operators.operator_id` 链路**零关联**——禁止外键、禁止业务 JOIN。若历史迁移中 `operators.carrier_id` 曾 FK 至 `public_infos`，V1.1 **必须 `DROP COLUMN operators.carrier_id`**（物理删列，硬性验收）。详见 FR-057。
+- Q: Phase 24 中 `customers.reseller_id` 迁移策略？ → A: 方案 A — 新增 `reseller_tenant_id` FK→tenants(tenant_id)，数据迁移完成后**弃用 `reseller_id`**。同理 `reseller_suppliers.reseller_id` 也迁移为 FK→tenants(tenant_id)。
+- Q: KB→MB 单位统一的兼容策略？ → A: **一次性 Breaking Change** — V1.1 发布时统一切换为 MB 字段名，不提供兼容层。发布前提前通知所有 API 消费方。
+- Q: Price Plan 快照模式重构迁移失败时的回滚策略？ → A: **停机迁移 + 备份回滚** — 迁移前 `pg_dump` 全量备份，迁移脚本在事务中执行，失败还原备份。需在 staging 充分验证后再上 production。
+- Q: Phase 24 部署时旧 JWT 兼容？ → A: **强制重登录** — 部署时修改 JWT_SECRET，使所有旧 JWT 失效。低峰期执行并提前通知用户。
+- Q: Phase 23 RBAC DB 驱动是否需要功能开关？ → A: **不加功能开关，依赖测试覆盖** — seed 脚本在 staging 充分验证后直接上线。
+- Q: T141（SIM 上游状态同步）单任务是否足够？ → A: **拆分为 3 个子任务** — T141a：适配器路由逻辑；T141b：幂等与重试策略；T141c：无上游能力处理（`UPSTREAM_NOT_SUPPORTED`）。
 
 ### Session 2026-03-12
 
-- Q: 不同角色的访问权限如何定义与配置？若需禁止 enterprise 用户访问 bills 模块，应如何操作？ → A: 当前实现采用 `defaultPermissionsByRoleScope` 硬编码（`src/app.js` 约 437 行、`src/middleware/rbac.ts` 约 51 行），按 roleScope（platform/reseller/customer/department）分配权限。请求到达时由 `resolvePermissionForRequest` 将路径映射为权限码（如 `/v1/bills` → bills.list），`permissionGuard` 校验用户是否具备该权限。禁止 enterprise 访问 bills：从 `customer` 和 `department` 的权限列表中移除 `bills.list`、`bills.read`、`bills.export`、`bills.mark_paid`、`bills.adjust` 即可。若未来启用 DB 驱动的 roles/permissions/role_permissions 表，则通过数据库配置覆盖默认值。
-- Q: 后续版本能否按数据库表配置每个角色的访问权限（reseller_admin, reseller_sales_director, reseller_sales, reseller_finance, customer_admin, customer_ops）？ → A: 可以。V1.1 将新增专门任务：创建 roles/permissions/role_permissions 三表及迁移、预置 6 种角色与 38+ 权限码的 seed、重构 `getEffectivePermissions` 优先从 DB 解析、保留硬编码为兜底。详见 tasks.md Phase 23。
+- Q: 角色访问权限如何配置？禁止 enterprise 访问 bills？ → A: 当前采用 `defaultPermissionsByRoleScope` 硬编码。禁止 enterprise 访问 bills：从 `customer` 和 `department` 权限列表中移除 `bills.*` 权限即可。V1.1 将通过 DB 驱动 roles/permissions 表覆盖默认值。
 
 ### Session 2026-02-08
 
-- Q: 本系统的主要开发语言是什么？ → A: TypeScript (Node.js)
-- Q: 系统主数据库采用哪种方案？ → A: Supabase (PostgreSQL)
-- Q: MVP 阶段系统的交付形态是什么？ → A: API + 轻量管理后台（仅内部运营用简易管理界面）
-- Q: 系统的币种支持策略是什么？ → A: 按代理商固定币种（每个代理商配置一种结算币种，企业继承）
-- Q: MVP 阶段的部署环境是什么？ → A: Vercel (Serverless Functions)
-
-### Session 2026-02-08 (CMP.xlsx 对齐)
-
-- Q: 实体建模策略 — 独立表 vs 通用租户表？CMP.xlsx 将代理商（resellers）、企业客户（customers）建模为独立表，各有专属字段和状态机；当前 spec.md 使用通用 tenants 表（tenant_type 区分）。采用哪种方案？ → A: 采用 CMP.xlsx 方案 — 独立表（resellers、customers、operators、suppliers 各自独立建表，废弃通用 tenants 表）
-- Q: RBAC 权限模型 — CMP.xlsx 定义了完整的 permissions/roles/role_permissions 三表结构（38+ 权限码、7 种角色含 scope 层级 platform/reseller/customer），而当前 spec.md 仅使用 user_roles.role_name 文本字段。是否采用完整 RBAC 三表模型？ → A: 采用 CMP.xlsx 完整 RBAC 三表模型（permissions + roles + role_permissions），含 38+ 权限码和 7 种角色（platform_admin, reseller_admin, reseller_sales_director, reseller_sales, reseller_finance, customer_admin, customer_ops）
-- Q: 上游集成与运营商建模 — CMP.xlsx 构建了 operators 表（MCC/MNC 唯一、deprecation 工作流）和 upstream_integrations 表（关联 supplier+operator，含 API/CDR 配置），而当前 spec.md 缺少。是否采用？ → A: 采用 CMP.xlsx 方案 — 新增 operators 表（MCC/MNC 唯一约束、status=active/deprecated/error、replaced_by_id）和 upstream_integrations 表（supplier_id + operator_id 唯一约束，含 api_endpoint、api_secret_encrypted、cdr_method/endpoint/path/file_pattern）
-- Q: SIM 卡表扩展 — CMP.xlsx 定义了 sim_cards 表含 form_factor ENUM、多 IMSI（primary + 3 secondary）、IMEI 锁定、四方归属链。是否采用？ → A: 完整采用 CMP.xlsx 方案 — sims 表重命名为 sim_cards，新增 form_factor ENUM (consumer_removable/industrial_removable/consumer_embedded/industrial_embedded)、imsi_secondary_1/2/3、imei + imei_lock_enabled、四方归属链 (supplier_id + operator_id + reseller_id + customer_id)
-- Q: 企业 M2M 认证与 Webhook — CMP.xlsx 为企业客户定义了 api_key、api_secret_hash、webhook_url 字段。是否新增企业 API Key 认证能力？ → A: 采用 CMP.xlsx 方案 — customers 表新增 api_key (UNIQUE)、api_secret_hash (BYTEA)、webhook_url 字段，支持企业 M2M API Key 认证与 JWT 认证并行
+- Q: 主要开发语言？ → A: TypeScript (Node.js)
+- Q: 主数据库？ → A: Supabase (PostgreSQL)
+- Q: MVP 交付形态？ → A: API + 轻量管理后台（仅内部运营）
+- Q: 币种策略？ → A: 按代理商固定币种（企业继承）
+- Q: 部署环境？ → A: Vercel (Serverless Functions)
 
 ## Requirements *(mandatory)*
 
@@ -1139,7 +1121,7 @@
 - **FR-039**: 系统 MUST 实现统一事件目录（SIM_STATUS_CHANGED/SUBSCRIPTION_CHANGED/BILL_PUBLISHED/PAYMENT_CONFIRMED/ALERT_TRIGGERED/ENTERPRISE_STATUS_CHANGED）；事件向下游 Webhook 投递与重试见 [clarifications/webhook-delivery.md](clarifications/webhook-delivery.md)
 
 **实体建模（CMP.xlsx 对齐）**：
-- **FR-040**: 系统 MUST 使用独立表建模（resellers、customers、suppliers、`public_infos`、business_operators、operators），废弃通用 tenants 表
+- **FR-040**: 系统 MUST 使用独立表建模（resellers、customers、suppliers、`public_infos`、business_operators、operators），`tenants` 表作为统一身份标识与层级查询基础表保留，与独立域表并存
 - **FR-041**: 系统 MUST 维护 business_operators 表用于业务运营商主数据；operators 维护 supplier_id + operator_id 关联与 operator_id 业务索引
 - **FR-042**: 系统 MUST 维护 upstream_integrations 表（supplier_id + operator_id 唯一约束），含 API 端点和加密凭证、CDR 配置
 
@@ -1175,7 +1157,7 @@
 - **Upstream Integration（上游集成）**: 独立表 `upstream_integrations`，(supplier_id, operator_id) UNIQUE，含 API 端点/密钥/CDR 配置
 - **SM-DP+ System**: 独立表 `smdp_systems`，eSIM Profile 生成/分发系统，status (active/deactivated/suspended)，environment (test/production)
 - **Reseller（代理商）**: 独立表 `resellers`，运营平台主体，status (active/deactivated/suspended)，含 contact_email/contact_phone
-- **Customer（企业客户）**: 独立表 `customers`，核心租户对象，reseller_id FK，status (active/overdue/terminated)，含 api_key/api_secret_hash/webhook_url 用于 M2M 认证
+- **Customer（企业客户）**: 独立表 `customers`，核心租户对象，reseller_id FK，status (ACTIVE/INACTIVE/SUSPENDED)，含 api_key/api_secret_hash/webhook_url 用于 M2M 认证
 - **Department（部门）**: 企业下一级组织，计费主体最小粒度
 - **Permission（权限）**: 独立表 `permissions`，code UNIQUE，38+ 权限码覆盖 8 个模块
 - **Role（角色）**: 独立表 `roles`，code UNIQUE，7 种预置角色，scope (platform/reseller/customer)

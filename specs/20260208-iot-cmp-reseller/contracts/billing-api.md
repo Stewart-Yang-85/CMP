@@ -82,9 +82,10 @@ GET /v1/bills/{billId}
 
   "l2Groups": [
     {
-      "groupKey": "dept_001",
-      "groupType": "DEPARTMENT",
-      "groupName": "研发部",
+      "departmentId": "dept_001",
+      "departmentName": "研发部",
+      "packageId": "pkg_global_1gb",
+      "packageName": "Global 1GB",
       "subtotal": 8000.00,
       "simCount": 50,
       "monthlyFeeTotal": 5000.00,
@@ -92,10 +93,15 @@ GET /v1/bills/{billId}
       "overageChargeTotal": 500.00
     },
     {
-      "groupKey": "pkg_global_1gb",
-      "groupType": "PACKAGE",
-      "groupName": "Global 1GB",
-      "subtotal": 7680.50
+      "departmentId": "dept_001",
+      "departmentName": "研发部",
+      "packageId": "pkg_cn_addon",
+      "packageName": "CN Add-on",
+      "subtotal": 2480.50,
+      "simCount": 10,
+      "monthlyFeeTotal": 1000.00,
+      "usageChargeTotal": 1280.50,
+      "overageChargeTotal": 200.00
     }
   ],
 

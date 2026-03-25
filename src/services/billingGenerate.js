@@ -94,7 +94,7 @@ function aggregateLineItems({ lineItems, sims, packages, departments }) {
       monthlyFee: 0,
       usageCharge: 0,
       overageCharge: 0,
-      usageKb: 0,
+      usageMb: 0,
     }
     if (item.item_type === 'MONTHLY_FEE') {
       current.monthlyFee += Number(item.amount ?? 0)
@@ -106,7 +106,7 @@ function aggregateLineItems({ lineItems, sims, packages, departments }) {
       } else {
         current.usageCharge += Number(item.amount ?? 0)
       }
-      current.usageKb += Number(item.metadata?.chargedMb ?? 0)
+      current.usageMb += Number(item.metadata?.chargedMb ?? 0)
       if (pkgId) current.packageVersionId = pkgId
     }
     simMap.set(simId, current)
@@ -136,7 +136,7 @@ function aggregateLineItems({ lineItems, sims, packages, departments }) {
         monthlyFee: Number(entry.monthlyFee.toFixed(2)),
         usageCharge: Number(entry.usageCharge.toFixed(2)),
         overageCharge: Number(entry.overageCharge.toFixed(2)),
-        usageKb: Math.floor(entry.usageKb),
+        usageMb: Math.floor(entry.usageMb),
         subtotal,
       },
     })

@@ -569,6 +569,146 @@ export async function getControlPolicyDetail({ supabase, controlPolicyId }) {
   return { ok: true, value: mapControlPolicyModule(item) }
 }
 
+export async function listCommercialTerms({ supabase, status, page, pageSize, enterpriseId, resellerId }) {
+  if (enterpriseId && !isValidUuid(enterpriseId)) {
+    return toError(400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+  }
+  if (resellerId && !isValidUuid(resellerId)) {
+    return toError(400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
+  }
+  const filters = [
+    'select=commercial_terms_id,enterprise_id,reseller_id,commercial_terms,created_at,updated_at',
+  ]
+  if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
+  if (resellerId) filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
+  filters.push('order=created_at.desc')
+  const rows = await supabase.select('commercial_terms_modules', filters.join('&'))
+  let items = (Array.isArray(rows) ? rows : []).map(mapCommercialTermsModule)
+  if (status) items = items.filter((it) => String(it?.status ?? '') === String(status))
+  const p = Number(page) || 1
+  const ps = Number(pageSize) || 20
+  const start = (p - 1) * ps
+  const total = items.length
+  items = items.slice(start, start + ps)
+  return { ok: true, value: { items, total } }
+}
+
+export async function listControlPolicies({ supabase, status, page, pageSize, enterpriseId, resellerId }) {
+  if (enterpriseId && !isValidUuid(enterpriseId)) {
+    return toError(400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
+  }
+  if (resellerId && !isValidUuid(resellerId)) {
+    return toError(400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
+  }
+  const filters = [
+    'select=control_policy_id,enterprise_id,reseller_id,control_policy,created_at,updated_at',
+  ]
+  if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
+  if (resellerId) filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
+  filters.push('order=created_at.desc')
+  const rows = await supabase.select('control_policy_modules', filters.join('&'))
+  let items = (Array.isArray(rows) ? rows : []).map(mapControlPolicyModule)
+  if (status) items = items.filter((it) => String(it?.status ?? '') === String(status))
+  const p = Number(page) || 1
+  const ps = Number(pageSize) || 20
+  const start = (p - 1) * ps
+  const total = items.length
+  items = items.slice(start, start + ps)
+  return { ok: true, value: { items, total } }
+}
+
+export async function cloneCommercialTerms({ supabase, commercialTermsId, payload, audit }) {
+  if (!isValidUuid(commercialTermsId)) {
+    return toError(400, 'BAD_REQUEST', 'commercialTermsId must be a valid uuid.')
+  }
+  const sourceRows = await supabase.select(
+    'commercial_terms_modules',
+    `select=commercial_terms_id,enterprise_id,reseller_id,commercial_terms,created_at,updated_at&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`
+  )
+  const source = Array.isArray(sourceRows) ? sourceRows[0] : null
+  if (!source?.commercial_terms_id) return toError(404, 'NOT_FOUND', 'Source commercial terms not found.')
+  const rows = await supabase.insert(
+    'commercial_terms_modules',
+    {
+      enterprise_id: payload?.enterpriseId ?? source.enterprise_id,
+      reseller_id: payload?.resellerId ?? source.reseller_id,
+      commercial_terms: payload?.commercialTerms ?? source.commercial_terms,
+    },
+    { returning: 'representation' }
+  )
+  const cloned = Array.isArray(rows) ? rows[0] : null
+  if (!cloned?.commercial_terms_id) {
+    return toError(500, 'INTERNAL_ERROR', 'Failed to clone commercial terms.')
+  }
+  await writeAuditLog(supabase, {
+    actor_user_id: audit?.actorUserId ?? null,
+    actor_role: audit?.actorRole ?? null,
+    tenant_id: source.enterprise_id ?? null,
+    action: 'COMMERCIAL_TERMS_CLONED',
+    target_type: 'COMMERCIAL_TERMS',
+    target_id: cloned.commercial_terms_id,
+    request_id: audit?.requestId ?? null,
+    source_ip: audit?.sourceIp ?? null,
+    after_data: {
+      commercialTermsId: cloned.commercial_terms_id,
+      sourceCommercialTermsId: commercialTermsId,
+    },
+  })
+  return {
+    ok: true,
+    value: {
+      ...mapCommercialTermsModule(cloned),
+      sourceCommercialTermsId: commercialTermsId,
+    },
+  }
+}
+
+export async function cloneControlPolicy({ supabase, controlPolicyId, payload, audit }) {
+  if (!isValidUuid(controlPolicyId)) {
+    return toError(400, 'BAD_REQUEST', 'controlPolicyId must be a valid uuid.')
+  }
+  const sourceRows = await supabase.select(
+    'control_policy_modules',
+    `select=control_policy_id,enterprise_id,reseller_id,control_policy,created_at,updated_at&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`
+  )
+  const source = Array.isArray(sourceRows) ? sourceRows[0] : null
+  if (!source?.control_policy_id) return toError(404, 'NOT_FOUND', 'Source control policy not found.')
+  const rows = await supabase.insert(
+    'control_policy_modules',
+    {
+      enterprise_id: payload?.enterpriseId ?? source.enterprise_id,
+      reseller_id: payload?.resellerId ?? source.reseller_id,
+      control_policy: payload?.controlPolicy ?? source.control_policy,
+    },
+    { returning: 'representation' }
+  )
+  const cloned = Array.isArray(rows) ? rows[0] : null
+  if (!cloned?.control_policy_id) {
+    return toError(500, 'INTERNAL_ERROR', 'Failed to clone control policy.')
+  }
+  await writeAuditLog(supabase, {
+    actor_user_id: audit?.actorUserId ?? null,
+    actor_role: audit?.actorRole ?? null,
+    tenant_id: source.enterprise_id ?? null,
+    action: 'CONTROL_POLICY_CLONED',
+    target_type: 'CONTROL_POLICY',
+    target_id: cloned.control_policy_id,
+    request_id: audit?.requestId ?? null,
+    source_ip: audit?.sourceIp ?? null,
+    after_data: {
+      controlPolicyId: cloned.control_policy_id,
+      sourceControlPolicyId: controlPolicyId,
+    },
+  })
+  return {
+    ok: true,
+    value: {
+      ...mapControlPolicyModule(cloned),
+      sourceControlPolicyId: controlPolicyId,
+    },
+  }
+}
+
 export async function createCarrierService({ supabase, payload, audit }) {
   const normalized = await validateCarrierServiceModule({ supabase, payload })
   if (!normalized.ok) return normalized

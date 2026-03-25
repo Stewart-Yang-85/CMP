@@ -46,8 +46,8 @@ export async function createAdjustmentNote({ supabase, billId, type, amount, rea
   if (!bill) {
     return toError(404, 'RESOURCE_NOT_FOUND', 'Bill not found.')
   }
-  if (!['PUBLISHED', 'OVERDUE', 'PAID'].includes(String(bill.status || '').toUpperCase())) {
-    return toError(409, 'INVALID_STATUS', 'Adjustment is only allowed for PUBLISHED, OVERDUE, or PAID bills.')
+  if (!['PUBLISHED', 'OVERDUE'].includes(String(bill.status || '').toUpperCase())) {
+    return toError(409, 'INVALID_STATUS', 'Adjustment is only allowed for PUBLISHED or OVERDUE bills.')
   }
   const noteRows = await supabase.insert('adjustment_notes', {
     enterprise_id: bill.enterprise_id,

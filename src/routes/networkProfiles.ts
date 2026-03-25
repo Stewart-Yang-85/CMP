@@ -3,6 +3,8 @@ import {
   createRoamingProfile,
   createApnProfileVersion,
   createRoamingProfileVersion,
+  cloneApnProfile,
+  cloneRoamingProfile,
   deriveRoamingProfileVersion,
   listApnProfiles,
   listRoamingProfileEntries,
@@ -13,6 +15,8 @@ import {
   publishApnProfile,
   publishRoamingProfile,
   rollbackProfileVersion,
+  updateApnProfile,
+  updateRoamingProfile,
 } from '../services/networkProfile.js'
 
 type Deps = {
@@ -131,6 +135,70 @@ export function registerNetworkProfileRoutes({ app, prefix, deps }: { app: any; 
     const result = await getRoamingProfileDetail({ supabase, roamingProfileId })
     if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
     res.json((result as any).value)
+  })
+
+  app.put(`${prefix}/apn-profiles/:apnProfileId`, async (req: any, res: any) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const audit = {
+      actorUserId: req?.cmpAuth?.userId ?? null,
+      actorRole: req?.cmpAuth?.role ?? null,
+      requestId: getTraceId(res),
+      sourceIp: req.ip,
+    }
+    const apnProfileId = String(req.params.apnProfileId || '').trim()
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const result = await updateApnProfile({ supabase, apnProfileId, payload: req.body ?? {}, audit })
+    if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
+    res.json((result as any).value)
+  })
+
+  app.put(`${prefix}/roaming-profiles/:roamingProfileId`, async (req: any, res: any) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const audit = {
+      actorUserId: req?.cmpAuth?.userId ?? null,
+      actorRole: req?.cmpAuth?.role ?? null,
+      requestId: getTraceId(res),
+      sourceIp: req.ip,
+    }
+    const roamingProfileId = String(req.params.roamingProfileId || '').trim()
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const result = await updateRoamingProfile({ supabase, roamingProfileId, payload: req.body ?? {}, audit })
+    if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
+    res.json((result as any).value)
+  })
+
+  app.post(`${prefix}/apn-profiles/:apnProfileId\\:clone`, async (req: any, res: any) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const audit = {
+      actorUserId: req?.cmpAuth?.userId ?? null,
+      actorRole: req?.cmpAuth?.role ?? null,
+      requestId: getTraceId(res),
+      sourceIp: req.ip,
+    }
+    const apnProfileId = String(req.params.apnProfileId || '').trim()
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const result = await cloneApnProfile({ supabase, apnProfileId, payload: req.body ?? {}, audit })
+    if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
+    res.status(201).json((result as any).value)
+  })
+
+  app.post(`${prefix}/roaming-profiles/:roamingProfileId\\:clone`, async (req: any, res: any) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const audit = {
+      actorUserId: req?.cmpAuth?.userId ?? null,
+      actorRole: req?.cmpAuth?.role ?? null,
+      requestId: getTraceId(res),
+      sourceIp: req.ip,
+    }
+    const roamingProfileId = String(req.params.roamingProfileId || '').trim()
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const result = await cloneRoamingProfile({ supabase, roamingProfileId, payload: req.body ?? {}, audit })
+    if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
+    res.status(201).json((result as any).value)
   })
 
   app.post(`${prefix}/apn-profiles/:apnProfileId/versions`, async (req: any, res: any) => {

@@ -1074,8 +1074,8 @@ ALTER TABLE bills
   ADD COLUMN IF NOT EXISTS overdue_at timestamptz;
 
 ALTER TABLE bill_line_items
-  ADD COLUMN IF NOT EXISTS group_key text,
-  ADD COLUMN IF NOT EXISTS group_type text,
+  ADD COLUMN IF NOT EXISTS department_id uuid REFERENCES departments(id),
+  ADD COLUMN IF NOT EXISTS package_id uuid,
   ADD COLUMN IF NOT EXISTS group_subtotal numeric(12,2);
 ```
 
@@ -1514,7 +1514,7 @@ graph TD
 | rating_results.* | 写 | 批价计费结果 |
 | bills.* | 写 | 创建账单（GENERATED→PUBLISHED） |
 | bill_line_items.* | 写 | L3 SIM 级明细 |
-| bill_line_items.group_key/group_type | 写 | L2 分组标记 |
+| bill_line_items.department_id/package_id | 写 | L2 交叉分组标记（department × package） |
 | adjustment_notes.* | 写 | 迟到话单调账草稿 |
 | events.* | 写 | BILL_PUBLISHED 事件 |
 
@@ -1793,7 +1793,7 @@ graph TD
 - [ ] DDL: 0024 — 创建 provisioning_status ENUM + provisioning_orders 表 + 索引
 - [ ] DDL: 0025 — 创建 reconciliation_runs 表
 - [ ] DDL: 0026 — 创建 sim_form_factor ENUM + ALTER sim_cards 新增 secondary IMSI/形态/IMEI Lock/激活码字段
-- [ ] DDL: 0027 — ALTER bills 新增 reseller_id/payment_ref/overdue_at + ALTER bill_line_items 新增 group_key/group_type/group_subtotal
+- [ ] DDL: 0027 — ALTER bills 新增 reseller_id/payment_ref/overdue_at + ALTER bill_line_items 新增 department_id/package_id/group_subtotal（L2 交叉分组）
 - [ ] DDL: 0028 — ALTER jobs 新增 reseller_id/customer_id/idempotency_key/file_hash
 - [ ] DDL: 0029 — 新增索引（bills, subscriptions, usage_daily_summary, audit_logs, events 等 8 个索引）
 - [ ] DDL: 0030 — 新增 9 个新表的 RLS 行级安全策略

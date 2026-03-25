@@ -4,7 +4,7 @@ description: "IoT CMP Reseller 系统实施计划 — 从 Express 单体到完�
 
 # Implementation Plan: IoT CMP Reseller System
 
-**Feature**: `iot-cmp-reseller` | **Date**: 2026-03-24 | **Spec**: [spec.md](./spec.md)
+**Feature**: `iot-cmp-reseller` | **Date**: 2026-03-25 | **Spec**: [spec.md](./spec.md)
 **Input**: Feature specification from `/specs/20260208-iot-cmp-reseller/spec.md`
 
 ## Summary
@@ -14,8 +14,8 @@ description: "IoT CMP Reseller 系统实施计划 — 从 Express 单体到完�
 1. **多租户组织管理**：供应商→代理商→企业→部门四级层级 + RBAC 七角色权限模型
 2. **SIM/eSIM 全生命周期**：5 状态机 + 批量导入 + 上游双向同步 + IMEI 锁定
 3. **产品包与资费引擎**：4 种 Price Plan 类型 + 不可变快照机制 + Zone-based PAYG
-4. **计费与出账**：高水位月租 + Waterfall 用量匹配 + 三级账单 + 调账
-5. **信控与催收**：Dunning 等级管理 + 手工管控决策
+4. **计费与出账**：高水位月租 + Waterfall 用量匹配 + 三级账单（L2 按 department×package 交叉分组） + 调账
+5. **信控与催收**：Dunning 等级管理 + 手工管控决策（overdue 概念仅在 Dunning 层管理，不作为企业状态）
 6. **多供应商虚拟化**：SPI 适配器 + 能力协商 + 对账
 7. **监控与可观测性**：统一告警引擎 + Webhook 投递 + 事件目录
 
@@ -88,46 +88,9 @@ src/
 ├── password.js                  # 密码哈希
 ├── supabaseRest.js              # Supabase REST 客户端（重试+熔断）
 ├── routes/                      # API 路由层
-│   ├── events.ts                # 事件路由
-│   ├── networkProfiles.ts       # APN/Roaming/Control Policy 路由
-│   ├── packageModules.ts        # 产品包模块路由
-│   ├── packages.ts              # 产品包路由
-│   ├── pricePlans.ts            # Price Plan 路由
-│   ├── reconciliation.ts        # 对账路由
-│   ├── simPhase4.ts             # SIM 生命周期路由
-│   ├── subscriptions.ts         # 订阅路由
-│   ├── vendorMappings.ts        # 供应商映射路由
-│   └── webhooks.ts              # Webhook 路由
 ├── services/                    # 业务逻辑层（38+ 服务模块）
-│   ├── simLifecycle.ts          # SIM 状态机
-│   ├── simImport.ts             # SIM 批量导入
-│   ├── billingGenerate.ts       # 账单生成
-│   ├── billingSchedule.ts       # 计费调度
-│   ├── billStatusMachine.ts     # 账单状态机
-│   ├── subscription.ts          # 订阅管理
-│   ├── pricePlan.ts             # Price Plan 管理
-│   ├── package.ts               # 产品包管理
-│   ├── networkProfile.ts        # 网络策略管理
-│   ├── dunning.ts               # 催收管理
-│   ├── alerting.ts              # 告警服务
-│   ├── reconciliation.ts        # 对账服务
-│   ├── webhook.ts               # Webhook 投递
-│   ├── eventEmitter.ts          # 事件发射器
-│   ├── adjustmentNote.ts        # 调账服务
-│   ├── connectivity.ts          # 连接状态
-│   ├── gdprRetention.ts         # GDPR 数据保留
-│   ├── lateCdr.js               # 迟到话单处理
-│   ├── usageCleaning.js         # 用量清洗
-│   └── vendorMapping.ts         # 供应商映射
 ├── middleware/                   # 中间件层
-│   ├── rbac.ts                  # RBAC 权限守卫
-│   ├── tenantScope.ts           # 租户作用域
-│   ├── apiKeyAuth.ts            # API Key 认证
-│   ├── auditLog.ts              # 审计日志
-│   ├── oidcAuth.ts              # OIDC 认证
-│   └── rateLimit.ts             # 速率限制
 ├── vendors/                     # 供应商适配器
-│   └── wxzhonggeng/             # 微众耕适配器（当前唯一实现）
 ├── cron/                        # Cron 任务入口
 ├── queues/                      # 异步队列
 ├── types/                       # TypeScript 类型定义
@@ -139,19 +102,7 @@ tests/
 └── e2e/                         # 端到端测试
 
 supabase/
-└── migrations/                  # 数据库迁移（12 个已有）
-    ├── 20260311100001_core_schema.sql
-    ├── 20260311100002_billing_golden_tests.sql
-    ├── 20260311100003_tenant_reseller.sql
-    ├── 20260311100004_sim_connectivity.sql
-    ├── 20260311100005_billing_integration.sql
-    ├── 20260311100006_package_modules.sql
-    ├── 20260311100007_rls_policies.sql
-    ├── 20260311100008_tenant_model_unification.sql
-    ├── 20260311100009_rls_tenant_isolation.sql
-    ├── 20260312100001_subscription_cancel_schedules.sql
-    ├── 20260313100001_deprecate_legacy_carriers.sql
-    └── 20260314100001_normalize_reseller_status_enum.sql
+└── migrations/                  # 数据库迁移
 ```
 
 **Structure Decision**: 保持现有 Express 单体结构，按 `routes/` + `services/` + `middleware/` 分层。新功能遵循现有模式：路由层处理 HTTP、服务层处理业务逻辑、中间件处理横切关注点。数据库变更通过 `supabase/migrations/` 增量迁移管理。
@@ -166,18 +117,21 @@ supabase/
 2. **所有技术未知项已在 /adk:clarify 阶段解决**：语言（TypeScript）、数据库（Supabase）、部署（Vercel）、币种策略、MVP 形态均已确定
 3. **差距主要集中在 V1.1 增强**：RBAC DB 驱动、Reseller 身份统一、Price Plan 快照重构、KB→MB 统一
 
-### V1.1 关键架构决策（2026-03-24 澄清）
+### 关键架构决策
 
 | 决策 | 方案 | 理由 |
 |------|------|------|
-| Phase 24: Reseller 身份统一 | 新增 `reseller_tenant_id` FK→tenants，弃用 `reseller_id` | 消除双标识歧义 |
-| Phase 24: JWT 迁移 | 强制重登录（修改 JWT_SECRET） | 简单可靠，无需维护过渡映射 |
+| 实体建模 | 独立表 + tenants 骨架表并存 | 域表独立管理字段与状态，tenants 提供统一身份与层级查询 |
+| customers.status | ACTIVE/INACTIVE/SUSPENDED | 行政管控为主，overdue 移至 Dunning 层独立管理 |
+| SIM lifecycle_sub_status | 仅激活方向（normal/activating/activation_failed） | 停机/复机/拆机用同步 API + status_sync_conflict 标志 |
+| ADD_ON 月度循环取消 | 与 MAIN 一致（到本计费周期结束） | ONE_TIME 按到期截止，月度循环统一月底取消 |
+| L2 账单分组 | department_id × package_id 交叉分组 | 支持按部门或按产品包双维度展开 |
+| Phase 24: Reseller 身份统一 | 新增 reseller_tenant_id FK→tenants | 消除双标识歧义 |
+| Phase 24: JWT 迁移 | 强制重登录（修改 JWT_SECRET） | 简单可靠 |
 | Phase 23: RBAC DB 驱动 | 不加功能开关，依赖测试覆盖 | 保持代码简单 |
-| Phase 19+19b: 合并为原子部署 | Price Plan 快照重构 + KB→MB 统一一次性部署 | 消除中间态返工 |
-| Phase 25: T141 拆分 | 3 子任务（路由/幂等/无能力处理） | 独立关注点分离 |
+| Phase 19: 合并为原子部署 | Price Plan 快照重构 + KB→MB 统一一次性部署 | 消除中间态返工 |
 | V1.1 破坏性变更 | 单次停机窗口（30-60 分钟） | Phase 24+23+19 一次性完成 |
-| V1.1 执行顺序 | 24→23→19→21/22/25/26/27 | 基础设施优先，功能扩展后行 |
-| `public_infos` 隔离 | 与 `business_operators`/`operator_id` 零关联 | FR-057 强制要求 |
+| `public_infos` 隔离 | 与 business_operators/operator_id 零关联 | FR-057 强制要求 |
 
 ## Phase 1: 设计产出摘要
 
@@ -191,6 +145,9 @@ supabase/
 供应商(suppliers) ──1:N──► 运营商关联(operators) ◄──M:N──► 业务运营商(business_operators)
                   ──1:N──► 上游集成(upstream_integrations)
 
+tenants(身份骨架) ──1:1──► resellers / customers（域表）
+                  parent_id 层级链：reseller_tenant → customer_tenant
+
 代理商(resellers) ──1:N──► 企业(customers) ──1:N──► 部门(departments)
                   ──1:N──► 用户(users)
 
@@ -200,7 +157,7 @@ eSIM(esim_profiles) ──N:1──► 供应商 + 运营商 + SM-DP+(smdp_syste
 产品包(packages) ──引用──► Price Plan(快照ID) + Carrier Service + Control Policy(快照ID) + Commercial Terms
 
 订阅(subscriptions) ──N:1──► SIM + 产品包
-账单(bills) ──1:N──► 明细(bill_line_items) ──关联──► 调账(adjustment_notes)
+账单(bills) ──1:N──► 明细(bill_line_items, 含 department_id + package_id 用于 L2 交叉分组)
 
 public_infos ──────── 完全独立，与业务表零关联 ────────
 ```
@@ -260,7 +217,7 @@ Phase 4 (Week 7-8): 集成与验收
 Phase 24: Reseller 身份统一
   ├── 新增 reseller_tenant_id FK→tenants
   ├── 数据迁移（customers.reseller_id → reseller_tenant_id）
-  ├── JWT 版本号/SECRET 更新 → 强制重登录
+  ├── JWT SECRET 更新 → 强制重登录
   └── 弃用旧 reseller_id 引用
 
 Phase 23: RBAC DB 驱动
