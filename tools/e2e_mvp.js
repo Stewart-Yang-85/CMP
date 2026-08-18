@@ -3,13 +3,15 @@
  * Tests the complete flow: Reseller → Customer → SIM → Package → Subscription → Billing → Bill
  *
  * Usage: SUPABASE_URL=... SUPABASE_ANON_KEY=... SUPABASE_SERVICE_ROLE_KEY=... node tools/e2e_mvp.js
+ *
+ * FR-058: 日志中的「Reseller」对外标识为 `tenants.tenant_id`。`create_customer` 仍传入 `resellers.id`。
  */
 import { createSupabaseRestClient } from '../src/supabaseRest.js'
 import { computeMonthlyCharges, generateMonthlyBill, roundAmount } from '../src/billing.js'
 
 const supabase = createSupabaseRestClient({ useServiceRole: true })
 
-let resellerId, resellerTenantId
+let resellerRecordId, resellerTenantId
 let customerId, customerTenantId
 let supplierId
 let simId, iccid
@@ -38,15 +40,16 @@ async function main() {
       p_contact_email: 'e2e@test.com',
       p_currency: 'USD',
     })
-    resellerId = result?.reseller_id
+    resellerRecordId = result?.reseller_id
     resellerTenantId = result?.tenant_id
-    if (!resellerId) throw new Error('No reseller_id returned')
+    if (!resellerRecordId) throw new Error('No reseller_id returned')
+    if (!resellerTenantId) throw new Error('No tenant_id returned from create_reseller')
   })
 
   // Step 2: Create Customer
   await step('Create customer via RPC', async () => {
     const result = await supabase.rpc('create_customer', {
-      p_reseller_id: resellerId,
+      p_reseller_id: resellerRecordId,
       p_name: `E2E-Customer-${Date.now()}`,
       p_auto_suspend_enabled: true,
     })
@@ -94,8 +97,8 @@ async function main() {
     }, { returning: 'minimal' })
   })
 
-  // Step 6: Create Price Plan (FIXED_BUNDLE)
-  await step('Create Fixed Bundle price plan', async () => {
+  // Step 6–9: Price plan snapshot + single sellable package row (Phase 19 + Phase 28)
+  await step('Create price plan + published package', async () => {
     const rows = await supabase.insert('price_plans', {
       enterprise_id: customerTenantId,
       name: `E2E-FixedBundle-${Date.now()}`,
@@ -104,46 +107,27 @@ async function main() {
       currency: 'USD',
       billing_cycle_type: 'CALENDAR_MONTH',
       first_cycle_proration: 'NONE',
+      version: 1,
+      monthly_fee: 10.0,
+      deactivated_monthly_fee: 5.0,
+      total_quota_mb: 1024,
+      overage_rate_per_mb: 0.1024,
+      is_current: true,
     }, { returning: 'representation' })
     pricePlanId = rows?.[0]?.price_plan_id
     if (!pricePlanId) throw new Error('No price_plan_id returned')
-  })
 
-  // Step 7: Create Price Plan Version
-  await step('Create price plan version', async () => {
-    await supabase.insert('price_plan_versions', {
-      price_plan_id: pricePlanId,
-      version: 1,
-      monthly_fee: 10.00,
-      deactivated_monthly_fee: 5.00,
-      total_quota_mb: 1024, // 1GB
-      overage_rate_per_mb: 0.1024,
-    }, { returning: 'minimal' })
-  })
-
-  // Step 8: Create Package
-  await step('Create package', async () => {
-    const rows = await supabase.insert('packages', {
+    const pkgRows = await supabase.insert('packages', {
       enterprise_id: customerTenantId,
       name: `E2E-Package-${Date.now()}`,
-    }, { returning: 'representation' })
-    packageId = rows?.[0]?.package_id
-    if (!packageId) throw new Error('No package_id returned')
-  })
-
-  // Step 9: Create Package Version
-  await step('Create package version', async () => {
-    const rows = await supabase.insert('package_versions', {
-      package_id: packageId,
-      version: 1,
       status: 'PUBLISHED',
-      supplier_id: supplierId,
-      service_type: 'DATA',
+      effective_from: new Date().toISOString(),
+      published_at: new Date().toISOString(),
       price_plan_id: pricePlanId,
-      roaming_profile: { type: 'GLOBAL' },
     }, { returning: 'representation' })
-    packageVersionId = rows?.[0]?.package_version_id
-    if (!packageVersionId) throw new Error('No package_version_id returned')
+    packageId = pkgRows?.[0]?.package_id
+    if (!packageId) throw new Error('No package_id returned')
+    packageVersionId = packageId
   })
 
   // Step 10: Create Subscription
@@ -152,7 +136,7 @@ async function main() {
       enterprise_id: customerTenantId,
       sim_id: simId,
       subscription_kind: 'MAIN',
-      package_version_id: packageVersionId,
+      package_id: packageId,
       state: 'ACTIVE',
       effective_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
     }, { returning: 'representation' })
@@ -237,7 +221,8 @@ async function main() {
   })
 
   console.log('\n=== E2E MVP Integration Test PASSED ===')
-  console.log(`Reseller: ${resellerId}`)
+  console.log(`Reseller tenant_id (API): ${resellerTenantId}`)
+  console.log(`Reseller resellers.id (internal): ${resellerRecordId}`)
   console.log(`Customer: ${customerId} (tenant: ${customerTenantId})`)
   console.log(`SIM: ${simId} (${iccid})`)
   console.log(`Bill: ${billId}`)

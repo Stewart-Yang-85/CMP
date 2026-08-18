@@ -1,5 +1,5 @@
-import { runSimImport } from '../services/simImport.js'
-import { parseSimIdentifier, fetchSimStateHistory, changeSimStatus, batchDeactivateSims, batchChangeSimStatus } from '../services/simLifecycle.js'
+import { runSimImport, parseIccidsFromAssignInventoryCsv } from '../services/simImport.js'
+import { parseSimIdentifier, fetchSimStateHistory, changeSimStatus, batchDeactivateSims, batchChangeSimStatus, assignInventorySimsToEnterprise } from '../services/simLifecycle.js'
 
 function escapeCsv(value) {
   if (value === null || value === undefined) return ''
@@ -171,7 +171,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
 
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
 
-    const resellerIdQuery = req.query.resellerId ? String(req.query.resellerId) : null
+    const resellerIdQueryCsv = req.query.resellerId ? String(req.query.resellerId).trim() : null
     const pathEnterpriseId = req.params.enterpriseId ? String(req.params.enterpriseId) : null
     const enterpriseIdQuery = pathEnterpriseId || (req.query.enterpriseId ? String(req.query.enterpriseId) : null)
     const departmentIdQuery = req.query.departmentId ? String(req.query.departmentId) : null
@@ -184,16 +184,15 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     const role = req?.cmpAuth?.role ? String(req.cmpAuth.role) : null
 
     if (roleScope === 'platform' || role === 'platform_admin') {
-      if (resellerIdQuery && !isValidUuid(resellerIdQuery)) {
+      if (resellerIdQueryCsv && !isValidUuid(resellerIdQueryCsv)) {
         return sendError(res, 400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
       }
       if (enterpriseIdQuery && !isValidUuid(enterpriseIdQuery)) {
         return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
       }
-      if (resellerIdQuery) {
-        // Phase 24: resellerId is always tenant_id, no resolution needed
-        resellerId = resellerIdQuery
-        resellerTenantIdForCsv = resellerIdQuery
+      if (resellerIdQueryCsv) {
+        resellerId = resellerIdQueryCsv
+        resellerTenantIdForCsv = resellerIdQueryCsv
       }
       enterpriseId = enterpriseIdQuery
     } else if (roleScope === 'reseller') {
@@ -551,9 +550,6 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     if (!supplierId || !isValidUuid(supplierId)) {
       return sendError(res, 400, 'BAD_REQUEST', 'supplierId is required and must be a valid uuid.')
     }
-    if (!apn) {
-      return sendError(res, 400, 'BAD_REQUEST', 'apn is required.')
-    }
     if (!operatorId || !isValidUuid(operatorId)) {
       return sendError(res, 400, 'BAD_REQUEST', 'operatorId is required and must be a valid uuid.')
     }
@@ -568,7 +564,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       supabase,
       csvText,
       supplierId,
-      apn,
+      apn: apn ?? null,
       operatorId,
       enterpriseId,
       batchId,
@@ -581,7 +577,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     if (!result.ok) {
       return sendError(res, result.status, result.code, result.message)
     }
-    res.status(202).json({
+    res.code().send({
       jobId: result.jobId,
       status: result.status,
       totalRows: result.totalRows,
@@ -691,7 +687,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     }
     const rows = await supabase.insert('sims', insertPayload)
     const sim = Array.isArray(rows) ? rows[0] : null
-    res.status(201).json({
+    res.code().send({
       simId: sim?.sim_id ?? null,
       iccid,
       status: sim?.status ?? 'INVENTORY',
@@ -748,20 +744,9 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     // T143: Resolve SIM IDs from package subscriptions
     let packageSimIds = null
     if (packageIdQuery) {
-      const pvRows = await supabase.select(
-        'package_versions',
-        `select=package_version_id&package_id=eq.${encodeURIComponent(packageIdQuery)}`
-      )
-      const pvIds = (Array.isArray(pvRows) ? pvRows : [])
-        .map((r) => String(r?.package_version_id ?? '').trim())
-        .filter(Boolean)
-      if (!pvIds.length) {
-        return res.json({ items: [], total: 0, page, pageSize: limit })
-      }
-      const pvIdFilter = pvIds.map((id) => encodeURIComponent(id)).join(',')
       const subRows = await supabase.select(
         'subscriptions',
-        `select=sim_id&package_version_id=in.(${pvIdFilter})&state=in.(ACTIVE,PENDING)`
+        `select=sim_id&package_id=eq.${encodeURIComponent(packageIdQuery)}&state=in.(ACTIVE,PENDING)`
       )
       packageSimIds = new Set(
         (Array.isArray(subRows) ? subRows : [])
@@ -769,14 +754,14 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
           .filter(Boolean)
       )
       if (packageSimIds.size === 0) {
-        return res.json({ items: [], total: 0, page, pageSize: limit })
+        return res.send({ items: [], total: 0, page, pageSize: limit })
       }
     }
     let operatorFilter = null
     if (operatorId) {
       const resolved = await resolveOperatorFilter(supabase, operatorId, supplierId)
       if (!resolved) {
-        return res.json({ items: [], total: 0, page, pageSize: limit })
+        return res.send({ items: [], total: 0, page, pageSize: limit })
       }
       operatorFilter = resolved
     }
@@ -871,7 +856,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       filterPairs.push(`page=${page}`)
       setXFilters(res, filterPairs.join(';'))
     }
-    res.json({
+    res.send({
       items,
       total: typeof total === 'number' ? total : items.length,
       page,
@@ -889,7 +874,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     const status = req.query.status ? String(req.query.status) : null
     const supplierId = req.query.supplierId ? String(req.query.supplierId) : null
     const operatorId = req.query.operatorId ? String(req.query.operatorId) : null
-    const resellerIdQuery = req.query.resellerId ? String(req.query.resellerId) : null
+    const resellerTenantIdQuery = req.query.resellerId ? String(req.query.resellerId).trim() : null
     const enterpriseIdQuery = req.query.enterpriseId ? String(req.query.enterpriseId) : null
     const departmentIdQuery = req.query.departmentId ? String(req.query.departmentId) : null
     const packageIdQuery = req.query.packageId ? String(req.query.packageId).trim() : null
@@ -906,7 +891,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     if (operatorId && !isValidUuid(operatorId)) {
       return sendError(res, 400, 'BAD_REQUEST', 'operatorId must be a valid uuid.')
     }
-    if (resellerIdQuery && !isValidUuid(resellerIdQuery)) {
+    if (resellerTenantIdQuery && !isValidUuid(resellerTenantIdQuery)) {
       return sendError(res, 400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
     }
     if (packageIdQuery && !isValidUuid(packageIdQuery)) {
@@ -920,7 +905,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     if (operatorId) {
       const resolved = await resolveOperatorFilter(supabase, operatorId, supplierId)
       if (!resolved) {
-        return res.json({ items: [], total: 0, page, pageSize: limit })
+        return res.send({ items: [], total: 0, page, pageSize: limit })
       }
       operatorFilter = resolved
     }
@@ -940,10 +925,9 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       }
     } else if (roleScope === 'platform') {
       if (enterpriseIdQuery) enterpriseId = enterpriseIdQuery
-      if (resellerIdQuery) {
-        // Phase 24: resellerId is always tenant_id, no resolution needed
-        resellerId = resellerIdQuery
-        resellerTenantId = resellerIdQuery
+      if (resellerTenantIdQuery) {
+        resellerId = resellerTenantIdQuery
+        resellerTenantId = resellerTenantIdQuery
       }
     }
     const departmentId = roleScope === 'department' ? getDepartmentIdFromReq(req) : await resolveDepartmentForEnterprise(req, res, supabase, enterpriseId, departmentIdQuery)
@@ -992,7 +976,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
           } else if (resellerSupplierIds && resellerSupplierIds.length > 0) {
             filters.push(`and(enterprise_id.is.null,supplier_id.in.(${resellerSupplierIds.map((id) => encodeURIComponent(id)).join(',')}))`)
           } else {
-            return res.json({ items: [], total: 0, page, pageSize: limit })
+            return res.send({ items: [], total: 0, page, pageSize: limit })
           }
         }
       } else {
@@ -1014,20 +998,9 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     // T142: Resolve SIM IDs from package subscriptions
     let packageSimIds = null
     if (packageIdQuery) {
-      const pvRows = await supabase.select(
-        'package_versions',
-        `select=package_version_id&package_id=eq.${encodeURIComponent(packageIdQuery)}`
-      )
-      const pvIds = (Array.isArray(pvRows) ? pvRows : [])
-        .map((r) => String(r?.package_version_id ?? '').trim())
-        .filter(Boolean)
-      if (!pvIds.length) {
-        return res.json({ items: [], total: 0, page, pageSize: limit })
-      }
-      const pvIdFilter = pvIds.map((id) => encodeURIComponent(id)).join(',')
       const subRows = await supabase.select(
         'subscriptions',
-        `select=sim_id&package_version_id=in.(${pvIdFilter})&state=in.(ACTIVE,PENDING)`
+        `select=sim_id&package_id=eq.${encodeURIComponent(packageIdQuery)}&state=in.(ACTIVE,PENDING)`
       )
       packageSimIds = new Set(
         (Array.isArray(subRows) ? subRows : [])
@@ -1035,7 +1008,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
           .filter(Boolean)
       )
       if (packageSimIds.size === 0) {
-        return res.json({ items: [], total: 0, page, pageSize: limit })
+        return res.send({ items: [], total: 0, page, pageSize: limit })
       }
     }
     if (packageSimIds) {
@@ -1158,7 +1131,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       filterPairs.push(`page=${page}`)
       setXFilters(res, filterPairs.join(';'))
     }
-    res.json({
+    res.send({
       items,
       total: typeof total === 'number' ? total : items.length,
       page,
@@ -1257,7 +1230,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
 
     const includeReseller = roleScope === 'platform' || roleScope === 'reseller'
 
-    res.json({
+    res.send({
       simId: sim.sim_id,
       iccid: sim.iccid,
       imsi: sim.primary_imsi,
@@ -1325,7 +1298,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     if (!result.ok) {
       return sendError(res, result.status, result.code, result.message)
     }
-    res.json({
+    res.send({
       simId: result.sim.sim_id,
       iccid: result.sim.iccid,
       page: result.page,
@@ -1376,14 +1349,14 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       return
     }
     if (result.idempotent) {
-      res.status(200).json({
+      res.code().send({
         jobId: result.jobId,
         status: result.status,
         progress: result.progress,
       })
       return
     }
-    res.status(202).json({
+    res.code().send({
       jobId: result.jobId,
       status: result.status,
     })
@@ -1454,7 +1427,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     const auth = ensureSimReadAccess(req, res)
     if (!auth) return
     const actor = req?.cmpAuth ?? null
-    const { action, iccids, simIds: simIdsBody, reason, enterpriseId: enterpriseIdBody, commitmentExempt, confirm } = req.body ?? {}
+    const { action, iccids, reason, enterpriseId: enterpriseIdBody, commitmentExempt, confirm } = req.body ?? {}
     const actionValue = String(action || '').trim().toUpperCase()
     if (!actionValue) {
       return sendError(res, 400, 'BAD_REQUEST', 'action is required.')
@@ -1462,11 +1435,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     if (actionValue === 'RETIRE' && confirm !== true) {
       return sendError(res, 400, 'BAD_REQUEST', 'confirm must be true.')
     }
-    // List of ICCIDs (18-20 digits) to process.
-    // Accept both simIds (spec) and iccids (legacy) for backward compatibility.
-    // Format: ["89860012345678901234", "89860012345678901235"]
-    const ids = simIdsBody || iccids
-    const rawIccids = Array.isArray(ids) ? ids : []
+    const rawIccids = Array.isArray(iccids) ? iccids : []
     if (rawIccids.length === 0) {
       return sendError(res, 400, 'BAD_REQUEST', 'iccids must be a non-empty array.')
     }
@@ -1496,7 +1465,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     const tenantQs = buildSimTenantFilter(req, enterpriseId)
     const result = await batchChangeSimStatus({
       supabase,
-      simIds: targetIds,
+      iccids: targetIds,
       tenantQs,
       enterpriseId: enterpriseId ?? null,
       action: actionValue,
@@ -1511,7 +1480,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
       return sendError(res, result.status, result.code, result.message)
     }
     const statusCode = result.failed === 0 ? 200 : (result.succeeded === 0 ? 400 : 207)
-    res.status(statusCode).json(result)
+    res.code().send(result)
   })
 
   // Phase 21: PATCH /v1/sims/:simId — update remark (and other mutable fields)
@@ -1553,11 +1522,69 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
     if (!updated) {
       return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to update SIM.')
     }
-    res.json({
+    res.send({
       simId: updated.sim_id,
       iccid: updated.iccid,
       remark: updated.remark ?? null,
     })
+  })
+
+  app.post(`${prefix}/sims:assign-inventory-to-enterprise`, async (req, res) => {
+    const auth = ensureResellerAdmin(req, res)
+    if (!auth) return
+    const contentType = req.headers['content-type'] ? String(req.headers['content-type']) : ''
+    if (!contentType.toLowerCase().includes('multipart/form-data')) {
+      return sendError(res, 400, 'BAD_REQUEST', 'multipart/form-data is required.')
+    }
+    const boundaryMatch = contentType.match(/boundary=([^;]+)/i)
+    if (!boundaryMatch) {
+      return sendError(res, 400, 'BAD_REQUEST', 'multipart boundary is required.')
+    }
+    let bodyBuffer
+    try {
+      bodyBuffer = await readRequestBody(req, 50 * 1024 * 1024)
+    } catch {
+      return sendError(res, 413, 'PAYLOAD_TOO_LARGE', 'Payload too large.')
+    }
+    const { fields, files } = parseMultipartFormData(bodyBuffer, boundaryMatch[1])
+    const roleScope = getRoleScope(req)
+    const resellerPoolRaw = fields.resellerId ? String(fields.resellerId).trim() : ''
+    if (!resellerPoolRaw || !isValidUuid(resellerPoolRaw)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'resellerId is required and must be a valid uuid.')
+    }
+    if (roleScope === 'reseller') {
+      const authTid = auth.resellerId ? String(auth.resellerId).trim() : null
+      if (!authTid || resellerPoolRaw !== authTid) {
+        return sendError(res, 403, 'FORBIDDEN', 'resellerId is out of scope.')
+      }
+    }
+    const entRaw = fields.enterpriseId ? String(fields.enterpriseId).trim() : ''
+    if (!entRaw || !isValidUuid(entRaw)) {
+      return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId is required and must be a valid uuid.')
+    }
+    const file = files.file
+    if (!file || !file.content) {
+      return sendError(res, 400, 'INVALID_FORMAT', 'file is required.')
+    }
+    const parsed = parseIccidsFromAssignInventoryCsv(String(file.content ?? ''))
+    if (!parsed.ok) {
+      return sendError(res, parsed.status, parsed.code, parsed.message)
+    }
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+    const result = await assignInventorySimsToEnterprise({
+      supabase,
+      resellerId: resellerPoolRaw,
+      enterpriseId: entRaw,
+      simIds: parsed.iccids,
+      actor: req?.cmpAuth ?? null,
+      traceId: getTraceId(res),
+      sourceIp: req.ip,
+    })
+    if (!result.ok) {
+      return sendError(res, result.status, result.code, result.message)
+    }
+    const statusCode = result.failed === 0 ? 200 : (result.succeeded === 0 ? 400 : 207)
+    res.code().send(result)
   })
 
   app.post(`${prefix}/sims:batch-deactivate`, async (req, res) => {
@@ -1591,13 +1618,13 @@ export function registerSimPhase4Routes({ app, prefix, deps }) {
         return sendError(res, result.status, result.code, result.message)
       }
       if (result.idempotent) {
-        return res.status(200).json({
+        return res.code().send({
           jobId: result.jobId,
           status: result.status,
           progress: result.progress,
         })
       }
-      res.status(202).json({
+      res.code().send({
         jobId: result.jobId,
         status: result.status,
         totalRows: result.totalRows,

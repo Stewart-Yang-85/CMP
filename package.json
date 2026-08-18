@@ -5,8 +5,8 @@
   "scripts": {
     "dev": "node src/server.js",
     "start": "node src/server.js",
-    "worker": "node src/worker.js",
-    "build": "tsc -p tsconfig.json",
+    "worker": "npm run build && node dist/worker.js",
+    "build": "tsc -p tsconfig.build.json && node tools/sync_dist_assets.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start:ts": "node dist/server.js",
     "test": "vitest run",
@@ -38,11 +38,13 @@
     "express": "^4.19.2",
     "fastify": "^5.7.4",
     "node-cron": "^4.2.1",
+    "nodemailer": "^9.0.5",
     "swagger-ui-dist": "^5.11.0"
   },
   "devDependencies": {
     "@openapitools/openapi-generator-cli": "^2.28.0",
     "@types/node": "^22.13.0",
+    "@types/nodemailer": "^8.0.1",
     "eslint": "^10.0.2",
     "openapi-diff": "^0.24.1",
     "openapi-typescript": "^6.7.6",

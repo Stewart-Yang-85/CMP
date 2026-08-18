@@ -3,15 +3,15 @@
 --
 -- 使用前请确认：
 -- 1. enterprise_id 在 tenants 表中存在且 tenant_type = 'ENTERPRISE'
--- 2. reseller_id（如有）在 tenants 表中存在且 tenant_type = 'RESELLER'
--- 3. 若 enterprise 属于某 reseller，tenants 中该 enterprise 的 parent_id 应等于 reseller_id
+-- 2. bills.reseller_id（如有）须为 RESELLER 的 tenants.tenant_id（FR-058），勿填 resellers.id
+-- 3. 若 enterprise 属于某 reseller，tenants 中该 enterprise 的 parent_id 应等于该 RESELLER 的 tenant_id
 --
 -- 步骤 1：查询现有 tenant（在 Supabase SQL Editor 中执行）
 -- SELECT tenant_id, tenant_type, parent_id, name FROM tenants WHERE tenant_type IN ('ENTERPRISE','RESELLER') ORDER BY tenant_type, name LIMIT 30;
 --
 -- 步骤 2：将下方 enterprise_id / reseller_id 替换为你的实际值后执行 INSERT
 
--- 示例：插入 2026-03 账期账单（请将 enterprise_id / reseller_id 替换为你的实际值）
+-- 示例：插入 2026-03 账期账单（请将 enterprise_id / reseller_id 替换为实际值；reseller_id = RESELLER tenant_id）
 INSERT INTO bills (
   enterprise_id,
   period_start,
@@ -23,7 +23,7 @@ INSERT INTO bills (
   reseller_id,
   generated_at
 ) VALUES
-  -- 企业 a2367c54（假设属于 reseller 803f6988）
+  -- 企业 a2367c54（parent_id = RESELLER tenant 803f6988…）
   (
     'a2367c54-fd82-4e07-a013-3d4c345ca7eb',
     '2026-03-01',

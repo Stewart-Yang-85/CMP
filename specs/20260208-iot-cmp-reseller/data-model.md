@@ -1,6 +1,6 @@
 # Data Model: IoT CMP Reseller System
 
-**Feature**: `iot-cmp-reseller` | **Date**: 2026-02-08（`public_infos` 节 2026-03-24 对齐澄清） | **Spec**: [spec.md](./spec.md)
+**Feature**: `iot-cmp-reseller` | **Date**: 2026-02-08（`public_infos` 2026-03-24；**Package 单表模型** 2026-04-20；**CoveredNetworkProfile** 2026-04-22 [Phase 30](./tasks.md#phase-30-covered-network) / [spec.md](./spec.md)） | **Spec**: [spec.md](./spec.md)
 
 ## 1. 概述
 
@@ -12,8 +12,9 @@
 
 | ENUM | 值 | 用途 |
 |------|-----|------|
-| `sim_status` | INVENTORY, TEST_READY, ACTIVATED, DEACTIVATED, RETIRED | SIM 生命周期 |
-| `subscription_state` | PENDING, ACTIVE, CANCELLED, EXPIRED | 订阅状态 |
+| `sim_status` | INVENTORY, TEST_READY, ACTIVATED, DEACTIVATED, RETIRED | SIM 主状态（稳态） |
+| `lifecycle_sub_status` | normal, activating, activation_failed, deactivating, deactivation_failed, reactivating, reactivation_failed, retiring, retire_failed | SIM 过渡子状态（[V1.1] 须迁移扩展，见 spec US2） |
+| `subscription_state` | PENDING, **PROVISIONING**, ACTIVE, CANCELLED, EXPIRED | 订阅状态（**PROVISIONING** = 上游开通 Job 进行中；失败时 **删除行**，不保留失败态枚举） |
 | `job_status` | QUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED | 异步任务状态 |
 | `bill_status` | GENERATED, PUBLISHED, PAID, OVERDUE, WRITTEN_OFF | 账单状态 |
 | `service_type` | DATA, VOICE, SMS | 电信业务类型 |
@@ -39,11 +40,13 @@
 | `role_scope` | platform, reseller, customer | 角色适用范围 |
 | `dunning_status` | NORMAL, OVERDUE_WARNING, SUSPENDED, SERVICE_INTERRUPTED | 信控状态 |
 | `provisioning_status` | PROVISIONING_IN_PROGRESS, ACTIVE, PROVISIONING_FAILED, SCHEDULED_ON_SUPPLIER, SCHEDULED_LOCALLY | 开通同步状态 |
-| `alert_type` | POOL_USAGE_HIGH, OUT_OF_PROFILE_SURGE, SILENT_SIM, UNEXPECTED_ROAMING, CDR_DELAY, UPSTREAM_DISCONNECT | 告警类型 |
+| `alert_type` | POOL_USAGE_HIGH, OUT_OF_PROFILE_SURGE, SILENT_SIM, UNEXPECTED_ROAMING, CDR_DELAY, UPSTREAM_DISCONNECT, WEBHOOK_DELIVERY_FAILED | 告警类型；真源见 [alert-type-catalog.md](./clarifications/alert-type-catalog.md) |
 | `smdp_status` | active, deactivated, suspended | SM-DP+ 系统状态 |
 | `smdp_environment` | test, production | SM-DP+ 系统环境 |
 | `esim_form_factor` | esim_profile, other | eSIM 形态 |
 | `smdp_profile_status` | created, downloaded, enabled, disabled, deleted | SM-DP+ Profile 远程状态 |
+
+> **Alert rule config**：告警启用状态、阈值、抑制窗口与投递方式采用 `PLATFORM` / `RESELLER` / `ENTERPRISE` 三层配置模型；表设计与解析顺序见 [alert-rule-config.md](./clarifications/alert-rule-config.md)。
 
 ## 3. 实体关系图（ER Summary）
 
@@ -51,12 +54,15 @@
 ── 组织层 ──────────────────────────────────────────────────────
 
 public_infos（3GPP 公开参考，仅辅助查询；与下方业务子图无连线、无 FK）
-business_operators (business dictionary)
-
+business_operators (business dictionary, 1 per PLMN)
+         │
+         │ 1:N  (同一字典运营商 MAY 经多个 supplier 销售)
+         ▼
 suppliers ──1:N──┐                      operators
+    │            │                    (supplier_id + business_operator_id UNIQUE)
     │            ▼                          │
     │   upstream_integrations ◄──N:1────────┘
-    │     (supplier_id + operator_id UNIQUE)
+    │     (supplier_id + operators.operator_id UNIQUE)
     │
     └──1:N──> sim_cards ◄── operator_id ── operators
                   │
@@ -76,17 +82,23 @@ resellers ──1:N──> customers
     │                  │                     │
     │                  │                     └── source_roaming_profile_id (self FK)
     │                  │
-    │                  ├──1:N──> price_plans (snapshots)
+    │                  ├──1:N──> covered_network_profiles ──1:N──> covered_network_profile_entries
     │                  │                     │
-    │                  │                     └── source_price_plan_id (self FK)
+    │                  │                     └── source_covered_network_profile_id (self FK)
+    │                  │
+    │                  ├──1:N──> price_plans (snapshots, **父表**；类型专有定价在 **1:1 子表**)
+    │                  │                     │
+    │                  │                     ├── source_price_plan_id (self FK)
+    │                  │                     ├── covered_network_profile_id → covered_network_profiles（可空；**in-profile** 资费类型在发布/校验时必填，见 OpenAPI）
+    │                  │                     └── 1:1 → price_plan_fixed_bundle | price_plan_sim_dependent_bundle
+    │                  │                               | price_plan_one_time | price_plan_tiered_volume_pricing（**Phase 31**）
+    │                  │                     （读宽表：**price_plans_expanded** 视图）
     │                  │
     │                  ├──1:N──> apn_profiles
     │                  │                     │
     │                  │                     └── source_apn_profile_id (self FK)
     │                  │
-    │                  ├──1:N──> control_policies ──1:N──> control_policy_throttling_tiers
-    │                  │                     │
-    │                  │                     └── source_control_policy_id (self FK)
+    │                  ├──1:N──> control_policy_modules（`control_policy` JSONB = 快照正文；**无**独立 throttling tiers 子表）
     │                  │
     │                  ├──1:N──> commercial_terms
     │                  │                     │
@@ -96,13 +108,13 @@ resellers ──1:N──> customers
     │                  │                     │
     │                  │           (apn_profile_id, roaming_profile_id)
     │                  │
-    │                  ├──1:N──> packages ──1:N──> package_versions
-    │                  │                              │
+    │                  ├──1:N──> packages（单表单实体：一行即一个可售产品包，绑定四模块；status DRAFT/PUBLISHED/DEPRECATED）
+    │                  │              │
     │                  │              (carrier_service_id, price_plan_id, control_policy_id, commercial_terms_id)
     │                  │
     │                  ├──1:N──> subscriptions
     │                  │              │
-    │                  │         (sim_id, package_version_id)
+    │                  │         (sim_id, package_id → packages)
     │                  │
     │                  ├──1:N──> bills ──1:N──> bill_line_items
     │                  │
@@ -139,6 +151,7 @@ esim_profiles.customer_id  ──FK──> customers (nullable)
 
 sim_cards ──1:N──> usage_daily_summary
 sim_cards ──1:N──> rating_results
+rating_results ──derived──> usage_package_daily_summary
 ```
 
 ## 4. 已有表结构
@@ -172,36 +185,71 @@ sim_cards ──1:N──> rating_results
 
 #### `business_operators` — 业务运营商字典
 
+> **规范真源**：[clarifications/operator-identity-model.md](./clarifications/operator-identity-model.md)
+
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
-| operator_id | uuid | PK, default gen_random_uuid() | 业务运营商 ID |
+| operator_id | uuid | PK, default gen_random_uuid() | **字典 operator ID**；业务侧「这是哪家运营商」的稳定标识 |
 | mcc | char(3) | NOT NULL | 移动国家代码 |
 | mnc | char(3) | NOT NULL | 移动网络代码 |
 | name | text | NOT NULL | 运营商名称 |
 
-#### `operators` — 供应商-运营商关联
+**商业语义**：一行 = 一个业务运营商（PLMN/品牌），**全局唯一**。**MUST NOT** 与 `public_infos` 关联（FR-057）。
+
+**与 `operators` 的关系**：**1 : N**。同一 **`business_operators.operator_id`** **MAY** 在 **`operators`** 中出现多行（不同 **`supplier_id`**），表示「同一运营商经多个上游供应商渠道销售」。这在 V1.1 中为 **正常商业模式**。
+
+#### `operators` — 供应商—运营商商业关联
+
+> **规范真源**：[clarifications/operator-identity-model.md](./clarifications/operator-identity-model.md)
 
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
-| operator_id | uuid | PK, default gen_random_uuid() | 业务关联 ID |
+| operator_id | uuid | PK, default gen_random_uuid() | **关联行 operator ID**；产品库 FK、SIM 归属、**`upstream_integrations`** 的真源 |
 | supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
 | business_operator_id | uuid | NULLABLE, FK→business_operators | 业务运营商字典（与 `public_infos` 无关）；**V1.1 迁移 `T153` 后** `operators` **不再包含** `carrier_id` 列（已物理删除，见 tasks.md T153 硬性验收） |
 | name | text | — | 运营商名称快照 |
 | status | text | NOT NULL, default 'ACTIVE' | ACTIVE / SUSPENDED |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
-| | | UNIQUE(supplier_id, business_operator_id) 等（以迁移为准） | **不得**使用已删除的 `carrier_id`；**不得**与 `public_infos` 关联（FR-057） |
+| | | **UNIQUE(`supplier_id`, `business_operator_id`)** where `business_operator_id IS NOT NULL` | 同一供应商下，同一字典运营商至多一行 |
+
+**命名要点（避免误解）**：
+
+| 名称 | 物理列 | 用途 |
+|------|--------|------|
+| 字典 operator ID | `business_operators.operator_id` | API **读**路径 **`operatorId` SHOULD** 优先展示；Webhook URL **SHOULD** 使用 |
+| 关联行 operator ID | `operators.operator_id` | **所有产品库表**持久化 FK；**`upstream_integrations.operator_id` MUST** 指向此列 |
+
+#### API 字段 `operatorId`（跨模块）
+
+对外 HTTP **统一字段名 `operatorId`**（**不**另设 `businessOperatorId`）：
+
+| 方向 | 规则 |
+|------|------|
+| **写入** | 客户端 **MAY** 传字典 ID 或关联行 ID；服务端 **MUST** 解析为 **`operators.operator_id`** 后存库；**SHOULD** 配合 **`supplierId`** |
+| **读出** | **`operatorId` SHOULD** 优先展示 **`business_operators.operator_id`**（若 `business_operator_id` 非空） |
+| **解析顺序** | ① `operators.operator_id` + `supplier_id` → ② `operators.business_operator_id` + `supplier_id` |
+
+适用：Carrier Service、APN/Roaming Profile、SIM 筛选、**`upstream_integrations`**、入站 Webhook 路径等。详见 [operator-identity-model.md](./clarifications/operator-identity-model.md)。
 
 #### `upstream_integrations` — 上游集成配置（替代旧 `supplier_carriers`）
 
+> **规范真源**：[clarifications/upstream-integration-config.md](./clarifications/upstream-integration-config.md)
+
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
-| id | uuid | PK, default gen_random_uuid() | 集成 ID |
+| integration_id | uuid | PK, default gen_random_uuid() | 集成 ID |
 | supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
-| operator_id | uuid | NOT NULL, FK→operators | 运营商 |
-| api_endpoint | text | — | API 端点 |
-| api_key | text | — | API Key |
-| api_secret_encrypted | bytea | — | API Secret（加密存储） |
+| operator_id | uuid | NOT NULL, FK→**operators(operator_id)** | **关联行 PK**（**非** `business_operators.operator_id`） |
+| adapter_type | text | NOT NULL | Vendor 实现（如 `wxzhonggeng`） |
+| api_endpoint | text | — | 上游 base URL |
+| api_key | text | — | 出站 API Key |
+| api_secret_encrypted | bytea | — | 出站 API Secret（加密存储） |
+| webhook_key | text | — | 入站 Webhook 验签密钥 |
+| auth_type | text | — | `api_key` 或 `username_password` |
+| username | text | — | 出站用户名（`username_password`） |
+| password_encrypted | bytea | — | 出站密码（加密；`username_password`） |
+| token_url | text | — | 登录/token 端点覆盖（可选） |
 | cdr_enabled | boolean | NOT NULL, default false | 是否启用 CDR |
 | cdr_method | cdr_method | — | CDR 拉取方式 sftp / api |
 | cdr_endpoint | text | — | CDR 端点 |
@@ -210,10 +258,37 @@ sim_cards ──1:N──> rating_results
 | cdr_path | text | — | CDR 文件路径 |
 | cdr_file_pattern | text | — | CDR 文件名模式 |
 | enabled | boolean | NOT NULL, default true | 是否启用 |
+| config | jsonb | NOT NULL, default `{}` | 适配器技术参数（endpoint 路径等；**非**业务凭证） |
+| deprecated_at | timestamptz | — | 软删时间（`status=DEPRECATED` 时） |
+| deprecated_by | text | — | 软删操作者标识（可选） |
+| deprecation_reason | text | — | 软删原因（可选） |
 | created_by | uuid | — | 创建者 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
-| | | UNIQUE(supplier_id, operator_id) | 供应商-运营商唯一 |
+| | | **UNIQUE(`supplier_id`, `operator_id`) WHERE `status IN ('ACTIVE','INACTIVE')`** | 每供应商—运营商仅允许一条“活跃/停用”配置；`DEPRECATED` 历史行可保留 |
+
+**V1.1**：Vendor 适配器、Worker、入站 Webhook **MUST** 从此表加载凭证；**MUST NOT** 从 MVP `.env`（`WXZHONGGENG_*` 等）读取生产业务凭证。
+
+**删除策略（V1.1）**：`DELETE /v1/upstream-integrations/{integrationId}` 采用**软删**，将行置为 `DEPRECATED` 且 `enabled=false`；历史行保留用于审计与回溯。
+
+**凭证加密（V1.1）**：`api_secret_encrypted`（及推荐之 `webhook_key_encrypted`）为 **AES-256-GCM** 密文 BYTEA；密钥来自应用 env **`INTEGRATION_SECRET_KEY`**（非上游凭证）。见 [upstream-integration-config.md](./clarifications/upstream-integration-config.md) §9。
+
+**`adapter_type`**：有限枚举（初值 **`wxzhonggeng`**）；代码 registry 映射至 Vendor 适配器实现。见同上 §10。
+
+**入站 Webhook 目录与集成订阅（Phase 38 · 已迁移）**：
+
+| 表 | 说明 |
+|----|------|
+| `upstream_inbound_webhook_events` | 平台级入站 **`event_key`** 目录（与出站 `webhook_subscriptions` / **FR-039** 分离） |
+| `upstream_integration_webhook_subscriptions` | **`(integration_id, event_key, enabled)`** — 每条集成启用哪些入站通知 |
+
+**WXZG 种子 `event_key`（`upstream_inbound_webhook_events`）**：`subscription`（Subscription；路径 `…/webhooks/wxzhonggeng/subscription`）、`update-location`（Update Location；路径 `…/webhooks/wxzhonggeng/update-location`）、`sim-status-changed`、`traffic-alert`。
+
+**落库约定（`subscription`）**：受理后写入 **`events.event_type = SUBSCRIPTION`**、**`audit_logs.action = WX_WEBHOOK_SUBSCRIPTION`**（上游 `messageType` 如 `ProductChange` 保留在 `payload`）。
+
+**落库约定（`update-location`）**：受理后写入 **`events.event_type = UPDATE_LOCATION`**；**`audit_logs.action`** 仍为 **`WX_WEBHOOK_SIM_ONLINE`**（内部审计码，与上游 `messageType` 可不一致）。
+
+详见 [upstream-inbound-webhook-catalog.md](./clarifications/upstream-inbound-webhook-catalog.md)。
 
 #### `smdp_systems` — SM-DP+ 系统
 
@@ -348,20 +423,85 @@ sim_cards ──1:N──> rating_results
 | source_ip | inet | — | 来源 IP |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 
+**查询/展示约定**：`audit_logs` 持久化 **`actor_user_id`**（稳定 UUID），**不**冗余存储 email。`GET /v1/audit-logs` 使用 **`actorEmail`** 作为可读查询参数：服务端先在 `users` 中解析 email：email 不存在返回 **404**；reseller token 下 email 存在但不在该 reseller / 下属 enterprise scope 内返回 **403**；校验通过后按 `actor_user_id` 过滤。reseller token 下 **`resellerId`** 可省略或传 token reseller；非法 UUID 返回 **400**，与 token 不匹配返回 **403**，数据库无该 reseller 返回 **404**。列表 `pageSize` 默认 **20**，最大 **20**；`GET /v1/audit-logs:csv` 使用相同过滤与 scope 规则导出 CSV，`pageSize` 默认 **100**，最大 **1000**。响应中可通过 `actorUserId` + `actorEmail` + `actorLabel` 展示操作者；系统/M2M 审计可能没有 `actor_user_id`，此时 `actorEmail=null`，`actorLabel` 回退到 `actorRole` / `SYSTEM`。
+
 #### `events`
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
 | event_id | uuid | PK, default gen_random_uuid() | 事件 ID |
 | event_type | text | NOT NULL | 事件类型 |
 | occurred_at | timestamptz | NOT NULL | 发生时间 |
-| reseller_id | uuid | FK→resellers, nullable | 代理商范围 |
-| customer_id | uuid | FK→customers, nullable | 客户范围 |
+| enterprise_id | uuid | FK→tenants(tenant_id), nullable | 企业 scope（**ENTERPRISE** `tenants.tenant_id`，= API `enterpriseId`） |
+| reseller_id | uuid | FK→tenants(tenant_id), nullable | 代理商 scope（**RESELLER** `tenants.tenant_id`，= API `resellerId`，**FR-058**） |
 | actor_user_id | uuid | — | 操作者 |
 | request_id | text | — | 请求 ID |
 | job_id | uuid | — | 关联 Job |
-| payload | jsonb | NOT NULL | 事件负载 |
+| payload | jsonb | NOT NULL | 事件负载（**MUST NOT** 含 `resellerId`；scope 以列为准） |
 
-**索引**: `idx_events_type_time(event_type, occurred_at)`
+**索引**: `idx_events_type_time(event_type, occurred_at)`；`idx_events_enterprise_time(enterprise_id, occurred_at)`；`idx_events_reseller_time(reseller_id, occurred_at)`
+
+**`event_type` 约定**：列类型为 **`text NOT NULL`**，**无** PostgreSQL ENUM / CHECK；应用可写入新字符串。对外契约以出站 Webhook 白名单为准（[integration-api.md](./contracts/integration-api.md) §4.2、[webhook-delivery.md](./clarifications/webhook-delivery.md)）；其余类型用于审计、`GET /v1/events` 查询与内部编排，**默认不**进入 `webhook_subscriptions.event_types` 投递。
+
+**出站 Webhook 可订阅（7 · FR-039）**
+
+| event_type | 触发条件（摘要） | 主要写入路径 |
+|------------|------------------|--------------|
+| `SIM_STATUS_CHANGED` | SIM **稳态** `status` 变更（`lifecycle_sub_status=normal`） | `emitEvent` / `simLifecycleFinalize` / reconciliation / worker |
+| `JOB_FINISHED` | 异步 Job 终态（如 `SIM_STATUS_CHANGE`、订阅开通 Job） | `simStatusChangeJob` / `subscriptionProvisionJob` |
+| `SUBSCRIPTION_CHANGED` | 订阅创建 / 变更 / 退订 | `subscriptionProvisionJob`、订阅 API |
+| `BILL_PUBLISHED` | 账单发布 | `billStatusMachine` |
+| `PAYMENT_CONFIRMED` | 支付确认 | `billStatusMachine` |
+| `ALERT_TRIGGERED` | 告警触发（scope 常为 `reseller_id`） | `alerting` |
+| `ENTERPRISE_STATUS_CHANGED` | 企业 `customer_status` 变更 | 租户状态 API |
+
+**计费 / 调账（仅落库，非 Webhook 白名单）**
+
+| event_type | 说明 |
+|------------|------|
+| `BILL_WRITTEN_OFF` | 账单核销 |
+| `BILL_VOIDED` | 账单作废 |
+| `BILL_ADJUSTMENT_NOTE_CREATED` | 调账单创建 |
+| `BILL_ADJUSTMENT_NOTE_APPROVED` | 调账单审批 |
+| `BILL_ADJUSTMENT_NOTE_APPLIED` | 调账单下期结算 **APPLIED** |
+| `BILL_ADJUSTMENT_ICCID_WARNING` | 调账行 ICCID 与企业不匹配等校验告警 |
+
+**SIM 批量 / 分配（仅落库）**
+
+| event_type | 说明 |
+|------------|------|
+| `SIM_BATCH_STATUS_CHANGE` | 批量状态变更 Job 受理 |
+| `SIM_BATCH_STATUS_CHANGE_RESULT` | 批量状态变更逐卡结果 |
+| `SIM_ASSIGN_INVENTORY` | 批量分配库存受理 |
+| `SIM_ASSIGN_INVENTORY_RESULT` | 分配库存逐卡结果 |
+| `SIM_ASSIGN_DEPARTMENT` | 批量分配部门受理 |
+| `SIM_ASSIGN_DEPARTMENT_RESULT` | 分配部门逐卡结果 |
+
+**订阅开通（仅落库）**
+
+| event_type | 说明 |
+|------------|------|
+| `SUBSCRIPTION_PROVISION_FAILED` | 上游开通失败（Job 失败路径） |
+
+**上游入站 Webhook → `events`（平台通用 · Phase 38）**
+
+| event_type | 入站 `event_key` | 说明 |
+|------------|------------------|------|
+| `UPDATE_LOCATION` | `update-location` | 位置 / 上线（`audit_logs.action = WX_WEBHOOK_SIM_ONLINE`） |
+| `INBOUND_SIM_STATUS_CHANGED` | `sim-status-changed` | 上游推送状态变更（与本地 `SIM_STATUS_CHANGED` 分工不同；**任意 adapter** 映射落库） |
+| `TRAFFIC_ALERT` | `traffic-alert` | 流量阈值告警 |
+| `SUBSCRIPTION` | `subscription` | 上游套餐 / 订购变更（`audit_logs.action = WX_WEBHOOK_SUBSCRIPTION`） |
+
+**已更名（历史数据经迁移改写，新写入 MUST NOT 使用旧名）**
+
+| 旧 event_type | 新 event_type | 迁移 |
+|---------------|---------------|------|
+| `SIM_ONLINE` | `UPDATE_LOCATION` | `20260522120001_rename_sim_online_to_update_location.sql` |
+| `PRODUCT_ORDERED` | `SUBSCRIPTION` | `20260522130001_rename_product_order_to_subscription.sql` |
+| `WX_SIM_STATUS_CHANGED` | `INBOUND_SIM_STATUS_CHANGED` | `20260621100010_rename_wx_sim_status_to_inbound.sql` |
+
+**运维查询示例**：`SELECT event_type, COUNT(*) FROM events GROUP BY 1 ORDER BY 2 DESC;`
+
+**`GET /v1/events` 查询分层（无 DB 列）**：可选 **`eventCategory`**（5 项枚举，Swagger 下拉）展开为多 `event_type`；可选 **`eventType`** 精确匹配；二者同传时 `eventType` 须属于该大类。可选 **`resellerId`** / **`enterpriseId`** 先按 token scope 校验格式、存在性与租户归属（platform/admin 同传时二者必须匹配；reseller/customer 不得越权）。可选 **`iccid`** 先校验格式、`sims` 表存在性与租户归属，再按 `payload.iccid` 精确过滤指定 SIM 事件。列表 `pageSize` 默认 **20**，最大 **20**；`GET /v1/events:csv` 使用相同过滤与 scope 规则导出 CSV，`pageSize` 默认 **100**，最大 **1000**。全量映射由 **`GET /v1/events/catalog`** 与 `src/utils/eventTypeCatalog.ts` 维护（真源与上文目录表一致）。
 
 #### `jobs`
 | 列 | 类型 | 约束 | 说明 |
@@ -374,7 +514,12 @@ sim_cards ──1:N──> rating_results
 | error_summary | text | — | 错误摘要 |
 | request_id | text | — | 请求 ID |
 | actor_user_id | uuid | — | 操作者 |
+| actor_role | text | — | 操作者角色（见 `20260512100001_jobs_actor_role.sql`） |
 | payload | jsonb | — | 任务负载（0016 新增） |
+| reseller_id | uuid | FK→tenants(tenant_id), nullable | 代理商 scope（RESELLER） |
+| enterprise_id | uuid | FK→tenants(tenant_id), nullable | 企业 scope（ENTERPRISE；原列名 customer_id，见 §6.3） |
+| idempotency_key | text | — | 幂等键 |
+| file_hash | text | — | 导入文件哈希 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | started_at | timestamptz | — | 开始时间 |
 | finished_at | timestamptz | — | 完成时间 |
@@ -397,7 +542,9 @@ sim_cards ──1:N──> rating_results
 | operator_id | uuid | NOT NULL, FK→operators | 运营商归属 |
 | reseller_id | uuid | NOT NULL, FK→resellers | 代理商归属 |
 | customer_id | uuid | FK→customers, nullable | 客户归属（分配后填充） |
-| status | sim_status | NOT NULL, default 'INVENTORY' | SIM 状态 |
+| status | sim_status | NOT NULL, default 'INVENTORY' | SIM 主状态（5 稳态） |
+| lifecycle_sub_status | lifecycle_sub_status | NOT NULL, default 'normal' | 过渡子状态：normal / activating / activation_failed / deactivating / deactivation_failed / reactivating / reactivation_failed / retiring / retire_failed（枚举须迁移扩展，见 spec US2） |
+| status_sync_conflict | boolean | NOT NULL, default false | 本地稳态与 upstream_status 漂移冲突 |
 | primary_product_package_id | uuid | FK→packages, nullable | 当前主套餐产品包 |
 | total_data_usage_kb | bigint | NOT NULL, default 0 | 累计数据用量 (KB) |
 | imei | varchar(15) | — | 绑定 IMEI |
@@ -493,58 +640,60 @@ sim_cards ──1:N──> rating_results
 
 ### 4.4 产品与资费
 
-#### `price_plans`
+#### `price_plans`（**父表**；**Phase 31** 起类型专有定价列迁出至子表）
+
+与 **`type`** 无关的**公共**快照列仅存于此表；`FIXED_BUNDLE` / `SIM_DEPENDENT_BUNDLE` / `ONE_TIME` / `TIERED_VOLUME_PRICING` 的**金额、配额、阶梯**等在对应 **1:1 子表**（见下）。**读宽表**（批价、订阅解析、部分服务层拼装）：视图 **`price_plans_expanded`**（`LEFT JOIN` 四子表，列名与历史单表时期对齐，便于 `select=` 迁移）。
+
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
 | price_plan_id | uuid | PK, default gen_random_uuid() | 资费计划快照 ID |
-| customer_id | uuid | NOT NULL, FK→customers | 企业 |
+| enterprise_id | uuid | NOT NULL, FK→`tenants(tenant_id)` | 企业（`tenant_type=ENTERPRISE`） |
+| reseller_id | uuid | FK→`tenants(tenant_id)`；宜 **NOT NULL** | **RESELLER** `tenants.tenant_id`，与 `enterprise_id` 行之 **`parent_id`** 一致（**`20260423100001_price_plans_reseller_id.sql`**） |
 | name | text | NOT NULL | 名称 |
-| type | price_plan_type | NOT NULL | 类型 |
+| type | price_plan_type | NOT NULL | `ONE_TIME` \| `SIM_DEPENDENT_BUNDLE` \| `FIXED_BUNDLE` \| `TIERED_VOLUME_PRICING` |
 | service_type | service_type | NOT NULL, default 'DATA' | 业务类型 |
 | currency | text | NOT NULL | 币种 |
 | billing_cycle_type | billing_cycle_type | NOT NULL, default 'CALENDAR_MONTH' | 计费周期 |
 | first_cycle_proration | first_cycle_proration | NOT NULL, default 'NONE' | 首期分摊 |
-| status | text | NOT NULL, default 'DRAFT' | DRAFT / PUBLISHED / DEPRECATED |
-| published_at | timestamptz | — | 发布时间 |
-| source_price_plan_id | uuid | FK→price_plans | 来源快照 ID（克隆链路） |
-| monthly_fee | numeric(12,2) | NOT NULL, default 0 | 月租费 |
-| deactivated_monthly_fee | numeric(12,2) | NOT NULL, default 0 | 停机保号费 |
-| one_time_fee | numeric(12,2) | — | 一次性费用 |
-| quota_mb | bigint | — | 配额 (MB) |
-| validity_days | int | — | 有效期 (天) |
-| per_sim_quota_mb | bigint | — | 每 SIM 配额 (MB) |
-| total_quota_mb | bigint | — | 总池配额 (MB) |
-| overage_rate_per_mb | numeric(18,8) | — | 套外单价 (currency/MB) |
-| tiers | jsonb | — | 阶梯费率 |
-| payg_rates | jsonb | — | PAYG 费率 |
+| proration_rounding | text | NOT NULL，默认 `ROUND_HALF_UP` | 与 API `prorationRounding` 一致 |
+| source_price_plan_id | uuid | FK→price_plans | 来源快照 ID（修订/复制链路） |
+| version | int | — | 快照版本号（合并 `price_plan_versions` 后保留） |
+| status | text | NOT NULL, default 'DRAFT' | `DRAFT` / `PUBLISHED` / `DEPRECATED`（与 **`effective_from`**、**`deprecated_at`** 一致，见 **`20260420100002_price_plans_status.sql`**） |
+| effective_from | timestamptz | — | 生效时间（发布时写入） |
+| deprecated_at | timestamptz | — | 废弃时间 |
+| covered_network_profile_id | uuid | **可空**，FK→`covered_network_profiles` | **in-profile** 覆盖；需 Covered 的类型在 **publish** 链上须非空且指向 **PUBLISHED** 快照 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 
-**索引**: `idx_price_plans_customer_status(customer_id, status)`、`idx_price_plans_customer_published(customer_id, published_at desc)`
+**已从父表移除（Phase 31，见 `20260424100001_price_plan_type_extension_tables.sql`）**：`monthly_fee`、`deactivated_monthly_fee`、`one_time_fee`、`quota_mb`、`validity_days`、`per_sim_quota_mb`、`total_quota_mb`、`overage_rate_per_mb`、`tiers`、`expiry_boundary` — 按 `type` 落在子表。
 
-**`tiers` JSONB 结构**:
+**索引**：`idx_price_plans_enterprise_status(enterprise_id, status)`、`idx_price_plans_reseller_enterprise(reseller_id, enterprise_id)`、`idx_price_plans_covered_network_profile_id(covered_network_profile_id)`（**where** 非空）等（以仓库迁移为准）。
+
+**RLS**：若对 **`price_plans`** 配置租户/代理商策略，**子表**当前默认**不单独暴露**给 PostgREST；访问由 **服务端（service role）** 在已校验父行 **`enterprise_id` / `reseller_id`** 后读写子表。若将来对子表开 **直接 REST**，应加与父行 **`EXISTS (SELECT 1 FROM price_plans p WHERE p.price_plan_id = …)`** 等价的策略，避免重复定义冲突。
+
+**OOP**：**MUST NOT** 在 `price_plans` 上存 **`roaming_profile_id`**；OOP **仅** Package → Carrier → Roaming，见 [spec.md](./spec.md)。
+
+**`payg_rates`**：列已删除（**`20260423100002_price_plans_drop_payg_rates.sql`**），不再作为价目持久化字段。
+
+##### 子表（**PK = `price_plan_id`**，**FK → `price_plans` ON DELETE CASCADE**）
+
+| 表名 | `type` | 列（除 `price_plan_id`） |
+|------|--------|---------------------------|
+| `price_plan_fixed_bundle` | `FIXED_BUNDLE` | `monthly_fee`, `deactivated_monthly_fee`, `total_quota_mb`, `overage_rate_per_mb` |
+| `price_plan_sim_dependent_bundle` | `SIM_DEPENDENT_BUNDLE` | `monthly_fee`, `deactivated_monthly_fee`, `per_sim_quota_mb`, `overage_rate_per_mb` |
+| `price_plan_one_time` | `ONE_TIME` | `one_time_fee`, `quota_mb`, `validity_days`, `expiry_boundary` |
+| `price_plan_tiered_volume_pricing` | `TIERED_VOLUME_PRICING` | `monthly_fee`, `deactivated_monthly_fee`, `tiers` (jsonb), `overage_rate_per_mb` |
+
+**`tiers` JSONB**（仅阶梯子表；结构示例）:
 ```json
 [
   { "fromMb": 0, "toMb": 1024, "ratePerMb": 10.24 },
-  { "fromMb": 1024, "toMb": 5120, "ratePerMb": 8.192 },
-  { "fromMb": 5120, "toMb": null, "ratePerMb": 5.12 }
+  { "fromMb": 1024, "toMb": 5120, "ratePerMb": 8.192 }
 ]
 ```
 
-**`payg_rates` JSONB 结构**:
-```json
-[
-  {
-    "zoneCode": "ZONE_EU",
-    "countries": ["208-01", "262-*", "234-*"],
-    "ratePerMb": 5.12
-  },
-  {
-    "zoneCode": "ZONE_REST",
-    "countries": ["*"],
-    "ratePerMb": 20.48
-  }
-]
-```
+##### 视图 `price_plans_expanded`
+
+扁平化 **父表 + 四子表**，供 **`src/billing.js`**、**`src/services/subscription.ts`** 等 **`select=`** 单表读路径；**`GRANT SELECT`** 予 `anon, authenticated, service_role`（与迁移一致）。应用层价目 **List/Get/Update** 仍通过 **`pricePlan` 服务**拼装分型 JSON，不必依赖该视图。
 
 #### `roaming_profiles`
 | 列 | 类型 | 约束 | 说明 |
@@ -554,9 +703,12 @@ sim_cards ──1:N──> rating_results
 | supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
 | operator_id | uuid | NOT NULL, FK→operators | 运营商 |
 | name | text | NOT NULL | 展示名称（允许重复） |
+| coverage_mode | text | NOT NULL, default `LIST`; CHECK `LIST` / `NONE` | `LIST` 表示 entries 定义套内覆盖；`NONE` 表示显式不覆盖任何 MCC/MNC，用于 Default Fallback Package |
 | status | text | NOT NULL, default 'DRAFT' | DRAFT / PUBLISHED / DEPRECATED |
 | published_at | timestamptz | — | 发布时间 |
-| source_roaming_profile_id | uuid | FK→roaming_profiles | 来源快照 ID（克隆链路） |
+| effective_from | timestamptz | — | 业务生效时间（通常次月 1 日 UTC） |
+| deprecated_at | timestamptz | — | 废弃时间（`DEPRECATED` 时） |
+| source_roaming_profile_id | uuid | FK→roaming_profiles | 可选；历史/遗留 lineage，**非**主修订流程 |
 | created_by | uuid | — | 创建者 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
@@ -575,6 +727,46 @@ sim_cards ──1:N──> rating_results
 | updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
 | | | UNIQUE(roaming_profile_id, mcc, mnc) | 同一快照内 MCC+MNC 唯一 |
 
+#### `covered_network_profiles`（**CoveredNetworkProfile**；**in-profile** (MCC,MNC) 覆盖快照）[V1.1]
+
+与 [spec.md](./spec.md) **CoveredNetworkProfile**、**in-profile 与 out-of-profile** 一致：将「套内可计费拜访网络集合」抽成**可复用**目录快照，供**多份** `price_plans` 共用同一 `covered_network_profile_id`（例如多档 **Fixed Bundle** 仅配额不同、覆盖相同）。生命周期与 APN / Roaming 目录模块相同：**DRAFT / PUBLISHED / DEPRECATED**。**废弃**：仅当**无** `price_plans` 仍引用本行时允许（实现列出 `price_plan_id`）。
+
+归属列与 **`apn_profiles` / `roaming_profiles`** 一致：**`supplier_id`、`operator_id` 必填**；**`reseller_id` 可空**（迁移 **`20260422100007_covered_network_profiles.sql`**，FK **`tenants.tenant_id`**）。**不**使用 `enterprise_id` / `customer_id` 在本表；企业维度在 **`price_plans`** 与装配 **`packages`** 上体现（**`price_plans`** 企业列名与迁移一致，见上表）。
+
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| covered_network_profile_id | uuid | PK, default gen_random_uuid() | 对外 **`coveredNetworkProfileId`** |
+| reseller_id | uuid | **可空**，FK→`tenants(tenant_id)`（`tenant_type=RESELLER`） | 代理商租户作用域（**与** **`control_policy_modules.reseller_id`** **一致**；**可空** 以兼容仅 **supplier/operator** 定位之目录行，**同** 部分 **`apn_profiles`** 存量） |
+| supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
+| operator_id | uuid | NOT NULL, FK→operators | 运营商 |
+| name | text | NOT NULL | 展示名称（允许重复） |
+| status | text | NOT NULL, default 'DRAFT' | DRAFT / PUBLISHED / DEPRECATED |
+| published_at | timestamptz | — | 发布时间 |
+| effective_from | timestamptz | — | 业务生效时间 |
+| deprecated_at | timestamptz | — | 废弃时间 |
+| source_covered_network_profile_id | uuid | FK→covered_network_profiles | 可选 lineage |
+| created_by | uuid | — | 创建者 |
+| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
+
+**索引**: `idx_covered_network_profiles_reseller_status(reseller_id, status)`、`idx_covered_network_profiles_reseller_published(reseller_id, published_at desc)`（命名与 roaming/apn 对齐；以实际迁移为准）。
+
+#### `covered_network_profile_entries`
+
+**覆盖集**规范化存储，规模与 spec **「~600 条/Profile」** 一致时可水平扩展；**无** 套外单价列（单价在 **OOP** 路径由 **`roaming_profile_entries.rate_per_mb`** 等表达）。当父表 `coverage_mode=NONE` 时，本表不得存在对应 entries。
+
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| entry_id | uuid | PK, default gen_random_uuid() | 条目 ID |
+| covered_network_profile_id | uuid | NOT NULL, FK→covered_network_profiles **ON DELETE CASCADE** | 所属 Covered Profile 快照（**迁移** `20260422100007_*`） |
+| mcc | char(3) | NOT NULL | 移动国家代码 |
+| mnc | varchar(3) | NOT NULL | 移动网络代码（2~3 位数字或 `*`，与 `roaming_profile_entries` 语义一致） |
+| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
+| | | **UNIQUE**(covered_network_profile_id, mcc, mnc) | 同一快照内 MCC+MNC 唯一 |
+
+**索引（批价热路径）**: **`UNIQUE(covered_network_profile_id, mcc, mnc)`** 已支持 `(profile_id, mcc, mnc)` 点查；若优化器需要，可补充与 `roaming_profile_entries` 一致的覆盖索引（见 [tasks.md](./tasks.md) **T228**）。
+
 #### `apn_profiles`
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
@@ -589,7 +781,9 @@ sim_cards ──1:N──> rating_results
 | password_ref | text | — | 密钥引用 |
 | status | text | NOT NULL, default 'DRAFT' | DRAFT / PUBLISHED / DEPRECATED |
 | published_at | timestamptz | — | 发布时间 |
-| source_apn_profile_id | uuid | FK→apn_profiles | 来源快照 ID（克隆链路） |
+| effective_from | timestamptz | — | 业务生效时间 |
+| deprecated_at | timestamptz | — | 废弃时间 |
+| source_apn_profile_id | uuid | FK→apn_profiles | 可选 lineage（APN 仍支持 `:clone`） |
 | created_by | uuid | — | 创建者 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
@@ -616,35 +810,68 @@ sim_cards ──1:N──> rating_results
 
 **索引**: `idx_carrier_services_customer_status(customer_id, status)`、`idx_carrier_services_apn_profile(apn_profile_id)`、`idx_carrier_services_roaming_profile(roaming_profile_id)`
 
-#### `control_policies`
+#### `control_policy_modules`（产品包域 Control Policy 快照；**HTTP `/v1/control-policies` 真源**）
+
+与 [spec.md](./spec.md) 控制策略条文及 **`packages.control_policy_id`** 引用一致。策略规则（Cutoff / Throttling 的 `time_window`、`tiers` 等）**随快照固化在列 `control_policy`（JSONB）**，**不**使用独立 `control_policy_throttling_tiers` 物理表。迁移来源：`20260311100006_package_modules.sql`、生命周期与列名 `20260421100001_*`、`20260422100002_*`、`20260422100004_package_module_fk_tenants.sql`（`reseller_id` → `tenants.tenant_id`）；**`enterprise_id` 列已移除**（见 `20260422100006_drop_reseller_module_tables_enterprise_id.sql`）——企业绑定在 **Package**，不在本表。
+
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
-| control_policy_id | uuid | PK, default gen_random_uuid() | Control Policy 快照 ID |
-| customer_id | uuid | NOT NULL, FK→customers | 企业 |
-| name | text | NOT NULL | 展示名称（允许重复） |
-| enabled | boolean | NOT NULL, default true | 是否启用 |
-| cutoff_time_window | text | — | DAILY / MONTHLY |
-| cutoff_threshold_mb | integer | — | 达量断网阈值（MB） |
-| cutoff_action | text | — | DEACTIVATED |
-| status | text | NOT NULL, default 'DRAFT' | DRAFT / PUBLISHED / DEPRECATED |
+| control_policy_id | uuid | PK, default gen_random_uuid() | 对外 **`controlPolicyId`** |
+| name | text | NOT NULL | 展示名称（迁移后非空） |
+| reseller_id | uuid | FK→tenants(tenant_id) | 代理商租户（可空；语义见 **FR-058**） |
+| control_policy | jsonb | NOT NULL | 控制策略正文快照（与 OpenAPI **`controlPolicy`** 对齐；演进见 Phase 29 **T205+**） |
+| status | text | NOT NULL, default `DRAFT` | `DRAFT` / `PUBLISHED` / `DEPRECATED` |
 | published_at | timestamptz | — | 发布时间 |
-| source_control_policy_id | uuid | FK→control_policies | 来源快照 ID（克隆链路） |
-| created_by | uuid | — | 创建者 |
-| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
-| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
+| deprecated_at | timestamptz | — | 废弃时间 |
+| effective_from | timestamptz | — | 生效时间（发布时回填等） |
+| created_at | timestamptz | NOT NULL | 创建时间 |
+| updated_at | timestamptz | NOT NULL | 更新时间 |
 
-**索引**: `idx_control_policies_customer_status(customer_id, status)`、`idx_control_policies_customer_published(customer_id, published_at desc)`
+**索引**: 以迁移为准（如 `reseller_id` 相关索引）；**无** `enterprise_id` 索引。
 
-#### `control_policy_throttling_tiers`
+#### `carrier_service_modules`（产品包域 Carrier Service 快照；**HTTP `/v1/carrier-services` 真源**）
+
+与 [spec.md](./spec.md) **四模块**之 **Carrier Service**、**Package → `carrierServiceId` → OOP `roamingProfileId`** 一致。**`apn_profile_id`、`roaming_profile_id`、`rat`** 与 **`supplier_id` / `operator_id`** 为 **唯一持久化真源**（**FK** 至 **`apn_profiles` / `roaming_profiles`**，`rat` 枚举 `3G` / `4G` / `5G` / `NB-IOT`）。**OpenAPI `carrierServiceConfig`** 由服务层 **`mergedCarrierServiceConfigShape`** 仅从列组装。**`carrier_service_config`（JSONB）** 已由迁移 **`20260427100001_carrier_service_modules_drop_carrier_service_config.sql`** 从本表 **DROP**（回填见该迁移头注释）。
+
+基表来源：`20260311100006_package_modules.sql`；生命周期 **`20260420100001_*`**；**`name`** **`20260420100003_*`**；**`reseller_id` → `tenants.tenant_id`** **`20260422100004_*`**；历史 JSON 内 ID 规范化 **`20260419100001_*`**；**列化 + FK + `rat` NOT NULL** **`20260425100001_carrier_service_modules_apn_roaming_columns.sql`**。
+
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
-| tier_id | bigserial | PK | 分层 ID |
-| control_policy_id | uuid | NOT NULL, FK→control_policies | 控制策略快照 ID |
-| threshold_mb | integer | NOT NULL | 达量阈值（MB） |
-| downlink_kbps | integer | NOT NULL | 下行限速 Kbps |
-| uplink_kbps | integer | NOT NULL | 上行限速 Kbps |
-| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
-| | | UNIQUE(control_policy_id, threshold_mb) | 阈值唯一 |
+| carrier_service_id | uuid | PK, default gen_random_uuid() | 对外 **`carrierServiceId`** |
+| name | text | NOT NULL | 展示名称 |
+| reseller_id | uuid | FK→tenants(tenant_id) | 代理商租户（语义见 **FR-058**） |
+| supplier_id | uuid | — | 供应商（与 JSON / 校验一致） |
+| operator_id | uuid | — | **`operators.operator_id`（行 PK）**；API 展示 **`business_operator_id`** 见服务层 |
+| apn_profile_id | uuid | FK→apn_profiles，可空（存量未回填时） | **APN 快照 ID** |
+| roaming_profile_id | uuid | FK→roaming_profiles，可空（存量未回填时） | **Roaming 快照 ID**；OOP 解析真源 |
+| rat | text | NOT NULL, default `4G`，CHECK | `3G` / `4G` / `5G` / `NB-IOT` |
+| status | text | NOT NULL | `DRAFT` / `PUBLISHED` / `DEPRECATED` |
+| published_at | timestamptz | — | 发布时间 |
+| deprecated_at | timestamptz | — | 废弃时间 |
+| effective_from | timestamptz | — | 生效时间 |
+| created_at | timestamptz | NOT NULL | 创建时间 |
+| updated_at | timestamptz | NOT NULL | 更新时间 |
+
+**索引（迁移已建或 Phase 33 补充）**: `idx_carrier_service_modules_supplier_operator(supplier_id, operator_id)`；**`idx_carrier_service_modules_apn_profile_id`**；**`idx_carrier_service_modules_roaming_profile_id`**（部分索引、可空列时 **WHERE … IS NOT NULL**，以实际 SQL 为准）。
+
+#### `control_policies`（**计费 / 用量域**；**勿与 `control_policy_modules` 混淆**）
+
+来自迁移 `20260311100005_billing_integration.sql`（历史自 `0033`）。**主键为 `policy_id`**，按 **`enterprise_id` 唯一**一行，字段为 **cutoff/throttle 开关与简单数值**，**不是**「产品包四模块」的 Control Policy 快照，**也无** `POST /v1/control-policies` 写入路径。与 **`control_policy_modules`** 并存时，文档与查询 **MUST** 按表名区分。
+
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| policy_id | uuid | PK | 与模块表 **`control_policy_id`** 无关 |
+| enterprise_id | uuid | NOT NULL, unique, FK→tenants(tenant_id) | 企业 |
+| cutoff_enabled | boolean | NOT NULL, default false | — |
+| throttle_enabled | boolean | NOT NULL, default false | — |
+| throttle_kbps | int | — | — |
+| auto_reactivate | boolean | NOT NULL, default false | — |
+| created_at | timestamptz | NOT NULL | — |
+| updated_at | timestamptz | NOT NULL | — |
+
+#### ~~`control_policy_throttling_tiers`~~（旧版文档草案 — **当前仓库无此表**）
+
+**已废弃叙述**：曾假设 tiers 独立表；**当前实现**中 throttling **tiers** 位于 **`control_policy_modules.control_policy`** JSON（见 [spec.md](./spec.md)）。勿在迁移或新功能中创建本表名，除非未来产品另行立项。
 
 #### `commercial_terms`
 | 列 | 类型 | 约束 | 说明 |
@@ -666,36 +893,64 @@ sim_cards ──1:N──> rating_results
 
 **索引**: `idx_commercial_terms_customer_status(customer_id, status)`、`idx_commercial_terms_customer_published(customer_id, published_at desc)`
 
-#### `packages`
-| 列 | 类型 | 约束 | 说明 |
-|----|------|------|------|
-| package_id | uuid | PK, default gen_random_uuid() | 产品包 ID |
-| customer_id | uuid | NOT NULL, FK→customers | 企业 |
-| name | text | NOT NULL | 名称 |
-| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+#### `packages`（单表单实体，无 `package_versions`）
 
-#### `package_versions`
+与 [spec.md](./spec.md) **FR-016** / **FR-060** 一致：**一行即一个产品包**，主键 **`package_id`** 为订阅、计费与 OpenAPI **`packageId`** 的真源；**不**使用递增 `version` 列或独立版本表作为契约层模型。历史库若存在 `package_versions`，由迁移 `20260422100001_packages_single_entity.sql` 折叠入本表（原 `package_version_id` → `package_id`），并令 `subscriptions.package_id` 等外键指向 `packages.package_id`。
+
+与实现查询列一致（见 `src/services/package.ts` 中 **`PACKAGE_ROW_SELECT`**；**Phase 34** 起持久化 **仅四模块 FK**，正文 JSON **不**存于包行）：
+
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
-| package_version_id | uuid | PK, default gen_random_uuid() | 版本 ID |
-| package_id | uuid | NOT NULL, FK→packages | 产品包 |
-| version | int | NOT NULL | 版本号 |
-| status | text | NOT NULL, default 'DRAFT' | 状态 |
+| package_id | uuid | PK, default gen_random_uuid() | 可售产品包行 ID（对外 **`packageId`** / 兼容别名 `packageVersionId`） |
+| enterprise_id | uuid | NOT NULL, FK→tenants(tenant_id) | 企业租户（与 API `enterpriseId` 一致） |
+| name | text | NOT NULL | 展示名称 |
+| description | text | — | 对用户展示的产品包详细说明（可选） |
+| status | text | NOT NULL, default 'DRAFT' | `DRAFT` / `PUBLISHED` / `DEPRECATED` |
 | effective_from | timestamptz | — | 生效时间 |
-| carrier_service_id | uuid | NOT NULL, FK→carrier_services | Carrier Service |
-| control_policy_id | uuid | FK→control_policies | 控制策略快照 |
-| commercial_terms_id | uuid | FK→commercial_terms | 商业条款快照 |
-| price_plan_id | uuid | NOT NULL, FK→price_plans | 资费计划快照 |
+| published_at | timestamptz | — | 发布时间（`PUBLISHED` 时由迁移/应用回填） |
+| deprecated_at | timestamptz | — | 废弃时间（`DEPRECATED` 时回填） |
+| carrier_service_id | uuid | FK→carrier_service_modules | Carrier Service 模块 |
+| control_policy_id | uuid | FK→control_policy_modules | 控制策略模块 |
+| commercial_terms_id | uuid | FK→commercial_terms_modules | 商业条款模块 |
+| price_plan_id | uuid | NOT NULL, FK→price_plans | 资费计划快照行 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
-| | | UNIQUE(package_id, version) | 版本唯一 |
+| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
 
-**索引**: `idx_package_versions_price_plan(price_plan_id)`、`idx_package_versions_commercial_terms(commercial_terms_id)`、`idx_package_versions_control_policy(control_policy_id)`、`idx_package_versions_carrier_service(carrier_service_id)`
+**已删除列（迁移 `20260426100001_packages_drop_denormalized_jsonb.sql`）**：`commercial_terms`、`control_policy`、`carrier_service_config`、`roaming_profile`（jsonb）。**读路径**通过 **`price_plan_id`、`carrier_service_id`、`commercial_terms_id`、`control_policy_id`** JOIN 对应快照表组装 OpenAPI 形状。
 
-**产品包模块化视图（Package Version）**:
-- 模块 1：Price Plan → `price_plan_id`（关联四种资费计划类型之一）
-- 模块 2：Carrier Service → `carrier_service_id`（Carrier Service 内部再关联 `apn_profile_id` + `roaming_profile_id`）
+**已删除列（迁移 `20260428100001_packages_drop_redundant_carrier_columns.sql`）**：`supplier_id`、`operator_id`、`service_type`、`apn`。对外 **`supplierId` / `operatorId` / `serviceType` / `apn`** 由应用在读路径从 **`carrier_service_modules`**、**`price_plans.service_type`**、**`apn_profiles`**（经 `apn_profile_id`）拼装。
+
+**已删除列（迁移 `20260429100001_packages_description_drop_throttling.sql`）**：`throttling_policy`（jsonb，历史遗留；节流规则以 **`control_policy_modules.control_policy`** 为真源）。
+
+**索引（迁移已建）**: `idx_packages_enterprise_status(enterprise_id, status)`、`idx_packages_price_plan_id`、`idx_packages_carrier_service_id`、`idx_packages_commercial_terms_id`、`idx_packages_control_policy_id`
+
+**四模块绑定**（同一行上）：
+- 模块 1：Price Plan → `price_plan_id`
+- 模块 2：Carrier Service → `carrier_service_id`（内含 APN / Roaming Profile 引用）
 - 模块 3：Commercial Terms → `commercial_terms_id`
 - 模块 4：Control Policy → `control_policy_id`
+
+#### `default_fallback_package_mappings`（无订阅用量兜底 Package 映射）[V1.1]
+
+当 SIM 产生 usage 但在 `usage_day` 找不到任何有效订阅时，Rating 不应猜测订阅，也不应直接丢入长期 `unclassified_mb`。本表维护 **`enterprise_id + reseller_id + supplier_id + operator_id -> package_id`** 的唯一 ACTIVE 映射，将一个普通已发布 Package 设置为该 enterprise 在该 reseller/supplier/operator 下的 Default Fallback Package。
+
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| mapping_id | uuid | PK, default gen_random_uuid() | 映射 ID |
+| enterprise_id | uuid | NOT NULL, FK→tenants(tenant_id) | 企业租户；必须与 `package_id` 归属企业一致 |
+| reseller_id | uuid | NOT NULL, FK→tenants(tenant_id) | 代理商租户 |
+| supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
+| operator_id | uuid | NOT NULL, FK→operators | 运营商 |
+| package_id | uuid | NOT NULL, FK→packages(package_id) | 普通 Package；不是专用 package type，也不创建 subscription |
+| status | text | NOT NULL, default `ACTIVE`; CHECK `ACTIVE` / `INACTIVE` | 映射状态 |
+| created_by | uuid | — | 创建者 |
+| updated_by | uuid | — | 最近更新者 |
+| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
+
+**唯一约束**：`UNIQUE(enterprise_id, reseller_id, supplier_id, operator_id) WHERE status='ACTIVE'`，确保同一个四元组最多一条 ACTIVE fallback package 映射。历史停用映射保留用于审计。
+
+**Rating 口径**：命中本表时，`usage_package_daily_summary.subscription_id` 为 `null`，`package_id` 指向 fallback package，并通过 metadata 标记 `fallbackPackage=true`、`fallbackReason=NO_ACTIVE_SUBSCRIPTION`。无 ACTIVE 映射时，usage 才进入 `unclassified_mb` 数据质量桶。
 
 ### 4.5 订阅
 
@@ -703,11 +958,11 @@ sim_cards ──1:N──> rating_results
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
 | subscription_id | uuid | PK, default gen_random_uuid() | 订阅 ID |
-| customer_id | uuid | NOT NULL, FK→customers | 企业 |
-| sim_id | uuid | NOT NULL, FK→sim_cards | SIM |
+| enterprise_id | uuid | NOT NULL, FK→tenants(tenant_id) | 企业租户（与 API `enterpriseId` 一致） |
+| sim_id | uuid | NOT NULL, FK→sim_cards / sims | SIM |
 | subscription_kind | subscription_kind | NOT NULL, default 'MAIN' | 主/叠加 |
-| package_version_id | uuid | NOT NULL, FK→package_versions | 产品包版本 |
-| state | subscription_state | NOT NULL, default 'ACTIVE' | 状态 |
+| package_id | uuid | NOT NULL, FK→packages | 产品包（`packages.package_id`；迁移前列名为 `package_version_id`） |
+| state | subscription_state | NOT NULL, default 见实现 | 状态；**立即创建**默认 **`PROVISIONING`**；预约为 **`PENDING`**；上游成功后 **`ACTIVE`**；**上游失败时删除行**（不保留失败态） |
 | effective_at | timestamptz | NOT NULL | 生效时间 |
 | expires_at | timestamptz | — | 到期时间 |
 | cancelled_at | timestamptz | — | 取消时间 |
@@ -715,7 +970,7 @@ sim_cards ──1:N──> rating_results
 | commitment_end_at | timestamptz | — | 承诺期结束 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 
-**索引**: `idx_subscriptions_sim_effective(sim_id, effective_at)`
+**索引**: `idx_subscriptions_sim_effective(sim_id, effective_at)`；建议 `idx_subscriptions_package_id(package_id)`（按产品包反查订阅、废弃 Package 前占用校验）
 
 ### 4.6 用量
 
@@ -740,14 +995,18 @@ sim_cards ──1:N──> rating_results
 |----|------|------|------|
 | usage_id | bigserial | PK | 用量 ID |
 | supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
-| customer_id | uuid | FK→customers | 企业 |
+| enterprise_id | uuid | FK→tenants/customers | 企业 |
 | sim_id | uuid | FK→sim_cards | SIM |
 | iccid | text | NOT NULL | ICCID |
 | usage_day | date | NOT NULL | 用量日期 |
 | visited_mccmnc | text | NOT NULL | 到访 MCC+MNC |
-| uplink_kb | bigint | NOT NULL, default 0 | 上行 KB |
-| downlink_kb | bigint | NOT NULL, default 0 | 下行 KB |
-| total_kb | bigint | NOT NULL, default 0 | 总流量 KB |
+| uplink_mb | numeric | NOT NULL, default 0 | 上行 MB |
+| downlink_mb | numeric | NOT NULL, default 0 | 下行 MB |
+| total_mb | numeric | NOT NULL, default 0 | 原始总流量 MB |
+| in_profile_mb | numeric | NOT NULL, default 0 | 已由 rating 判定为 covered / in-profile 的用量 MB，包含包内、covered overage 与 tiered volume |
+| out_of_profile_mb | numeric | NOT NULL, default 0 | 已由 rating 判定为 OOP roaming / PAYG / 规则缺失等非 covered 用量 MB |
+| unclassified_mb | numeric | NOT NULL, default 0 | 尚未完成 rating 或无法归类的用量 MB |
+| rated_at | timestamptz | — | 最近一次分类聚合回写时间 |
 | apn | text | — | APN |
 | rat | text | — | 接入技术 |
 | input_ref | text | — | 来源引用 |
@@ -755,7 +1014,29 @@ sim_cards ──1:N──> rating_results
 | updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
 | | | UNIQUE(iccid, usage_day, visited_mccmnc) | 幂等唯一 |
 
-**索引**: `idx_usage_customer_day(customer_id, usage_day)`
+**索引**: `idx_usage_customer_day(customer_id, usage_day)`（历史命名）、`idx_usage_sim_day(sim_id, usage_day)`；分类聚合列用于 Alerts、Reports、Dashboard 等跨模块读取。`in_profile_mb + out_of_profile_mb + unclassified_mb` 不强制等于 `total_mb`，以容忍舍入、迟到话单、重放和未批价数据。
+
+#### `usage_monthly_summary`
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| usage_month_id | bigserial | PK | 月汇总 ID |
+| supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
+| enterprise_id | uuid | FK→tenants | 企业 |
+| sim_id | uuid | FK→sims | SIM |
+| iccid | text | NOT NULL | ICCID |
+| usage_month | date | NOT NULL | 自然月首日（UTC），如 `2026-07-01` |
+| visited_mccmnc | text | NOT NULL | 拜访地 MCC+MNC（与日表同维） |
+| uplink_mb / downlink_mb / total_mb | numeric | NOT NULL, default 0 | 该月该拜访地累计量 |
+| in_profile_mb / out_of_profile_mb / unclassified_mb | numeric | NOT NULL, default 0 | 自日表分类列求和（批价后才有意义） |
+| rated_at | timestamptz | — | 日表 `rated_at` 最大值 |
+| rolled_up_at | timestamptz | NOT NULL | 最近一次月 rollup 时间 |
+| input_ref | text | — | 来源（job id 等） |
+| created_at / updated_at | timestamptz | NOT NULL | |
+| | | UNIQUE(iccid, usage_month, visited_mccmnc) | 幂等唯一 |
+
+**管理口径**：由 `USAGE_MONTHLY_ROLLUP`（及日表写入后对**过往自然月**的自动刷新）从 `usage_daily_summary` 聚合写入；**不**绑定出账任务；**不**表达跨月 ONE_TIME / 套餐配额。Reports 对完整过往自然月优先读本表，当月与残月读日表。
+
+**索引**: `idx_usage_monthly_enterprise_month`, `idx_usage_monthly_sim_month`, `idx_usage_monthly_month`。
 
 ### 4.7 账单
 
@@ -773,6 +1054,11 @@ sim_cards ──1:N──> rating_results
 | generated_at | timestamptz | — | 生成时间 |
 | published_at | timestamptz | — | 发布时间 |
 | paid_at | timestamptz | — | 支付时间 |
+| paid_amount | numeric(12,2) | — | mark-paid 录入实收金额（审计用，不与 total_amount 强校验） |
+| payment_ref | text | — | 支付凭证号（mark-paid 必填 `paymentRef`） |
+| payment_proof | text | — | 可选付款佐证（mark-paid 可选 `paymentProof`，如银行转账流水备注） |
+| written_off_at | timestamptz | — | 坏账核销时间 |
+| write_off_reason | text | — | 核销原因（write-off 必填 `reason`） |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | | | UNIQUE(customer_id, period_start, period_end) | 账期唯一 |
 
@@ -783,7 +1069,7 @@ sim_cards ──1:N──> rating_results
 | bill_id | uuid | NOT NULL, FK→bills | 账单 |
 | item_type | text | NOT NULL | 项目类型 |
 | sim_id | uuid | — | SIM |
-| package_version_id | uuid | — | 产品包版本 |
+| package_id | uuid | — | 产品包（`packages.package_id`，L3 追溯） |
 | amount | numeric(12,2) | NOT NULL | 金额 |
 | metadata | jsonb | — | 元数据 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
@@ -794,15 +1080,19 @@ sim_cards ──1:N──> rating_results
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
 | note_id | uuid | PK, default gen_random_uuid() | 调账单 ID |
-| customer_id | uuid | NOT NULL, FK→customers | 企业 |
-| note_type | note_type | NOT NULL | 类型 |
-| status | note_status | NOT NULL, default 'DRAFT' | 状态 |
+| enterprise_id | uuid | NOT NULL, FK→tenants | 企业（**ENTERPRISE tenant_id**） |
+| source_bill_id | uuid | FK→bills.bill_id, nullable | 关联原账单（手工 **`:adjust`**）；迁移 **20260621100005** |
+| note_type | note_type | NOT NULL | 类型 **CREDIT** / **DEBIT** |
+| status | note_status | NOT NULL, default DRAFT | **DRAFT** / **APPROVED** / **APPLIED** |
 | currency | text | NOT NULL | 币种 |
-| total_amount | numeric(12,2) | NOT NULL, default 0 | 总金额 |
+| total_amount | numeric(12,2) | NOT NULL, default 0 | 总金额（恒为正） |
 | reason | text | — | 原因 |
+| idempotency_key | text | nullable | 客户端幂等键；与 **source_bill_id** 联合唯一（非空时） |
 | input_ref | text | — | 来源引用 |
 | calculation_id | text | — | 计算 ID |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+
+**索引**：`idx_adjustment_notes_source_bill_idempotency_key` — UNIQUE **(source_bill_id, idempotency_key)** WHERE 两者均非空（Phase 40）。
 
 #### `adjustment_note_items`
 | 列 | 类型 | 约束 | 说明 |
@@ -829,7 +1119,7 @@ sim_cards ──1:N──> rating_results
 | visited_mccmnc | text | — | MCC+MNC |
 | input_ref | text | — | 来源引用 |
 | matched_subscription_id | uuid | FK→subscriptions | 匹配订阅 |
-| matched_package_version_id | uuid | FK→package_versions | 匹配产品包版本 |
+| matched_package_id | uuid | FK→packages | 匹配产品包（`packages.package_id`） |
 | matched_price_plan_id | uuid | FK→price_plans | 匹配资费快照 |
 | classification | text | NOT NULL | 分类 |
 | charged_mb | numeric(18,6) | — | 计费流量 (MB) |
@@ -840,13 +1130,42 @@ sim_cards ──1:N──> rating_results
 
 **索引**: `idx_rating_results_calc(calculation_id)`, `idx_rating_results_customer_day(customer_id, usage_day)`
 
+#### `usage_package_daily_summary`
+| 列 | 类型 | 约束 | 说明 |
+|----|------|------|------|
+| usage_package_summary_id | uuid | PK, default gen_random_uuid() | Package 日汇总 ID |
+| supplier_id | uuid | FK→suppliers | 供应商 |
+| reseller_id | uuid | FK→tenants | 代理商 |
+| enterprise_id | uuid | FK→tenants/customers | 企业 |
+| sim_id | uuid | FK→sim_cards | SIM |
+| iccid | text | — | ICCID |
+| usage_day | date | NOT NULL | 用量日期 |
+| visited_mccmnc | text | NOT NULL | 拜访地 MCC/MNC；保留该维度用于经营分析 |
+| subscription_id | uuid | FK→subscriptions | 匹配订阅 |
+| package_id | uuid | FK→packages | 匹配产品包 |
+| price_plan_id | uuid | FK→price_plans | 匹配资费计划 |
+| price_plan_type | text | — | 资费计划类型快照 |
+| in_profile_mb | numeric | NOT NULL, default 0 | covered / in-profile 用量 MB，包含包内、covered overage 与 tiered volume |
+| out_of_profile_mb | numeric | NOT NULL, default 0 | OOP roaming / PAYG / 规则缺失等非 covered 用量 MB |
+| unclassified_mb | numeric | NOT NULL, default 0 | 无法归类或未完整匹配的用量 MB |
+| amount | numeric(12,2) | NOT NULL, default 0 | 该粒度下 rating 金额合计 |
+| currency | text | — | 币种 |
+| calculation_id | text | — | 最近一次生成该汇总的 calculationId |
+| rated_at | timestamptz | — | 最近一次 rating 回写时间 |
+| created_at | timestamptz | NOT NULL, default now() | 创建时间 |
+| updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
+
+**管理口径**：该表不由上游同步任务直接写入，而由 Billing / Rating 在生成 `rating_results` 后聚合派生。业务粒度为 `sim_id + usage_day + subscription_id + package_id + price_plan_id + visited_mccmnc`；同一粒度已存在时覆盖当前有效汇总，并通过 `calculation_id` / `rated_at` 保留最近一次批价追溯。保留 `visited_mccmnc` 是为了支持后续 OOP 来源网络、国家/运营商成本异常、Package 使用结构等经营分析。
+
+**索引**: `idx_usage_package_daily_enterprise_day(enterprise_id, usage_day)`, `idx_usage_package_daily_package_day(package_id, usage_day)`, `idx_usage_package_daily_sim_day(sim_id, usage_day)`
+
 ### 4.10 分享链接
 
 #### `share_links`
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
 | code | text | PK, CHECK(~'^[A-Za-z0-9]{8}$') | 分享码 |
-| kind | text | NOT NULL, CHECK(in packages/packageVersions/bills) | 分享类型 |
+| kind | text | NOT NULL, CHECK(in packages/bills) | 分享类型（`packages` 表示按 `package_id` 分享，无 `packageVersions`） |
 | params | jsonb | NOT NULL, CHECK(object) | 参数 |
 | reseller_id | uuid | FK→resellers, nullable | 代理商 |
 | customer_id | uuid | FK→customers, nullable | 客户 |
@@ -957,73 +1276,138 @@ CREATE INDEX IF NOT EXISTS idx_alerts_status
 
 **用途**: 告警去重与抑制，`UNIQUE` 约束实现去重键。
 
-### 5.5 `alert_rules` — 告警规则
+### 5.5 `alert_type_catalog` / `alert_config_profiles` / `alert_config_items` — 告警配置 ABC 模型
 
 ```sql
-CREATE TABLE IF NOT EXISTS alert_rules (
-  rule_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  rule_key text NOT NULL UNIQUE,
-  rule_name text NOT NULL,
-  rule_type text NOT NULL,
-  severity alert_severity NOT NULL,
-  threshold numeric,
-  duration_minutes int,
-  window_minutes int,
-  suppress_minutes int NOT NULL DEFAULT 5,
-  merge_minutes int NOT NULL DEFAULT 5,
+CREATE TABLE IF NOT EXISTS alert_type_catalog (
+  alert_type alert_type PRIMARY KEY,
   enabled boolean NOT NULL DEFAULT true,
-  scope_type text NOT NULL DEFAULT 'GLOBAL',
-  scope_id uuid,
-  rule_params jsonb,
-  route_policy jsonb,
+  allowed_scope_types text[] NOT NULL,
+  default_severity alert_severity NOT NULL,
+  default_threshold_value numeric,
+  default_threshold_unit text,
+  default_window_minutes int,
+  default_suppress_minutes int NOT NULL DEFAULT 30,
+  default_delivery_channels text[] NOT NULL DEFAULT ARRAY['PORTAL']::text[],
+  default_delivery_targets jsonb NOT NULL DEFAULT '{}'::jsonb,
+  default_threshold_config jsonb NOT NULL DEFAULT '{}'::jsonb,
+  display_name text NOT NULL,
+  description text,
+  sort_order int NOT NULL DEFAULT 100,
+  created_at timestamptz NOT NULL DEFAULT current_timestamp,
+  updated_at timestamptz NOT NULL DEFAULT current_timestamp,
+  CHECK (allowed_scope_types <@ ARRAY['PLATFORM','RESELLER','ENTERPRISE']::text[]),
+  CHECK (default_threshold_unit IS NULL OR default_threshold_unit IN ('PERCENT', 'KB', 'MB', 'GB', 'HOURS', 'MINUTES', 'ATTEMPTS', 'COUNT')),
+  CHECK (default_window_minutes IS NULL OR default_window_minutes > 0),
+  CHECK (default_suppress_minutes >= 0),
+  CHECK (default_delivery_channels <@ ARRAY['PORTAL','EMAIL','WEBHOOK']::text[])
+);
+
+CREATE TABLE IF NOT EXISTS alert_config_profiles (
+  config_profile_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  scope_type text NOT NULL,
+  reseller_id uuid REFERENCES tenants(tenant_id),
+  enterprise_id uuid REFERENCES tenants(tenant_id),
+  status text NOT NULL DEFAULT 'ACTIVE',
+  name text,
+  description text,
+  version int NOT NULL DEFAULT 1,
+  created_by uuid REFERENCES users(user_id),
+  updated_by uuid REFERENCES users(user_id),
+  created_at timestamptz NOT NULL DEFAULT current_timestamp,
+  updated_at timestamptz NOT NULL DEFAULT current_timestamp,
+  CHECK (scope_type IN ('PLATFORM', 'RESELLER', 'ENTERPRISE')),
+  CHECK (status IN ('ACTIVE', 'INACTIVE')),
+  CHECK (
+    (scope_type = 'PLATFORM' AND reseller_id IS NULL AND enterprise_id IS NULL)
+    OR (scope_type = 'RESELLER' AND reseller_id IS NOT NULL AND enterprise_id IS NULL)
+    OR (scope_type = 'ENTERPRISE' AND reseller_id IS NOT NULL AND enterprise_id IS NOT NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_alert_config_profiles_platform_active
+  ON alert_config_profiles ((status))
+  WHERE scope_type = 'PLATFORM' AND status = 'ACTIVE';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_alert_config_profiles_reseller_active
+  ON alert_config_profiles (reseller_id)
+  WHERE scope_type = 'RESELLER' AND status = 'ACTIVE';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_alert_config_profiles_enterprise_active
+  ON alert_config_profiles (enterprise_id)
+  WHERE scope_type = 'ENTERPRISE' AND status = 'ACTIVE';
+
+CREATE TABLE IF NOT EXISTS alert_config_items (
+  config_item_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  config_profile_id uuid NOT NULL REFERENCES alert_config_profiles(config_profile_id) ON DELETE CASCADE,
+  alert_type alert_type NOT NULL REFERENCES alert_type_catalog(alert_type),
+  enabled boolean NOT NULL DEFAULT true,
+  severity alert_severity NOT NULL,
+  threshold_value numeric,
+  threshold_unit text,
+  window_minutes int,
+  suppress_minutes int NOT NULL DEFAULT 30,
+  delivery_channels text[] NOT NULL DEFAULT ARRAY['PORTAL']::text[],
+  delivery_targets jsonb NOT NULL DEFAULT '{}'::jsonb,
+  threshold_config jsonb NOT NULL DEFAULT '{}'::jsonb,
   version int NOT NULL DEFAULT 1,
   created_at timestamptz NOT NULL DEFAULT current_timestamp,
-  updated_at timestamptz NOT NULL DEFAULT current_timestamp
+  updated_at timestamptz NOT NULL DEFAULT current_timestamp,
+  UNIQUE (config_profile_id, alert_type),
+  CHECK (threshold_unit IS NULL OR threshold_unit IN ('PERCENT', 'KB', 'MB', 'GB', 'HOURS', 'MINUTES', 'ATTEMPTS', 'COUNT')),
+  CHECK (window_minutes IS NULL OR window_minutes > 0),
+  CHECK (suppress_minutes >= 0),
+  CHECK (delivery_channels <@ ARRAY['PORTAL','EMAIL','WEBHOOK']::text[])
 );
 
-CREATE INDEX IF NOT EXISTS idx_alert_rules_scope
-  ON alert_rules(scope_type, scope_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_alert_config_items_type
+  ON alert_config_items(alert_type, config_profile_id);
 ```
 
-**用途**: 规则引擎统一维护阈值、窗口、路由与升级策略。
+**用途**: ABC 三表是 V1.1 告警配置真源。`alert_type_catalog` 定义系统已实现的 7 类告警、允许配置的 scope 与默认配置；`alert_config_profiles` 表达 PLATFORM / RESELLER / ENTERPRISE 的配置表对象，同一 scope 实体同时最多一份 `ACTIVE` profile；`alert_config_items` 表达某份配置表中的具体 alertType 配置项，同一 profile 下 `alert_type` 唯一。规则引擎按 ENTERPRISE → RESELLER → PLATFORM → built-in 顺序解析启用状态、阈值、窗口、抑制与投递配置；更具体 scope 的 `enabled=false` 阻断上层配置。旧 `alert_rule_configs` 单表仅作为 Phase 43 兼容与数据迁移来源，不再作为新增配置入口。
 
-### 5.6 `alert_notifications` — 告警推送记录
+### 5.6 `alert_deliveries` — 告警投递记录
 
 ```sql
-CREATE TABLE IF NOT EXISTS alert_notifications (
-  notification_id bigserial PRIMARY KEY,
-  alert_id uuid NOT NULL REFERENCES alerts(alert_id),
+CREATE TABLE IF NOT EXISTS alert_deliveries (
+  delivery_id bigserial PRIMARY KEY,
+  alert_id uuid NOT NULL REFERENCES alerts(alert_id) ON DELETE CASCADE,
   channel text NOT NULL,
-  target text,
   status text NOT NULL DEFAULT 'PENDING',
-  attempt int NOT NULL DEFAULT 0,
-  last_error text,
-  next_retry_at timestamptz,
+  target text,
+  event_id uuid REFERENCES events(event_id),
+  webhook_delivery_id bigint REFERENCES webhook_deliveries(delivery_id),
+  error_code text,
+  error_message text,
   delivered_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT current_timestamp
+  created_at timestamptz NOT NULL DEFAULT current_timestamp,
+  updated_at timestamptz NOT NULL DEFAULT current_timestamp,
+  CHECK (channel IN ('PORTAL', 'EMAIL', 'WEBHOOK')),
+  CHECK (status IN ('PENDING', 'DELIVERED', 'FAILED', 'SKIPPED', 'NOT_IMPLEMENTED'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_alert_notifications_status
-  ON alert_notifications(status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_alert_deliveries_alert
+  ON alert_deliveries(alert_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_alert_deliveries_status
+  ON alert_deliveries(status, channel, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_alert_deliveries_webhook_delivery
+  ON alert_deliveries(webhook_delivery_id)
+  WHERE webhook_delivery_id IS NOT NULL;
 ```
 
-**用途**: 多通道推送投递与重试追踪。
+**用途**: 告警投递结果追踪。V1.1 中 Portal 通道记录为 `DELIVERED`，Email 通道作为配置预留记录为 `NOT_IMPLEMENTED`，Webhook 通道复用 `events(ALERT_TRIGGERED)` 与 `webhook_deliveries`，并通过 `webhook_delivery_id` 建立关联。
 
-### 5.7 `alert_audits` — 告警审计
+### 5.7 告警事件与审计
 
-```sql
-CREATE TABLE IF NOT EXISTS alert_audits (
-  audit_id bigserial PRIMARY KEY,
-  alert_id uuid NOT NULL REFERENCES alerts(alert_id),
-  action text NOT NULL,
-  actor_id uuid REFERENCES users(id),
-  actor_role text,
-  note text,
-  created_at timestamptz NOT NULL DEFAULT current_timestamp
-);
-```
+V1.1 不新增独立 `alert_audits` 专表；告警审计统一写入通用 `audit_logs`：
 
-**用途**: 告警认领、冻结策略、手工重试等审计轨迹。
+- `ALERT_CREATE` / `ALERT_MERGE`：由 worker / service 在创建或合并告警时写入，`actor_role='SYSTEM'`
+- `ALERT_ACKNOWLEDGE`：由 `POST /v1/alerts/{alertId}:acknowledge` 写入，记录确认前后状态与 `actor_user_id`
+- `ALERT_RULE_CONFIG_UPSERT` / `ALERT_RULE_CONFIG_PATCH`：由 `POST/PATCH /v1/alert-configs` 写入，记录配置变更前后快照
+
+对应事件写入 `events`：新建告警通过 `emitEvent(ALERT_TRIGGERED)` 进入出站 Webhook 目录；合并、确认、规则配置变更写内部追踪事件 `ALERT_MERGED`、`ALERT_ACKNOWLEDGED`、`ALERT_RULE_CONFIG_CHANGED`，用于查询与审计追踪，配置变更不回写历史告警。
 
 ### 5.8 `config_parameters` — 配置中心参数
 
@@ -1153,19 +1537,29 @@ CREATE INDEX IF NOT EXISTS idx_quota_snapshots_scope_time
 ```sql
 CREATE TABLE IF NOT EXISTS webhook_subscriptions (
   webhook_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  reseller_id uuid REFERENCES resellers(id),
-  customer_id uuid REFERENCES customers(id),
+  reseller_id uuid REFERENCES tenants(tenant_id),
+  enterprise_id uuid REFERENCES tenants(tenant_id),
   url text NOT NULL,
   secret text NOT NULL,       -- HMAC-SHA256 签名密钥
   event_types text[] NOT NULL, -- 订阅的事件类型列表
   enabled boolean NOT NULL DEFAULT true,
+  description text,
   created_at timestamptz NOT NULL DEFAULT current_timestamp,
   updated_at timestamptz NOT NULL DEFAULT current_timestamp,
-  CHECK (reseller_id IS NOT NULL OR customer_id IS NOT NULL)
+  CHECK (reseller_id IS NOT NULL OR enterprise_id IS NOT NULL)
 );
 ```
 
-**用途**: Webhook 投递配置（US11, FR-039），支持 HMAC-SHA256 签名。
+**用途**: Webhook 投递配置（US11, FR-039），支持 HMAC-SHA256 签名。企业级订阅同时写入 **`reseller_id`**（父代理商）与 **`enterprise_id`**；仅代理商级订阅时 `enterprise_id` 为空。列名与 `jobs` / `events` 对齐（`customer_id` → `enterprise_id`，迁移 `20260808100001`）。
+
+**唯一性（与 `upstream_integrations` 同模式，迁移 `20260808120001`）**:
+- 列 **`status`**: `ACTIVE` / `INACTIVE` / `DEPRECATED`
+- 列 **`deprecated_at`**: deprecate 操作时间（迁移 `20260808130001`）；live 行为 null
+- 部分唯一索引：同一 **`enterprise_id`** 至多一条 `ACTIVE|INACTIVE`；reseller-level（`enterprise_id IS NULL`）同一 **`reseller_id`** 至多一条
+- **POST `:deprecate`** → `DEPRECATED` + `deprecated_at`（让出唯一位）；创建冲突 → **409 DUPLICATE**
+- `enabled=true` ↔ `ACTIVE`；`enabled=false` 且未删 ↔ `INACTIVE`（仍占唯一位）
+- **PATCH**：仅通过 `enabled` 切换 ACTIVE/INACTIVE（请求体无 `status`）；已 DEPRECATED → **409**；废弃用 `:deprecate`
+- **GET list**：默认返回 `ACTIVE` / `INACTIVE` / `DEPRECATED`；可用 `status` 查询参数收窄
 
 ### 5.15 `webhook_deliveries` — Webhook 投递记录
 
@@ -1174,7 +1568,7 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
   delivery_id bigserial PRIMARY KEY,
   webhook_id uuid NOT NULL REFERENCES webhook_subscriptions(webhook_id),
   event_id uuid NOT NULL REFERENCES events(event_id),
-  attempt int NOT NULL DEFAULT 1,
+  attempt int not null default 1,
   status text NOT NULL DEFAULT 'PENDING', -- PENDING, SENT, FAILED
   response_code int,
   response_body text,
@@ -1190,19 +1584,29 @@ CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status
 
 ### 5.16 `vendor_product_mappings` — 上游产品映射
 
+**真源**：[clarifications/subscription-provisioning-upstream-mapping.md](./clarifications/subscription-provisioning-upstream-mapping.md)
+
+**语义（Phase 28+ 收紧）**：
+
+- **1 个 `PUBLISHED` Package ⇔ 至多 1 条映射**
+- **`supplier_id` MUST** 与 Package → `carrier_service_modules.supplier_id` **一致**；**由服务端在 `POST …/packages/{id}:publish` 时推导写入**，**MUST NOT** 由映射 CRUD 客户端任意指定其它 supplier
+- **标准写入路径**：Package **`:publish`** 请求体 `externalProductId`；独立 `POST /v1/vendor-product-mappings` 仅运维补录
+
 ```sql
 CREATE TABLE IF NOT EXISTS vendor_product_mappings (
   mapping_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  package_version_id uuid NOT NULL REFERENCES package_versions(package_version_id),
+  package_id uuid NOT NULL REFERENCES packages(package_id),
   supplier_id uuid NOT NULL REFERENCES suppliers(id),
   external_product_id text NOT NULL,
   provisioning_parameters jsonb,
   created_at timestamptz NOT NULL DEFAULT current_timestamp,
-  UNIQUE(package_version_id, supplier_id)
+  UNIQUE(package_id)
 );
 ```
 
-**用途**: 内部产品包与上游供应商产品的映射关系（US8）。
+> **迁移说明**：自 `UNIQUE(package_id, supplier_id)` 收紧为 **`UNIQUE(package_id)`** 的迁移待实现（见 tasks.md）。存量环境在迁移前应保证每 Package 至多一条映射。
+
+**用途**: CMP `packageId` ↔ 上游 `external_product_id`；订阅 **`SUBSCRIPTION_PROVISION` Job** 读取本表调用 SPI `changePlan`。
 
 ### 5.17 `provisioning_orders` — 开通同步订单
 
@@ -1251,7 +1655,26 @@ CREATE TABLE IF NOT EXISTS reconciliation_runs (
 
 ## 6. 已有表字段扩展
 
-> **说明**: Section 4.3 `sim_cards` 表定义已包含所有 CMP.xlsx 对齐字段（multi-IMSI、form_factor、IMEI lock、四方归属链等），无需额外 ALTER。以下仅列出其他已有表需要扩展的字段。
+> **说明**: Section 4.3 `sim_cards` 为 CMP.xlsx 目标模型。当前 API 运行时仍使用 `public.sims`（见迁移 `20260311100001_core_schema.sql`）。以下列出对**运行时表**及其他已有表的增量 DDL。
+
+### 6.0 `sims` — IME Lock（运行时）
+
+```sql
+-- 20260516100001_sims_imei_lock_enabled.sql
+ALTER TABLE public.sims
+  ADD COLUMN IF NOT EXISTS imei_lock_enabled boolean NOT NULL DEFAULT false;
+
+UPDATE public.sims
+SET imei_lock_enabled = true
+WHERE bound_imei IS NOT NULL AND btrim(bound_imei) <> '';
+```
+
+| 列 | API | 说明 |
+|----|-----|------|
+| `imei_lock_enabled` | `imeiLockEnabled` | IME Lock 开关 |
+| `bound_imei` | `imei` | 15 位设备 IMEI；Lock 开启时必填 |
+
+导入/创建时 `imeiLockEnabled` 与 `imei` 须成对（同开或同关）。
 
 ### 6.1 `bills` 新增字段
 
@@ -1275,17 +1698,19 @@ ALTER TABLE bill_line_items
 
 **用途**: 支持 L2 交叉分组汇总层（`department_id × package_id`）。每条 L3 明细行同时记录 `department_id` 和 `package_id`，L2 汇总视图按此二维度 GROUP BY 生成（US6, FR-030）。
 
-### 6.3 `jobs` 新增字段
+### 6.3 `jobs` 组织与幂等字段
+
+历史迁移曾新增 `reseller_id` / `customer_id` / `idempotency_key` / `file_hash`。企业归属列已重命名为 **`enterprise_id`**（FK→`tenants.tenant_id`，ENTERPRISE；见迁移 `20260804100001_jobs_rename_customer_id_to_enterprise_id.sql`）。
 
 ```sql
 ALTER TABLE jobs
-  ADD COLUMN IF NOT EXISTS reseller_id uuid REFERENCES resellers(id),
-  ADD COLUMN IF NOT EXISTS customer_id uuid REFERENCES customers(id),
+  ADD COLUMN IF NOT EXISTS reseller_id uuid REFERENCES tenants(tenant_id),
+  ADD COLUMN IF NOT EXISTS enterprise_id uuid REFERENCES tenants(tenant_id),
   ADD COLUMN IF NOT EXISTS idempotency_key text,
   ADD COLUMN IF NOT EXISTS file_hash text;
 ```
 
-**用途**: 批量导入幂等（batchId/fileHash）和组织关联（代理商/客户维度）。
+**用途**: 批量导入幂等（batchId/fileHash）和组织关联（代理商/企业维度）。
 
 ## 7. 索引策略
 
@@ -1386,9 +1811,11 @@ CREATE TABLE usage_daily_summary_2026_02 PARTITION OF usage_daily_summary_partit
 | 0029 | add_provisioning_orders.sql | provisioning_orders 表 + provisioning_status ENUM |
 | 0030 | add_reconciliation_runs.sql | reconciliation_runs 表 |
 | 0031 | extend_bills_fields.sql | bills 新增 reseller_id/payment_ref/overdue_at + bill_line_items L2 分组字段 |
-| 0032 | extend_jobs_fields.sql | jobs 新增 reseller_id/customer_id/idempotency_key/file_hash |
+| 0032 | extend_jobs_fields.sql | jobs 新增 reseller_id/customer_id/idempotency_key/file_hash（customer_id 后由 20260804100001 重命名为 enterprise_id） |
 | 0033 | update_fk_references.sql | 已有表 FK 引用更新 (enterprise_id → customers, sim_id → sim_cards, operator_id 等) |
 | 0034 | add_new_indexes.sql | 新增索引（独立表 + RBAC + SIM 四方归属） |
 | 0035 | update_rls_policies.sql | 基于独立表和 RBAC 重写 RLS 策略 |
 
 > **重要**: 迁移 0020-0023 为破坏性迁移，需要数据迁移脚本将 `tenants` + `user_roles` 中的数据迁移到新独立表。建议在预发布环境充分验证后再执行。
+
+

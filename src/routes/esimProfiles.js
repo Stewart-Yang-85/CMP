@@ -46,7 +46,7 @@ export function registerEsimRoutes({ app, prefix, deps }) {
     if (!profile) {
       return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create eSIM profile.')
     }
-    res.status(201).json({
+    res.code().send({
       profileId: profile.profile_id ?? profile.id,
       iccid: profile.iccid,
       eid: profile.eid,
@@ -77,7 +77,7 @@ export function registerEsimRoutes({ app, prefix, deps }) {
       `select=profile_id,iccid,eid,smdp_system_id,activation_code,status,remark,created_at&order=created_at.desc&limit=${pageSize}&offset=${offset}${filterQs}`
     )
     const rows = Array.isArray(data) ? data : []
-    res.json({
+    res.send({
       items: rows.map((r) => ({
         profileId: r.profile_id,
         iccid: r.iccid,
@@ -132,7 +132,7 @@ export function registerEsimRoutes({ app, prefix, deps }) {
     if (!updated) {
       return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to update eSIM profile.')
     }
-    res.json({
+    res.send({
       profileId: updated.profile_id,
       iccid: updated.iccid,
       eid: updated.eid,
@@ -193,7 +193,7 @@ export function registerEsimRoutes({ app, prefix, deps }) {
       } catch {
         // non-fatal: history table may not exist yet
       }
-      res.json({
+      res.send({
         profileId: result.profile_id,
         iccid: result.iccid,
         eid: result.eid,
@@ -227,7 +227,7 @@ export function registerEsimRoutes({ app, prefix, deps }) {
     if (!system) {
       return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create SM-DP+ system.')
     }
-    res.status(201).json({
+    res.code().send({
       smdpSystemId: system.smdp_system_id ?? system.id,
       name: system.name,
       baseUrl: system.base_url,
@@ -250,7 +250,7 @@ export function registerEsimRoutes({ app, prefix, deps }) {
       `select=smdp_system_id,name,base_url,auth_type,created_at&order=created_at.desc&limit=${pageSize}&offset=${offset}`
     )
     const rows = Array.isArray(data) ? data : []
-    res.json({
+    res.send({
       items: rows.map((r) => ({
         smdpSystemId: r.smdp_system_id,
         name: r.name,
@@ -291,7 +291,7 @@ export function registerEsimRoutes({ app, prefix, deps }) {
     if (!system) {
       return sendError(res, 404, 'NOT_FOUND', 'SM-DP+ system not found.')
     }
-    res.json({
+    res.send({
       smdpSystemId: system.smdp_system_id,
       name: system.name,
       baseUrl: system.base_url,

@@ -62,7 +62,7 @@ export function registerReconciliationRoutes({ app, prefix, deps }) {
       startedAt: row.started_at ?? null,
       completedAt: row.finished_at ?? null,
     }))
-    res.json({ items, total: typeof total === 'number' ? total : items.length, page, pageSize })
+    res.send({ items, total: typeof total === 'number' ? total : items.length, page, pageSize })
   })
 
   app.post(`${prefix}/reconciliation/runs`, async (req, res) => {
@@ -105,7 +105,7 @@ export function registerReconciliationRoutes({ app, prefix, deps }) {
       { returning: 'representation' }
     )
     const job = Array.isArray(jobRows) ? jobRows[0] : null
-    res.status(202).json({
+    res.code().send({
       runId: result.value.runId,
       jobId: job?.job_id ?? null,
       status: 'RUNNING',
@@ -136,7 +136,7 @@ export function registerReconciliationRoutes({ app, prefix, deps }) {
       pageSize: query.pageSize,
     })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 
   app.get(`${prefix}/reconciliation/runs/:runId/mismatches/:iccid/trace`, async (req, res) => {
@@ -150,7 +150,7 @@ export function registerReconciliationRoutes({ app, prefix, deps }) {
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const result = await getReconciliationMismatchTrace({ supabase, runId, iccid })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 
   app.get(`${prefix}/reconciliation/runs/:runId`, async (req, res) => {
@@ -163,6 +163,6 @@ export function registerReconciliationRoutes({ app, prefix, deps }) {
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const result = await getReconciliationRun({ supabase, runId })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 }

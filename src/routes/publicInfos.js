@@ -10,13 +10,17 @@ export function registerPublicInfoRoutes({ app, prefix, deps }) {
     createSupabaseRestClient,
     getTraceId,
     sendError,
+    getAuthContext,
     ensurePlatformAdmin,
     isValidUuid,
   } = deps
 
-  // T148: GET /v1/public-infos (read-only, all authenticated users)
-  // No auth guard beyond the global authGuard — any authenticated user can read.
+  // GET /v1/public-infos — any authenticated system user
   app.get(`${prefix}/public-infos`, async (req, res) => {
+    const auth = typeof getAuthContext === 'function' ? getAuthContext(req) : {}
+    if (!auth?.roleScope && !auth?.role) {
+      return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
+    }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const query = req.query ?? {}
     const name = query.name ? String(query.name).trim() : null
@@ -27,17 +31,17 @@ export function registerPublicInfoRoutes({ app, prefix, deps }) {
 
     const result = await listPublicInfos({ supabase, name, mcc, mnc, page, pageSize })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 
-  // T149: POST /v1/admin/public-infos (platform_admin only)
+  // POST /v1/admin/public-infos (platform_admin only; duplicate mcc+mnc → 409)
   app.post(`${prefix}/admin/public-infos`, async (req, res) => {
     const auth = ensurePlatformAdmin(req, res)
     if (!auth) return
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const result = await createPublicInfo({ supabase, payload: req.body ?? {} })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.status(201).json(result.value)
+    res.code(201).send(result.value)
   })
 
   // T149: PATCH /v1/admin/public-infos/:publicInfoId (platform_admin only)
@@ -51,7 +55,7 @@ export function registerPublicInfoRoutes({ app, prefix, deps }) {
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const result = await updatePublicInfo({ supabase, publicInfoId, payload: req.body ?? {} })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 
   // T149: DELETE /v1/admin/public-infos/:publicInfoId (platform_admin only)
@@ -65,6 +69,6 @@ export function registerPublicInfoRoutes({ app, prefix, deps }) {
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const result = await deletePublicInfo({ supabase, publicInfoId })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 }

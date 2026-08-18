@@ -53,7 +53,7 @@ async function loadSim(supabase, iccid, enterpriseId) {
   const tenantFilter = enterpriseId ? `&enterprise_id=eq.${encodeURIComponent(String(enterpriseId))}` : ''
   const rows = await supabase.select(
     'sims',
-    `select=sim_id,iccid,enterprise_id,apn,supplier_id,operators(name,business_operator_id,business_operators(name,mcc,mnc)),suppliers(name)&iccid=eq.${encodeURIComponent(iccid)}${tenantFilter}&limit=1`
+    `select=sim_id,iccid,status,enterprise_id,apn,supplier_id,operators(name,business_operator_id,business_operators(name,mcc,mnc)),suppliers(name)&iccid=eq.${encodeURIComponent(iccid)}${tenantFilter}&limit=1`
   )
   return Array.isArray(rows) ? rows[0] : null
 }
@@ -62,9 +62,39 @@ async function loadLatestUsage(supabase, iccid, enterpriseId) {
   const tenantFilter = enterpriseId ? `&enterprise_id=eq.${encodeURIComponent(String(enterpriseId))}` : ''
   const rows = await supabase.select(
     'usage_daily_summary',
-    `select=created_at,visited_mccmnc,apn,rat&iccid=eq.${encodeURIComponent(iccid)}${tenantFilter}&order=usage_day.desc&limit=1`
+    `select=created_at,usage_day,visited_mccmnc,apn,rat&iccid=eq.${encodeURIComponent(iccid)}${tenantFilter}&order=usage_day.desc&limit=1`
   )
   return Array.isArray(rows) ? rows[0] : null
+}
+
+async function loadPublicInfoByMccMnc(supabase, visitedMccMnc) {
+  const parsed = parseMccMnc(visitedMccMnc)
+  if (!parsed.mcc || !parsed.mnc) return null
+  try {
+    const rows = await supabase.select(
+      'public_infos',
+      `select=country,name&mcc=eq.${encodeURIComponent(parsed.mcc)}&mnc=eq.${encodeURIComponent(parsed.mnc)}&limit=1`,
+      { suppressMissingColumns: true }
+    )
+    return Array.isArray(rows) ? rows[0] ?? null : null
+  } catch {
+    return null
+  }
+}
+
+async function loadLatestSimStatusChangeAt(supabase, simId) {
+  if (!simId) return null
+  try {
+    const rows = await supabase.select(
+      'sim_state_history',
+      `select=start_time&sim_id=eq.${encodeURIComponent(String(simId))}&order=start_time.desc&limit=1`,
+      { suppressMissingColumns: true }
+    )
+    const row = Array.isArray(rows) ? rows[0] : null
+    return normalizeDate(row?.start_time)
+  } catch {
+    return null
+  }
 }
 
 function extractUpstreamData(response) {
@@ -202,60 +232,50 @@ export async function getConnectivityStatus(input) {
   const sim = await loadSim(supabase, iccid, enterpriseId)
   if (!sim) return toError(404, 'RESOURCE_NOT_FOUND', 'sim not found.')
   const usage = await loadLatestUsage(supabase, iccid, enterpriseId)
+  const simStatusChangedAt = await loadLatestSimStatusChangeAt(supabase, sim.sim_id)
   const upstreamData = await fetchUpstreamStatus(wxClient, iccid)
   const upstreamStatus = upstreamData ? buildStatusFromUpstream(upstreamData) : null
-  const lastActiveTime = upstreamStatus?.lastActiveTime ?? normalizeDate(usage?.created_at)
-  const servingMccMnc = upstreamStatus?.servingMccMnc ?? (usage?.visited_mccmnc ? String(usage.visited_mccmnc) : null)
+  const lastActivityTime = normalizeDate(usage?.created_at) ??
+    (usage?.usage_day ? new Date(`${usage.usage_day}T00:00:00.000Z`).toISOString() : null)
+  const visitedMccMnc = usage?.visited_mccmnc ? String(usage.visited_mccmnc) : null
   const businessOperator = sim?.operators?.business_operators ?? null
-  const registrationStatus = upstreamStatus?.registrationStatus ?? resolveRegistrationStatus(servingMccMnc, businessOperator?.mcc ?? null, businessOperator?.mnc ?? null)
-  const onlineStatus = upstreamStatus?.onlineStatus ?? resolveOnlineStatus(lastActiveTime)
+  const onlineStatus = upstreamStatus?.onlineStatus ?? resolveOnlineStatus(lastActivityTime)
+  const registrationStatus = upstreamStatus?.registrationStatus ??
+    (onlineStatus === 'OFFLINE'
+      ? 'NOT_REGISTERED'
+      : resolveRegistrationStatus(visitedMccMnc, businessOperator?.mcc ?? null, businessOperator?.mnc ?? null))
   return {
     ok: true,
     value: {
-      iccid: String(sim.iccid),
+      simStatus: sim.status ? String(sim.status) : null,
+      simStatusChangedAt,
       onlineStatus,
       registrationStatus,
-      lastActiveTime,
-      ipAddress: upstreamStatus?.ipAddress ?? null,
+      lastActivityTime,
+      visitedMccMnc,
       ratType: upstreamStatus?.ratType ?? (usage?.rat ? String(usage.rat) : null),
-      servingCellId: upstreamStatus?.servingCellId ?? null,
-      servingMccMnc,
       apn: upstreamStatus?.apn ?? (usage?.apn ? String(usage.apn) : sim.apn ? String(sim.apn) : null),
-      sessionUptime: upstreamStatus?.sessionUptime ?? null,
     },
   }
 }
 
 export async function getLocation(input) {
-  const { supabase, wxClient, iccid, enterpriseId } = input
+  const { supabase, iccid, enterpriseId } = input
   const sim = await loadSim(supabase, iccid, enterpriseId)
   if (!sim) return toError(404, 'RESOURCE_NOT_FOUND', 'sim not found.')
   const usage = await loadLatestUsage(supabase, iccid, enterpriseId)
-  const upstreamData = await fetchUpstreamStatus(wxClient, iccid)
-  const upstreamLocation = upstreamData ? buildLocationFromUpstream(upstreamData) : null
-  const servingMccMnc = upstreamLocation?.cellInfo?.mcc && upstreamLocation?.cellInfo?.mnc
-    ? `${upstreamLocation.cellInfo.mcc}-${upstreamLocation.cellInfo.mnc}`
-    : usage?.visited_mccmnc
-  const visitedMccMnc = servingMccMnc ? String(servingMccMnc) : null
-  const parsed = parseMccMnc(servingMccMnc)
-  const timestamp = upstreamLocation?.timestamp ?? normalizeDate(usage?.created_at)
+  const visitedMccMnc = usage?.visited_mccmnc ? String(usage.visited_mccmnc) : null
+  const publicInfo = await loadPublicInfoByMccMnc(supabase, visitedMccMnc)
+  const lastActivityTime = normalizeDate(usage?.created_at) ??
+    (usage?.usage_day ? new Date(`${usage.usage_day}T00:00:00.000Z`).toISOString() : null)
   return {
     ok: true,
     value: {
       iccid: String(sim.iccid),
-      locationType: upstreamLocation?.locationType ?? 'CELL_BASED',
-      latitude: upstreamLocation?.latitude ?? null,
-      longitude: upstreamLocation?.longitude ?? null,
-      accuracy: upstreamLocation?.accuracy ?? null,
-      timestamp,
+      lastActivityTime,
       visitedMccMnc,
-      country: null,
-      cellInfo: {
-        mcc: parsed.mcc,
-        mnc: parsed.mnc,
-        lac: upstreamLocation?.cellInfo?.lac ?? null,
-        cellId: upstreamLocation?.cellInfo?.cellId ?? null,
-      },
+      country: publicInfo?.country ? String(publicInfo.country) : null,
+      visitedOperator: publicInfo?.name ? String(publicInfo.name) : null,
     },
   }
 }
@@ -275,26 +295,17 @@ export async function getLocationHistory(input) {
     `select=usage_day,created_at,visited_mccmnc&${filters.join('&')}&order=usage_day.desc&limit=${encodeURIComponent(String(limitValue))}&offset=${encodeURIComponent(String(offsetValue))}`
   )
   const rows = Array.isArray(data) ? data : []
-  const items = rows.map((r) => {
-    const parsed = parseMccMnc(r.visited_mccmnc)
+  const items = await Promise.all(rows.map(async (r) => {
     const visited = r.visited_mccmnc ? String(r.visited_mccmnc) : null
+    const publicInfo = await loadPublicInfoByMccMnc(supabase, visited)
     return {
       iccid: String(sim.iccid),
-      locationType: 'CELL_BASED',
-      latitude: null,
-      longitude: null,
-      accuracy: null,
-      timestamp: normalizeDate(r.created_at) ?? (r.usage_day ? new Date(`${r.usage_day}T00:00:00.000Z`).toISOString() : null),
+      lastActivityTime: normalizeDate(r.created_at) ?? (r.usage_day ? new Date(`${r.usage_day}T00:00:00.000Z`).toISOString() : null),
       visitedMccMnc: visited,
-      country: null,
-      cellInfo: {
-        mcc: parsed.mcc,
-        mnc: parsed.mnc,
-        lac: null,
-        cellId: null,
-      },
+      country: publicInfo?.country ? String(publicInfo.country) : null,
+      visitedOperator: publicInfo?.name ? String(publicInfo.name) : null,
     }
-  })
+  }))
   return { ok: true, value: { items, total: typeof total === 'number' ? total : items.length } }
 }
 
@@ -316,7 +327,7 @@ export async function requestResetConnection(input) {
     request_id: traceId ? String(traceId) : null,
     actor_user_id: actorUserId ?? null,
     reseller_id: resellerId ?? null,
-    customer_id: enterpriseId ?? null,
+    enterprise_id: enterpriseId ?? null,
     idempotency_key: idempotencyKey ?? null,
     payload: {
       iccid,

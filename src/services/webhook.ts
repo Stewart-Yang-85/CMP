@@ -1,5 +1,7 @@
 import crypto from 'node:crypto'
 import { createAlert } from './alerting.js'
+import { resolveEffectiveAlertConfigProfile } from './alertConfigProfile.js'
+import { lookupResellerRecordId } from './resellerTenantScope.js'
 
 type SupabaseClient = {
   select: (table: string, queryString: string, options?: { headers?: Record<string, string> }) => Promise<unknown>
@@ -15,14 +17,31 @@ type ServiceResult<T> =
 type WebhookSubscriptionRow = {
   webhook_id: string
   reseller_id?: string | null
-  customer_id?: string | null
+  enterprise_id?: string | null
   url: string
   secret: string
   event_types: string[]
   enabled: boolean
+  status?: string | null
   description?: string | null
+  deprecated_at?: string | null
   created_at: string
   updated_at: string
+}
+
+type WebhookSubscriptionApi = {
+  webhookId: string
+  resellerId: string | null
+  enterpriseId: string | null
+  url: string
+  secret: string
+  eventTypes: string[]
+  enabled: boolean
+  status: string
+  description: string | null
+  deprecatedAt: string | null
+  createdAt: string
+  updatedAt: string
 }
 
 type WebhookDeliveryRow = {
@@ -42,7 +61,8 @@ type EventRow = {
   event_id: string
   event_type: string
   occurred_at: string
-  tenant_id?: string | null
+  enterprise_id?: string | null
+  reseller_id?: string | null
   actor_user_id?: string | null
   request_id?: string | null
   job_id?: string | null
@@ -52,14 +72,64 @@ type EventRow = {
 const maxResponseBodyChars = 2000
 const maxAttempts = 3
 const retryBaseSeconds = 2
-const supportedEventTypes = new Set([
-  'SIM_STATUS_CHANGED',
-  'SUBSCRIPTION_CHANGED',
-  'BILL_PUBLISHED',
-  'PAYMENT_CONFIRMED',
-  'ALERT_TRIGGERED',
-  'ENTERPRISE_STATUS_CHANGED',
-])
+
+/** Outbound webhook event types allowed in `webhook_subscriptions.event_types` (FR-039). */
+const OUTBOUND_WEBHOOK_EVENT_CATALOG = [
+  {
+    eventType: 'SIM_STATUS_CHANGED',
+    displayName: 'SIM Status Changed',
+    description: 'SIM lifecycle status changed to a new steady state (after upstream confirmation when applicable).',
+  },
+  {
+    eventType: 'JOB_FINISHED',
+    displayName: 'Job Finished',
+    description: 'Async job reached a terminal state (SUCCEEDED or FAILED), e.g. SIM_STATUS_CHANGE.',
+  },
+  {
+    eventType: 'SUBSCRIPTION_CHANGED',
+    displayName: 'Subscription Changed',
+    description: 'Enterprise subscription create/update/cancel or related subscription state change.',
+  },
+  {
+    eventType: 'BILL_PUBLISHED',
+    displayName: 'Bill Published',
+    description: 'Bill moved to a published/customer-visible billing state.',
+  },
+  {
+    eventType: 'PAYMENT_CONFIRMED',
+    displayName: 'Payment Confirmed',
+    description: 'Payment or mark-paid confirmation recorded for a bill.',
+  },
+  {
+    eventType: 'ALERT_TRIGGERED',
+    displayName: 'Alert Triggered',
+    description: 'Alert created and eligible for WEBHOOK delivery channel to the customer URL.',
+  },
+  {
+    eventType: 'ENTERPRISE_STATUS_CHANGED',
+    displayName: 'Enterprise Status Changed',
+    description: 'Enterprise (customer) tenant status changed.',
+  },
+] as const
+
+const supportedEventTypes: Set<string> = new Set(OUTBOUND_WEBHOOK_EVENT_CATALOG.map((e) => e.eventType))
+
+export type OutboundWebhookEventCatalogItem = {
+  eventType: string
+  displayName: string
+  description: string
+}
+
+/** Platform catalog of event types that may be subscribed for outbound (CMP → customer) webhooks. */
+export function listOutboundWebhookEvents(): { items: OutboundWebhookEventCatalogItem[] } {
+  return {
+    items: OUTBOUND_WEBHOOK_EVENT_CATALOG.map((e) => ({
+      eventType: e.eventType,
+      displayName: e.displayName,
+      description: e.description,
+    })),
+  }
+}
 
 function toError(status: number, code: string, message: string) {
   return { ok: false, status, code, message } as const
@@ -71,10 +141,10 @@ function normalizePage(value: unknown, fallback: number) {
   return Math.floor(num)
 }
 
-function normalizePageSize(value: unknown, fallback: number) {
+function normalizePageSize(value: unknown, fallback: number, max = 200) {
   const num = Number(value)
   if (!Number.isFinite(num) || num <= 0) return fallback
-  return Math.min(200, Math.floor(num))
+  return Math.min(max, Math.floor(num))
 }
 
 function normalizeUrl(value: unknown) {
@@ -126,42 +196,135 @@ function getRetryDelaySeconds(attempt: number) {
   return retryBaseSeconds * Math.pow(2, Math.max(0, attempt - 1))
 }
 
-function buildDeliveryPayload(event: EventRow) {
-  return {
+async function buildDeliveryPayload(supabase: SupabaseClient, event: EventRow) {
+  const nestedRaw =
+    event.payload && typeof event.payload === 'object' ? { ...(event.payload as Record<string, unknown>) } : {}
+  delete nestedRaw.resellerId
+  const resellerId = event.reseller_id ?? null
+  let resellerRecordId: string | null = null
+  if (resellerId) {
+    resellerRecordId = await lookupResellerRecordId(supabase, resellerId)
+  }
+  const out: Record<string, unknown> = {
     eventId: event.event_id,
     eventType: event.event_type,
     occurredAt: event.occurred_at,
-    tenantId: event.tenant_id ?? null,
+    enterpriseId: event.enterprise_id ?? null,
     actorUserId: event.actor_user_id ?? null,
     requestId: event.request_id ?? null,
     jobId: event.job_id ?? null,
-    payload: event.payload ?? {},
+    payload: nestedRaw,
+  }
+  if (resellerId) {
+    out.resellerId = resellerId
+    if (resellerRecordId) out.resellerRecordId = resellerRecordId
+  }
+  return out
+}
+
+const WEBHOOK_STATUSES = ['ACTIVE', 'INACTIVE', 'DEPRECATED'] as const
+const LIVE_WEBHOOK_STATUSES = ['ACTIVE', 'INACTIVE'] as const
+
+function parseListWebhookStatusFilter(value: unknown): ServiceResult<(typeof WEBHOOK_STATUSES)[number][]> {
+  if (value == null || String(value).trim() === '') {
+    // Default: include DEPRECATED so clients can audit soft-deleted subscriptions.
+    return { ok: true, value: [...WEBHOOK_STATUSES] }
+  }
+  const key = String(value).trim().toUpperCase()
+  if (!(WEBHOOK_STATUSES as readonly string[]).includes(key)) {
+    return toError(400, 'BAD_REQUEST', `status must be one of: ${WEBHOOK_STATUSES.join(', ')}.`)
+  }
+  return { ok: true, value: [key as (typeof WEBHOOK_STATUSES)[number]] }
+}
+
+function normalizeWebhookStatus(value: unknown): string {
+  const s = String(value || '').trim().toUpperCase()
+  if (s === 'ACTIVE' || s === 'INACTIVE' || s === 'DEPRECATED') return s
+  return 'ACTIVE'
+}
+
+function statusFromEnabled(enabled: boolean): 'ACTIVE' | 'INACTIVE' {
+  return enabled ? 'ACTIVE' : 'INACTIVE'
+}
+
+function mapSubscriptionRow(row: WebhookSubscriptionRow): WebhookSubscriptionApi {
+  const status = normalizeWebhookStatus(row.status ?? (row.enabled ? 'ACTIVE' : 'INACTIVE'))
+  return {
+    webhookId: row.webhook_id,
+    resellerId: row.reseller_id ?? null,
+    enterpriseId: row.enterprise_id ?? null,
+    url: row.url,
+    secret: row.secret,
+    eventTypes: row.event_types ?? [],
+    enabled: row.enabled === true && status === 'ACTIVE',
+    status,
+    description: row.description ?? null,
+    deprecatedAt: row.deprecated_at ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   }
 }
 
-async function findTenant(supabase: SupabaseClient, tenantId: string) {
-  const rows = await supabase.select(
-    'tenants',
-    `select=tenant_id,parent_id,tenant_type&tenant_id=eq.${encodeURIComponent(tenantId)}&limit=1`
-  )
-  return Array.isArray(rows) ? (rows[0] as Record<string, any>) : null
+const subscriptionSelect =
+  'webhook_id,reseller_id,enterprise_id,url,secret,event_types,enabled,status,description,deprecated_at,created_at,updated_at'
+
+async function findLiveWebhookConflict({
+  supabase,
+  resellerId,
+  enterpriseId,
+  excludeWebhookId,
+}: {
+  supabase: SupabaseClient
+  resellerId?: string | null
+  enterpriseId?: string | null
+  excludeWebhookId?: string | null
+}): Promise<string | null> {
+  const liveFilter = `status=in.(${LIVE_WEBHOOK_STATUSES.map((s) => encodeURIComponent(s)).join(',')})`
+  const excludeFilter = excludeWebhookId
+    ? `&webhook_id=neq.${encodeURIComponent(excludeWebhookId)}`
+    : ''
+  if (enterpriseId) {
+    const rows = await supabase.select(
+      'webhook_subscriptions',
+      `select=webhook_id&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&${liveFilter}${excludeFilter}&limit=1`
+    )
+    const row = Array.isArray(rows) ? (rows[0] as { webhook_id?: string } | undefined) : null
+    return row?.webhook_id ? String(row.webhook_id) : null
+  }
+  if (resellerId) {
+    const rows = await supabase.select(
+      'webhook_subscriptions',
+      `select=webhook_id&reseller_id=eq.${encodeURIComponent(resellerId)}&enterprise_id=is.null&${liveFilter}${excludeFilter}&limit=1`
+    )
+    const row = Array.isArray(rows) ? (rows[0] as { webhook_id?: string } | undefined) : null
+    return row?.webhook_id ? String(row.webhook_id) : null
+  }
+  return null
 }
 
 async function loadSubscriptions({
   supabase,
-  customerId,
+  enterpriseId,
   resellerId,
 }: {
   supabase: SupabaseClient
-  customerId?: string | null
+  enterpriseId?: string | null
   resellerId?: string | null
 }) {
   const filters: string[] = ['enabled=eq.true']
-  if (customerId) filters.push(`customer_id=eq.${encodeURIComponent(customerId)}`)
-  if (resellerId) filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
+  if (enterpriseId) {
+    // Enterprise-scoped subscriptions (may also store reseller_id for tenancy).
+    filters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
+  } else if (resellerId) {
+    // Reseller-level only — exclude enterprise-scoped rows that also have reseller_id filled.
+    filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
+    filters.push('enterprise_id=is.null')
+  } else {
+    return []
+  }
   const rows = await supabase.select(
     'webhook_subscriptions',
-    `select=webhook_id,reseller_id,customer_id,url,secret,event_types,enabled,description,created_at,updated_at&${filters.join('&')}`
+    `select=${subscriptionSelect}&${filters.join('&')}`
   )
   return Array.isArray(rows) ? (rows as WebhookSubscriptionRow[]) : []
 }
@@ -174,14 +337,67 @@ async function resolveResellerIdForSubscription({
   subscription: WebhookSubscriptionRow
 }) {
   if (subscription.reseller_id) return String(subscription.reseller_id)
-  if (!subscription.customer_id) return null
+  if (!subscription.enterprise_id) return null
   const rows = await supabase.select(
     'tenants',
-    `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(String(subscription.customer_id))}&limit=1`
+    `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(String(subscription.enterprise_id))}&limit=1`
   )
   const tenant = Array.isArray(rows) ? rows[0] : null
   if (tenant?.parent_id) return String(tenant.parent_id)
-  return String(subscription.customer_id)
+  return String(subscription.enterprise_id)
+}
+
+async function createWebhookDeliveryFailedAlert({
+  supabase,
+  subscription,
+  delivery,
+  responseCode,
+  responseBody,
+  attempt,
+}: {
+  supabase: SupabaseClient
+  subscription: WebhookSubscriptionRow
+  delivery: WebhookDeliveryRow
+  responseCode: number | null
+  responseBody: string | null
+  attempt: number
+}) {
+  const resellerId = await resolveResellerIdForSubscription({ supabase, subscription })
+  if (!resellerId) return
+  const rule = await resolveEffectiveAlertConfigProfile({
+    supabase,
+    alertType: 'WEBHOOK_DELIVERY_FAILED',
+    resellerId,
+    enterpriseId: subscription.enterprise_id ?? null,
+  })
+  if (!rule.ok || rule.value.enabled === false) return
+  const threshold = rule.value.thresholdValue ?? maxAttempts
+  const nowIso = new Date().toISOString()
+  await createAlert({
+    supabase,
+    alertType: 'WEBHOOK_DELIVERY_FAILED',
+    severity: rule.value.severity ?? 'P2',
+    resellerId,
+    customerId: subscription.enterprise_id ?? null,
+    threshold,
+    currentValue: attempt,
+    windowStart: nowIso,
+    ruleId: rule.value.itemId ?? null,
+    ruleVersion: rule.value.version ?? null,
+    deliveryChannels: rule.value.deliveryChannels ?? null,
+    suppressMinutes: rule.value.suppressMinutes ?? 30,
+    metadata: {
+      message: 'Webhook delivery failed after maximum retries.',
+      webhookId: subscription.webhook_id,
+      deliveryId: delivery.delivery_id,
+      eventId: delivery.event_id,
+      url: subscription.url,
+      responseCode,
+      responseBody,
+      maxAttempts,
+      thresholdUnit: rule.value.thresholdUnit ?? 'ATTEMPTS',
+    },
+  })
 }
 
 async function persistDeliveryAttempt({
@@ -211,7 +427,7 @@ async function attemptDelivery({
   event: EventRow
   forceImmediate?: boolean
 }) {
-  const payload = buildDeliveryPayload(event)
+  const payload = await buildDeliveryPayload(supabase, event)
   const body = toPayloadString(payload)
   const signature = buildSignature(subscription.secret, body)
   const headers: Record<string, string> = {
@@ -251,7 +467,7 @@ async function attemptDelivery({
     return { status: 'SENT', responseCode, responseBody }
   }
   const nextAttempt = delivery.attempt + 1
-  if (nextAttempt > maxAttempts && !forceImmediate) {
+  if (nextAttempt > maxAttempts) {
     await persistDeliveryAttempt({
       supabase,
       deliveryId: delivery.delivery_id,
@@ -262,30 +478,7 @@ async function attemptDelivery({
         next_retry_at: null,
       },
     })
-    const resellerId = await resolveResellerIdForSubscription({ supabase, subscription })
-    if (resellerId) {
-      const nowIso = new Date().toISOString()
-      await createAlert({
-        supabase,
-        alertType: 'WEBHOOK_DELIVERY_FAILED',
-        severity: 'P2',
-        resellerId,
-        customerId: subscription.customer_id ?? null,
-        threshold: maxAttempts,
-        currentValue: nextAttempt,
-        windowStart: nowIso,
-        metadata: {
-          message: 'Webhook delivery failed after maximum retries.',
-          webhookId: subscription.webhook_id,
-          deliveryId: delivery.delivery_id,
-          eventId: delivery.event_id,
-          url: subscription.url,
-          responseCode,
-          responseBody,
-          maxAttempts,
-        },
-      })
-    }
+    await createWebhookDeliveryFailedAlert({ supabase, subscription, delivery, responseCode, responseBody, attempt: nextAttempt })
     return { status: 'FAILED', responseCode, responseBody }
   }
   const delaySeconds = getRetryDelaySeconds(delivery.attempt)
@@ -308,24 +501,13 @@ export async function createWebhookSubscription({
   supabase,
   payload,
   resellerId,
-  customerId,
+  enterpriseId,
 }: {
   supabase: SupabaseClient
   payload: Record<string, any>
   resellerId?: string | null
-  customerId?: string | null
-}): Promise<ServiceResult<{
-  webhookId: string
-  resellerId?: string | null
-  customerId?: string | null
-  url: string
-  secret: string
-  eventTypes: string[]
-  enabled: boolean
-  description?: string | null
-  createdAt: string
-  updatedAt: string
-}>> {
+  enterpriseId?: string | null
+}): Promise<ServiceResult<WebhookSubscriptionApi>> {
   if (!supabase) return toError(500, 'INTERNAL_ERROR', 'supabase client is required.')
   const url = normalizeUrl(payload?.url)
   if (!url) return toError(400, 'BAD_REQUEST', 'url must be a valid https URL.')
@@ -336,16 +518,31 @@ export async function createWebhookSubscription({
     return toError(400, 'BAD_REQUEST', 'eventTypes must include at least one supported event type.')
   }
   const enabled = payload?.enabled === undefined ? true : Boolean(payload.enabled)
+  const status = statusFromEnabled(enabled)
   const description = normalizeDescription(payload?.description)
+
+  const conflictId = await findLiveWebhookConflict({ supabase, resellerId, enterpriseId })
+  if (conflictId) {
+    const scopeLabel = enterpriseId
+      ? `enterpriseId ${enterpriseId}`
+      : `resellerId ${resellerId} (reseller-level)`
+    return toError(
+      409,
+      'DUPLICATE',
+      `A live webhook subscription already exists for ${scopeLabel}. Delete (deprecate) it before creating another.`
+    )
+  }
+
   const rows = await supabase.insert(
     'webhook_subscriptions',
     {
       reseller_id: resellerId ?? null,
-      customer_id: customerId ?? null,
+      enterprise_id: enterpriseId ?? null,
       url,
       secret,
       event_types: eventTypes,
       enabled,
+      status,
       description,
     },
     { returning: 'representation' }
@@ -354,60 +551,46 @@ export async function createWebhookSubscription({
   if (!row?.webhook_id) return toError(500, 'INTERNAL_ERROR', 'Failed to create webhook subscription.')
   return {
     ok: true,
-    value: {
-      webhookId: row.webhook_id,
-      resellerId: row.reseller_id ?? null,
-      customerId: row.customer_id ?? null,
-      url: row.url,
-      secret: row.secret,
-      eventTypes: row.event_types ?? [],
-      enabled: row.enabled,
-      description: row.description ?? null,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    },
+    value: mapSubscriptionRow(row),
   }
 }
 
 export async function listWebhookSubscriptions({
   supabase,
   resellerId,
-  customerId,
+  enterpriseId,
+  status,
   page,
   pageSize,
 }: {
   supabase: SupabaseClient
   resellerId?: string | null
-  customerId?: string | null
+  enterpriseId?: string | null
+  status?: unknown
   page?: string | number | null
   pageSize?: string | number | null
-}): Promise<ServiceResult<{ items: Array<Record<string, unknown>>; total: number }>> {
+}): Promise<ServiceResult<{ items: WebhookSubscriptionApi[]; total: number; page: number; pageSize: number }>> {
   if (!supabase) return toError(500, 'INTERNAL_ERROR', 'supabase client is required.')
+  const statusFilter = parseListWebhookStatusFilter(status)
+  if (!statusFilter.ok) return statusFilter
   const filters: string[] = []
   if (resellerId) filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
-  if (customerId) filters.push(`customer_id=eq.${encodeURIComponent(customerId)}`)
+  if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
+  const statusQs =
+    statusFilter.value.length === 1
+      ? `status=eq.${encodeURIComponent(statusFilter.value[0])}`
+      : `status=in.(${statusFilter.value.map((s) => encodeURIComponent(s)).join(',')})`
   const filterQs = filters.length ? `&${filters.join('&')}` : ''
   const p = normalizePage(page, 1)
-  const ps = normalizePageSize(pageSize, 20)
+  const ps = normalizePageSize(pageSize, 50, 100)
   const offset = (p - 1) * ps
   const { data, total } = await supabase.selectWithCount(
     'webhook_subscriptions',
-    `select=webhook_id,reseller_id,customer_id,url,secret,event_types,enabled,description,created_at,updated_at&order=created_at.desc&limit=${ps}&offset=${offset}${filterQs}`
+    `select=${subscriptionSelect}&${statusQs}&order=created_at.desc&limit=${ps}&offset=${offset}${filterQs}`
   )
   const rows = Array.isArray(data) ? (data as WebhookSubscriptionRow[]) : []
-  const items = rows.map((row) => ({
-    webhookId: row.webhook_id,
-    resellerId: row.reseller_id ?? null,
-    customerId: row.customer_id ?? null,
-    url: row.url,
-    secret: row.secret,
-    eventTypes: row.event_types ?? [],
-    enabled: row.enabled,
-    description: row.description ?? null,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }))
-  return { ok: true, value: { items, total: total ?? items.length } }
+  const items = rows.map((row) => mapSubscriptionRow(row))
+  return { ok: true, value: { items, total: total ?? items.length, page: p, pageSize: ps } }
 }
 
 export async function getWebhookSubscription({
@@ -416,40 +599,18 @@ export async function getWebhookSubscription({
 }: {
   supabase: SupabaseClient
   webhookId: string
-}): Promise<ServiceResult<{
-  webhookId: string
-  resellerId?: string | null
-  customerId?: string | null
-  url: string
-  secret: string
-  eventTypes: string[]
-  enabled: boolean
-  description?: string | null
-  createdAt: string
-  updatedAt: string
-}>> {
+}): Promise<ServiceResult<WebhookSubscriptionApi>> {
   if (!supabase) return toError(500, 'INTERNAL_ERROR', 'supabase client is required.')
   if (!webhookId) return toError(400, 'BAD_REQUEST', 'webhookId is required.')
   const rows = await supabase.select(
     'webhook_subscriptions',
-    `select=webhook_id,reseller_id,customer_id,url,secret,event_types,enabled,description,created_at,updated_at&webhook_id=eq.${encodeURIComponent(webhookId)}&limit=1`
+    `select=${subscriptionSelect}&webhook_id=eq.${encodeURIComponent(webhookId)}&limit=1`
   )
   const row = Array.isArray(rows) ? (rows[0] as WebhookSubscriptionRow) : null
   if (!row?.webhook_id) return toError(404, 'NOT_FOUND', 'webhook subscription not found.')
   return {
     ok: true,
-    value: {
-      webhookId: row.webhook_id,
-      resellerId: row.reseller_id ?? null,
-      customerId: row.customer_id ?? null,
-      url: row.url,
-      secret: row.secret,
-      eventTypes: row.event_types ?? [],
-      enabled: row.enabled,
-      description: row.description ?? null,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    },
+    value: mapSubscriptionRow(row),
   }
 }
 
@@ -461,20 +622,24 @@ export async function updateWebhookSubscription({
   supabase: SupabaseClient
   webhookId: string
   payload: Record<string, any>
-}): Promise<ServiceResult<{
-  webhookId: string
-  resellerId?: string | null
-  customerId?: string | null
-  url: string
-  secret: string
-  eventTypes: string[]
-  enabled: boolean
-  description?: string | null
-  createdAt: string
-  updatedAt: string
-}>> {
+}): Promise<ServiceResult<WebhookSubscriptionApi>> {
   if (!supabase) return toError(500, 'INTERNAL_ERROR', 'supabase client is required.')
   if (!webhookId) return toError(400, 'BAD_REQUEST', 'webhookId is required.')
+  const existingRows = await supabase.select(
+    'webhook_subscriptions',
+    `select=${subscriptionSelect}&webhook_id=eq.${encodeURIComponent(webhookId)}&limit=1`
+  )
+  const existing = Array.isArray(existingRows) ? (existingRows[0] as WebhookSubscriptionRow) : null
+  if (!existing?.webhook_id) return toError(404, 'NOT_FOUND', 'webhook subscription not found.')
+  const existingStatus = normalizeWebhookStatus(existing.status)
+  if (existingStatus === 'DEPRECATED') {
+    return toError(
+      409,
+      'INVALID_STATUS',
+      'Cannot update a deprecated webhook subscription. Create a new subscription for this scope after deprecate.'
+    )
+  }
+
   const update: Record<string, unknown> = { updated_at: new Date().toISOString() }
   if (payload?.url !== undefined) {
     const url = normalizeUrl(payload.url)
@@ -493,12 +658,23 @@ export async function updateWebhookSubscription({
     }
     update.event_types = eventTypes
   }
-  if (payload?.enabled !== undefined) {
-    update.enabled = Boolean(payload.enabled)
-  }
   if (payload?.description !== undefined) {
     update.description = normalizeDescription(payload.description)
   }
+
+  // Live status only via enabled (Integration-style). DEPRECATED requires :deprecate.
+  if (payload?.status !== undefined) {
+    return toError(
+      400,
+      'BAD_REQUEST',
+      'status is not supported on PATCH. Use enabled (true→ACTIVE, false→INACTIVE) or POST .../{webhookId}:deprecate.'
+    )
+  }
+  if (payload?.enabled !== undefined) {
+    update.enabled = Boolean(payload.enabled)
+    update.status = statusFromEnabled(Boolean(payload.enabled))
+  }
+
   if (Object.keys(update).length === 1) {
     return toError(400, 'BAD_REQUEST', 'No valid fields to update.')
   }
@@ -512,39 +688,46 @@ export async function updateWebhookSubscription({
   if (!row?.webhook_id) return toError(404, 'NOT_FOUND', 'webhook subscription not found.')
   return {
     ok: true,
-    value: {
-      webhookId: row.webhook_id,
-      resellerId: row.reseller_id ?? null,
-      customerId: row.customer_id ?? null,
-      url: row.url,
-      secret: row.secret,
-      eventTypes: row.event_types ?? [],
-      enabled: row.enabled,
-      description: row.description ?? null,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    },
+    value: mapSubscriptionRow(row),
   }
 }
 
-export async function deleteWebhookSubscription({
+export async function deprecateWebhookSubscription({
   supabase,
   webhookId,
 }: {
   supabase: SupabaseClient
   webhookId: string
-}): Promise<ServiceResult<{ webhookId: string }>> {
+}): Promise<ServiceResult<{ webhookId: string; deprecated: true; status: 'DEPRECATED'; deprecatedAt: string }>> {
   if (!supabase) return toError(500, 'INTERNAL_ERROR', 'supabase client is required.')
   if (!webhookId) return toError(400, 'BAD_REQUEST', 'webhookId is required.')
+  const existingRows = await supabase.select(
+    'webhook_subscriptions',
+    `select=${subscriptionSelect}&webhook_id=eq.${encodeURIComponent(webhookId)}&limit=1`
+  )
+  const existing = Array.isArray(existingRows) ? (existingRows[0] as WebhookSubscriptionRow) : null
+  if (!existing?.webhook_id) return toError(404, 'NOT_FOUND', 'webhook subscription not found.')
+  if (normalizeWebhookStatus(existing.status) === 'DEPRECATED') {
+    return toError(409, 'INVALID_STATUS', 'Webhook subscription is already deprecated.')
+  }
+  const nowIso = new Date().toISOString()
   const rows = await supabase.update(
     'webhook_subscriptions',
     `webhook_id=eq.${encodeURIComponent(webhookId)}`,
-    { enabled: false },
+    { enabled: false, status: 'DEPRECATED', deprecated_at: nowIso, updated_at: nowIso },
     { returning: 'representation' }
   )
   const row = Array.isArray(rows) ? (rows[0] as WebhookSubscriptionRow) : null
   if (!row?.webhook_id) return toError(404, 'NOT_FOUND', 'webhook subscription not found.')
-  return { ok: true, value: { webhookId: row.webhook_id } }
+  return {
+    ok: true,
+    value: {
+      webhookId: row.webhook_id,
+      deprecated: true,
+      status: 'DEPRECATED',
+      deprecatedAt: row.deprecated_at ?? nowIso,
+    },
+  }
 }
 
 export async function listWebhookDeliveries({
@@ -557,11 +740,11 @@ export async function listWebhookDeliveries({
   webhookId: string
   page?: string | number | null
   pageSize?: string | number | null
-}): Promise<ServiceResult<{ items: Array<Record<string, unknown>>; total: number }>> {
+}): Promise<ServiceResult<{ items: Array<Record<string, unknown>>; total: number; page: number; pageSize: number }>> {
   if (!supabase) return toError(500, 'INTERNAL_ERROR', 'supabase client is required.')
   if (!webhookId) return toError(400, 'BAD_REQUEST', 'webhookId is required.')
   const p = normalizePage(page, 1)
-  const ps = normalizePageSize(pageSize, 20)
+  const ps = normalizePageSize(pageSize, 50, 100)
   const offset = (p - 1) * ps
   const { data, total } = await supabase.selectWithCount(
     'webhook_deliveries',
@@ -580,7 +763,7 @@ export async function listWebhookDeliveries({
     nextRetryAt: row.next_retry_at ?? null,
     createdAt: row.created_at,
   }))
-  return { ok: true, value: { items, total: total ?? items.length } }
+  return { ok: true, value: { items, total: total ?? items.length, page: p, pageSize: ps } }
 }
 
 export async function retryWebhookDelivery({
@@ -599,13 +782,13 @@ export async function retryWebhookDelivery({
   if (!delivery?.delivery_id) return toError(404, 'NOT_FOUND', 'webhook delivery not found.')
   const eventRows = await supabase.select(
     'events',
-    `select=event_id,event_type,occurred_at,tenant_id,actor_user_id,request_id,job_id,payload&event_id=eq.${encodeURIComponent(delivery.event_id)}&limit=1`
+    `select=event_id,event_type,occurred_at,enterprise_id,reseller_id,actor_user_id,request_id,job_id,payload&event_id=eq.${encodeURIComponent(delivery.event_id)}&limit=1`
   )
   const event = Array.isArray(eventRows) ? (eventRows[0] as EventRow) : null
   if (!event?.event_id) return toError(404, 'NOT_FOUND', 'event not found for delivery.')
   const subRows = await supabase.select(
     'webhook_subscriptions',
-    `select=webhook_id,reseller_id,customer_id,url,secret,event_types,enabled,description,created_at,updated_at&webhook_id=eq.${encodeURIComponent(delivery.webhook_id)}&limit=1`
+    `select=${subscriptionSelect}&webhook_id=eq.${encodeURIComponent(delivery.webhook_id)}&limit=1`
   )
   const subscription = Array.isArray(subRows) ? (subRows[0] as WebhookSubscriptionRow) : null
   if (!subscription?.webhook_id) return toError(404, 'NOT_FOUND', 'webhook subscription not found.')
@@ -614,7 +797,6 @@ export async function retryWebhookDelivery({
     delivery,
     subscription,
     event,
-    forceImmediate: true,
   })
   return { ok: true, value: { deliveryId: delivery.delivery_id, status: result.status } }
 }
@@ -627,27 +809,21 @@ export async function dispatchWebhookEvent({
   event: EventRow
 }) {
   if (!supabase || !event?.event_id) return { ok: false, reason: 'missing_event' }
-  if (!event.tenant_id) return { ok: true, delivered: 0, skipped: 0 }
-  const tenant = await findTenant(supabase, event.tenant_id)
-  const tenantType = tenant?.tenant_type ? String(tenant.tenant_type) : null
-  let customerId: string | null = null
-  let resellerId: string | null = null
-  if (tenantType === 'ENTERPRISE') {
-    customerId = event.tenant_id
-    resellerId = tenant?.parent_id ? String(tenant.parent_id) : null
-  } else if (tenantType === 'RESELLER') {
-    resellerId = event.tenant_id
-  } else if (tenant?.parent_id) {
-    const parent = await findTenant(supabase, String(tenant.parent_id))
-    if (parent?.tenant_type === 'ENTERPRISE') {
-      customerId = parent.tenant_id
-      resellerId = parent.parent_id ? String(parent.parent_id) : null
-    }
-  }
-  const subscriptions = [
-    ...(await loadSubscriptions({ supabase, customerId })),
-    ...(await loadSubscriptions({ supabase, resellerId })),
+  if (!event.enterprise_id && !event.reseller_id) return { ok: true, delivered: 0, skipped: 0 }
+  const enterpriseId = event.enterprise_id ?? null
+  const resellerId = event.reseller_id ?? null
+  const loaded = [
+    ...(enterpriseId ? await loadSubscriptions({ supabase, enterpriseId }) : []),
+    ...(resellerId ? await loadSubscriptions({ supabase, resellerId }) : []),
   ]
+  const seen = new Set<string>()
+  const subscriptions: WebhookSubscriptionRow[] = []
+  for (const sub of loaded) {
+    const id = String(sub.webhook_id || '')
+    if (!id || seen.has(id)) continue
+    seen.add(id)
+    subscriptions.push(sub)
+  }
   if (!subscriptions.length) return { ok: true, delivered: 0, skipped: 0 }
   const matched = subscriptions.filter((sub) => {
     const list = Array.isArray(sub.event_types) ? sub.event_types : []
@@ -656,6 +832,7 @@ export async function dispatchWebhookEvent({
   if (!matched.length) return { ok: true, delivered: 0, skipped: subscriptions.length }
   let delivered = 0
   let skipped = 0
+  const deliveryIds: number[] = []
   for (const subscription of matched) {
     const rows = await supabase.insert(
       'webhook_deliveries',
@@ -672,8 +849,9 @@ export async function dispatchWebhookEvent({
       skipped += 1
       continue
     }
+    deliveryIds.push(Number(delivery.delivery_id))
     const result = await attemptDelivery({ supabase, delivery, subscription, event })
     if (result.status === 'SENT') delivered += 1
   }
-  return { ok: true, delivered, skipped }
+  return { ok: true, delivered, skipped, deliveryIds }
 }

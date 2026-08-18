@@ -1,6 +1,6 @@
 import {
   createWebhookSubscription,
-  deleteWebhookSubscription,
+  deprecateWebhookSubscription,
   getWebhookSubscription,
   listWebhookDeliveries,
   listWebhookSubscriptions,
@@ -85,9 +85,9 @@ async function resolveTargetScope({ req, res, deps, supabase, scope, body, query
         deps.sendError(res, 404, 'NOT_FOUND', 'enterprise not found.')
         return null
       }
-      return { customerId: enterpriseId }
+      return { enterpriseId }
     }
-    return { resellerId: null, customerId: null }
+    return { resellerId: null, enterpriseId: null }
   }
   if (scope.scope === 'reseller') {
     const enterpriseId = source.enterpriseId ? String(source.enterpriseId).trim() : null
@@ -98,11 +98,11 @@ async function resolveTargetScope({ req, res, deps, supabase, scope, body, query
       }
       const resolved = await deps.resolveEnterpriseForReseller(req, res, supabase, enterpriseId)
       if (!resolved) return null
-      return { customerId: resolved }
+      return { resellerId: scope.resellerId, enterpriseId: resolved }
     }
-    return { resellerId: scope.resellerId }
+    return { resellerId: scope.resellerId, enterpriseId: null }
   }
-  return { customerId: scope.customerId }
+  return { enterpriseId: scope.customerId }
 }
 
 function isValidDeliveryId(value) {
@@ -138,10 +138,10 @@ export function registerWebhookRoutes({ app, prefix, deps }) {
       supabase,
       payload: req.body ?? {},
       resellerId: target.resellerId ?? null,
-      customerId: target.customerId ?? null,
+      enterpriseId: target.enterpriseId ?? null,
     })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.status(201).json(result.value)
+    res.code().send(result.value)
   })
 
   app.get(`${prefix}/webhook-subscriptions`, async (req, res) => {
@@ -160,12 +160,12 @@ export function registerWebhookRoutes({ app, prefix, deps }) {
     const result = await listWebhookSubscriptions({
       supabase,
       resellerId: target.resellerId ?? null,
-      customerId: target.customerId ?? null,
+      enterpriseId: target.enterpriseId ?? null,
       page: req.query?.page ?? null,
       pageSize: req.query?.pageSize ?? null,
     })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 
   app.get(`${prefix}/webhook-subscriptions/:webhookId`, async (req, res) => {
@@ -181,10 +181,10 @@ export function registerWebhookRoutes({ app, prefix, deps }) {
     if (scope.scope === 'reseller' && result.value.resellerId !== scope.resellerId) {
       return sendError(res, 403, 'FORBIDDEN', 'webhook subscription is out of reseller scope.')
     }
-    if (scope.scope === 'customer' && result.value.customerId !== scope.customerId) {
+    if (scope.scope === 'customer' && result.value.enterpriseId !== scope.customerId) {
       return sendError(res, 403, 'FORBIDDEN', 'webhook subscription is out of customer scope.')
     }
-    res.json(result.value)
+    res.send(result.value)
   })
 
   app.patch(`${prefix}/webhook-subscriptions/:webhookId`, async (req, res) => {
@@ -200,15 +200,15 @@ export function registerWebhookRoutes({ app, prefix, deps }) {
     if (scope.scope === 'reseller' && current.value.resellerId !== scope.resellerId) {
       return sendError(res, 403, 'FORBIDDEN', 'webhook subscription is out of reseller scope.')
     }
-    if (scope.scope === 'customer' && current.value.customerId !== scope.customerId) {
+    if (scope.scope === 'customer' && current.value.enterpriseId !== scope.customerId) {
       return sendError(res, 403, 'FORBIDDEN', 'webhook subscription is out of customer scope.')
     }
     const result = await updateWebhookSubscription({ supabase, webhookId, payload: req.body ?? {} })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 
-  app.delete(`${prefix}/webhook-subscriptions/:webhookId`, async (req, res) => {
+  app.post(`${prefix}/webhook-subscriptions/:webhookId/deprecate`, async (req, res) => {
     const scope = resolveScope(req, res, deps)
     if (!scope) return
     const webhookId = req.params?.webhookId ? String(req.params.webhookId).trim() : ''
@@ -221,12 +221,12 @@ export function registerWebhookRoutes({ app, prefix, deps }) {
     if (scope.scope === 'reseller' && current.value.resellerId !== scope.resellerId) {
       return sendError(res, 403, 'FORBIDDEN', 'webhook subscription is out of reseller scope.')
     }
-    if (scope.scope === 'customer' && current.value.customerId !== scope.customerId) {
+    if (scope.scope === 'customer' && current.value.enterpriseId !== scope.customerId) {
       return sendError(res, 403, 'FORBIDDEN', 'webhook subscription is out of customer scope.')
     }
-    const result = await deleteWebhookSubscription({ supabase, webhookId })
+    const result = await deprecateWebhookSubscription({ supabase, webhookId })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 
   app.get(`${prefix}/webhook-subscriptions/:webhookId/deliveries`, async (req, res) => {
@@ -242,7 +242,7 @@ export function registerWebhookRoutes({ app, prefix, deps }) {
     if (scope.scope === 'reseller' && current.value.resellerId !== scope.resellerId) {
       return sendError(res, 403, 'FORBIDDEN', 'webhook subscription is out of reseller scope.')
     }
-    if (scope.scope === 'customer' && current.value.customerId !== scope.customerId) {
+    if (scope.scope === 'customer' && current.value.enterpriseId !== scope.customerId) {
       return sendError(res, 403, 'FORBIDDEN', 'webhook subscription is out of customer scope.')
     }
     const result = await listWebhookDeliveries({
@@ -252,7 +252,7 @@ export function registerWebhookRoutes({ app, prefix, deps }) {
       pageSize: req.query?.pageSize ?? null,
     })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 
   app.post(`${prefix}/webhook-deliveries/:deliveryId/retry`, async (req, res) => {
@@ -276,11 +276,11 @@ export function registerWebhookRoutes({ app, prefix, deps }) {
     if (scope.scope === 'reseller' && current.value.resellerId !== scope.resellerId) {
       return sendError(res, 403, 'FORBIDDEN', 'webhook subscription is out of reseller scope.')
     }
-    if (scope.scope === 'customer' && current.value.customerId !== scope.customerId) {
+    if (scope.scope === 'customer' && current.value.enterpriseId !== scope.customerId) {
       return sendError(res, 403, 'FORBIDDEN', 'webhook subscription is out of customer scope.')
     }
     const result = await retryWebhookDelivery({ supabase, deliveryId: Number(deliveryId) })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 }

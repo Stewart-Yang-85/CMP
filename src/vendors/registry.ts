@@ -1,59 +1,76 @@
 import { createWxzhonggengAdapter } from './wxzhonggeng.js'
 import type { SupplierAdapter, SupplierCapabilities, SpiOperation } from './spi.js'
+import type { UpstreamIntegrationRuntime } from '../services/upstreamIntegration.js'
+import { loadUpstreamIntegrationRuntime } from '../services/upstreamIntegration.js'
+
+const createWxAdapter = createWxzhonggengAdapter as (integration?: Record<string, unknown>) => SupplierAdapter
 
 type ChangePlanStrategy = {
   mode: 'UPSTREAM' | 'VIRTUAL'
 }
 
-function getEnvTrim(name: string) {
-  const v = process.env[name]
-  if (!v) return null
-  const s = String(v).trim()
-  return s.length ? s : null
+type SupabaseLike = {
+  select: (table: string, queryString: string) => Promise<unknown>
 }
 
 function normalizeKey(value: unknown) {
   return String(value ?? '').trim()
 }
 
-function loadSupplierAdapterMap() {
-  const raw = getEnvTrim('SUPPLIER_ADAPTERS') || getEnvTrim('SUPPLIER_ADAPTERS_JSON')
-  if (!raw) return {}
-  try {
-    const parsed = JSON.parse(raw)
-    if (!parsed || typeof parsed !== 'object') return {}
-    const map: Record<string, string> = {}
-    for (const [k, v] of Object.entries(parsed)) {
-      const key = normalizeKey(k)
-      const val = normalizeKey(v)
-      if (key && val) map[key] = val
-    }
-    return map
-  } catch {
-    return {}
+function integrationToWxConfig(integration: UpstreamIntegrationRuntime) {
+  return {
+    apiEndpoint: integration.apiEndpoint,
+    apiKey: integration.apiKey,
+    apiSecret: integration.apiSecret,
+    username: integration.username,
+    password: integration.password,
+    tokenUrl: integration.tokenUrl,
+    authType: integration.authType,
+    config: integration.config,
   }
 }
 
-function resolveSupplierKey(supplierId?: string | null) {
-  const id = normalizeKey(supplierId)
-  const map = loadSupplierAdapterMap()
-  if (id && map[id]) return map[id]
-  const wxId = getEnvTrim('WXZHONGGENG_SUPPLIER_ID')
-  if (id && wxId && id === wxId) return 'wxzhonggeng'
-  if (!id && wxId) return 'wxzhonggeng'
-  const fallback = getEnvTrim('SUPPLIER_DEFAULT_ADAPTER')
-  if (fallback) return fallback
-  return null
-}
-
-export function createSupplierAdapter({ supplierId }: { supplierId?: string | null }): SupplierAdapter {
-  const key = resolveSupplierKey(supplierId)
-  if (key === 'wxzhonggeng') return createWxzhonggengAdapter()
+export function createSupplierAdapterFromIntegration(integration: UpstreamIntegrationRuntime): SupplierAdapter {
+  const adapterType = normalizeKey(integration.adapterType).toLowerCase()
+  if (adapterType === 'wxzhonggeng') {
+    return createWxAdapter(integrationToWxConfig(integration))
+  }
   throw new Error('supplier_adapter_not_found')
 }
 
-export function getSupplierCapabilities({ supplierId }: { supplierId?: string | null }): SupplierCapabilities {
-  const adapter = createSupplierAdapter({ supplierId })
+export async function createSupplierAdapter({
+  supabase,
+  supplierId,
+  operatorId,
+  integration,
+}: {
+  supabase?: SupabaseLike | null
+  supplierId?: string | null
+  operatorId?: string | null
+  integration?: UpstreamIntegrationRuntime | null
+}): Promise<SupplierAdapter> {
+  if (integration) {
+    return createSupplierAdapterFromIntegration(integration)
+  }
+  const sid = normalizeKey(supplierId)
+  const oid = normalizeKey(operatorId)
+  if (supabase && sid && oid) {
+    const row = await loadUpstreamIntegrationRuntime(supabase as any, sid, oid)
+    if (row) return createSupplierAdapterFromIntegration(row)
+  }
+  throw new Error('supplier_adapter_not_found')
+}
+
+export async function getSupplierCapabilities({
+  supabase,
+  supplierId,
+  operatorId,
+}: {
+  supabase?: SupabaseLike | null
+  supplierId?: string | null
+  operatorId?: string | null
+}): Promise<SupplierCapabilities> {
+  const adapter = await createSupplierAdapter({ supabase, supplierId, operatorId })
   return adapter.capabilities
 }
 
@@ -72,22 +89,34 @@ export function negotiateChangePlanStrategy({
   return { mode: 'UPSTREAM' }
 }
 
-export function resolveAdapterForSupplier({ supplierId }: { supplierId?: string | null }): SupplierAdapter | null {
+export async function resolveAdapterForSupplier({
+  supabase,
+  supplierId,
+  operatorId,
+}: {
+  supabase?: SupabaseLike | null
+  supplierId?: string | null
+  operatorId?: string | null
+}): Promise<SupplierAdapter | null> {
   try {
-    return createSupplierAdapter({ supplierId })
+    return await createSupplierAdapter({ supabase, supplierId, operatorId })
   } catch {
     return null
   }
 }
 
-export function checkOperationSupported({
+export async function checkOperationSupported({
+  supabase,
   supplierId,
+  operatorId,
   operation,
 }: {
+  supabase?: SupabaseLike | null
   supplierId?: string | null
+  operatorId?: string | null
   operation: SpiOperation
-}): { supported: boolean; adapter: SupplierAdapter | null; reason?: string } {
-  const adapter = resolveAdapterForSupplier({ supplierId })
+}): Promise<{ supported: boolean; adapter: SupplierAdapter | null; reason?: string }> {
+  const adapter = await resolveAdapterForSupplier({ supabase, supplierId, operatorId })
   if (!adapter) {
     return { supported: false, adapter: null, reason: 'ADAPTER_NOT_FOUND' }
   }

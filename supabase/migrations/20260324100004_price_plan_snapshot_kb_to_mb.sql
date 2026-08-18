@@ -309,8 +309,12 @@ alter table rating_results
 
 -- 6c. Recreate views that reference renamed columns
 
--- v_rating_results_golden (from V002)
-create or replace view v_rating_results_golden as
+-- v_rating_results_golden (from V002); v_golden_bill_summary depends on it.
+-- PG forbids CREATE OR REPLACE VIEW when output column names change (charged_kb → charged_mb).
+drop view if exists v_golden_bill_summary cascade;
+drop view if exists v_rating_results_golden cascade;
+
+create view v_rating_results_golden as
 select
   rating_result_id,
   calculation_id,
@@ -325,6 +329,38 @@ select
   created_at
 from rating_results
 where calculation_id like 'golden_case_%';
+
+create or replace view v_golden_bill_summary as
+select
+  'golden'::text as bill_key,
+  min(created_at) as first_created_at,
+  max(created_at) as last_created_at,
+  count(*)::bigint as line_count,
+  sum(amount)::numeric(12, 2) as total_amount,
+  min(currency)::text as currency
+from v_rating_results_golden;
+
+create or replace function get_golden_bill_summary()
+returns table (
+  bill_key text,
+  first_created_at timestamptz,
+  last_created_at timestamptz,
+  line_count bigint,
+  total_amount numeric(12, 2),
+  currency text
+)
+language sql
+stable
+as $$
+  select
+    bill_key,
+    first_created_at,
+    last_created_at,
+    line_count,
+    total_amount,
+    currency
+  from v_golden_bill_summary;
+$$;
 
 -- ============================================================
 -- 7. Add unique constraint for snapshot versioning

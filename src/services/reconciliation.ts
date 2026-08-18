@@ -1,3 +1,5 @@
+import { resolveEventScopeColumns, sanitizeEventPayload } from './eventEmitter.js'
+
 type SupabaseClient = {
   select: (table: string, queryString: string) => Promise<unknown>
   insert: (table: string, rows: unknown, options?: { returning?: 'minimal' | 'representation' }) => Promise<unknown>
@@ -143,19 +145,24 @@ async function updateSimFromUpstream({
     },
     { returning: 'minimal' }
   )
+  const eventScope = await resolveEventScopeColumns(supabase, {
+    enterpriseId: sim.enterprise_id ?? null,
+    resellerId: sim.reseller_id ?? null,
+  })
   await supabase.insert(
     'events',
     {
       event_type: 'SIM_STATUS_CHANGED',
       occurred_at: nowIso,
-      tenant_id: sim.enterprise_id ?? null,
+      enterprise_id: eventScope.enterpriseId,
+      reseller_id: eventScope.resellerId,
       request_id: runId ?? traceId ?? null,
-      payload: {
+      payload: sanitizeEventPayload({
         iccid: sim.iccid,
         beforeStatus: sim.status,
         afterStatus: normalizedStatus,
         reason: 'UPSTREAM_WINS',
-      },
+      }),
     },
     { returning: 'minimal' }
   )
@@ -532,13 +539,14 @@ export async function getReconciliationMismatchTrace({
   }
   const eventRows = await supabase.select(
     'events',
-    `select=event_id,event_type,occurred_at,tenant_id,actor_user_id,request_id,payload&request_id=eq.${encodeURIComponent(runId)}&payload->>iccid=eq.${encodeURIComponent(iccidValue)}&order=occurred_at.desc&limit=50`
+    `select=event_id,event_type,occurred_at,enterprise_id,reseller_id,actor_user_id,request_id,payload&request_id=eq.${encodeURIComponent(runId)}&payload->>iccid=eq.${encodeURIComponent(iccidValue)}&order=occurred_at.desc&limit=50`
   )
   const events = Array.isArray(eventRows) ? eventRows.map((r: any) => ({
     eventId: r.event_id,
     eventType: r.event_type,
     occurredAt: r.occurred_at ?? null,
-    tenantId: r.tenant_id ?? null,
+    enterpriseId: r.enterprise_id ?? null,
+    resellerId: r.reseller_id ?? null,
     actorUserId: r.actor_user_id ?? null,
     requestId: r.request_id ?? null,
     payload: r.payload ?? {},

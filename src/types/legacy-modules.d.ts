@@ -31,6 +31,30 @@ declare module '../services/simLifecycle.js' {
   export function parseSimIdentifier(value: unknown): { ok: boolean; status?: number; code?: string; message?: string; field?: string; value?: string }
 }
 
+declare module '../services/simStatusChangeJob.js' {
+  export function buildLifecycleAcceptResponse(input: Record<string, unknown>): Record<string, unknown>
+  export function isLifecycleInProgress(lifecycleSubStatus: unknown): boolean
+  export function isLifecycleFailed(lifecycleSubStatus: unknown): boolean
+  export function resolveTransition(sourceAction: string, targetStatus: string): Record<string, unknown> | null
+  export function processSimStatusChangeJob(input: Record<string, unknown>): Promise<Record<string, unknown>>
+}
+
+declare module '../services/simLifecycleFinalize.js' {
+  export function finalizeSimStatusChange(input: Record<string, unknown>): Promise<string>
+}
+
+declare module './simStatusChangeJob.js' {
+  export function buildLifecycleAcceptResponse(input: Record<string, unknown>): Record<string, unknown>
+  export function isLifecycleInProgress(lifecycleSubStatus: unknown): boolean
+  export function isLifecycleFailed(lifecycleSubStatus: unknown): boolean
+  export function resolveTransition(sourceAction: string, targetStatus: string): Record<string, unknown> | null
+  export function processSimStatusChangeJob(input: Record<string, unknown>): Promise<Record<string, unknown>>
+}
+
+declare module './simLifecycleFinalize.js' {
+  export function finalizeSimStatusChange(input: Record<string, unknown>): Promise<string>
+}
+
 declare module '../vendors/wxzhonggeng.js' {
   export function createWxzhonggengAdapter(): any
   export function createWxzhonggengClient(): any

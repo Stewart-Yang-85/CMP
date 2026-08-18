@@ -73,14 +73,14 @@
     },
     {
       "id": "U-05",
-      "description": "PAYG fallback — Saudi Arabia roaming, no package coverage",
+      "description": "Out-of-profile — OOP roaming from carrier module roaming_profile_id (424-02 @ 20.48/MB)",
       "input": {
         "sim": { "iccid": "89860000000000000004", "status": "ACTIVATED" },
         "subscription": { "kind": "MAIN", "planType": "FIXED_BUNDLE" },
         "usage": { "visited_mccmnc": "424-02", "total_mb": 10 }
       },
       "expected": {
-        "classification": "PAYG",
+        "classification": "OOP_ROAMING",
         "charged_mb": 10,
         "rate_per_mb": 20.48,
         "amount": 204.80,
@@ -89,14 +89,14 @@
     },
     {
       "id": "U-06",
-      "description": "PAYG_RULE_MISSING — unknown MCC/MNC, no PAYG rate defined",
+      "description": "UNCLASSIFIED — unknown MCC/MNC, no OOP roaming rate defined",
       "input": {
         "sim": { "iccid": "89860000000000000005", "status": "ACTIVATED" },
         "subscription": { "kind": "MAIN", "planType": "FIXED_BUNDLE" },
         "usage": { "visited_mccmnc": "999-99", "total_mb": 10 }
       },
       "expected": {
-        "classification": "PAYG_RULE_MISSING",
+        "classification": "UNCLASSIFIED",
         "charged_mb": 10,
         "rate_per_mb": null,
         "amount": 0.00,
@@ -121,14 +121,14 @@
     },
     {
       "id": "U-08",
-      "description": "PAYG fallback — Saudi Arabia roaming (second SIM)",
+      "description": "Out-of-profile — second SIM, same OOP roaming tariff as U-05",
       "input": {
         "sim": { "iccid": "89860000000000000007", "status": "ACTIVATED" },
         "subscription": { "kind": "MAIN", "planType": "FIXED_BUNDLE" },
         "usage": { "visited_mccmnc": "424-02", "total_mb": 10 }
       },
       "expected": {
-        "classification": "PAYG",
+        "classification": "OOP_ROAMING",
         "charged_mb": 10,
         "rate_per_mb": 20.48,
         "amount": 204.80,

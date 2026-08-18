@@ -61,11 +61,11 @@ graph LR
 | | 分段累进阶梯计费 | 增强 | billing.ts |
 | 账单与出账（US6） | 三级账单结构（L1/L2/L3） | 增强 | bills, bill_line_items ALTER |
 | | 自动出账（T+N） | 新增 | queues/handlers.ts / Vercel Cron |
-| | PDF/CSV 导出 | 新增 | 文件生成逻辑 |
+| | CSV 导出（L1/L2/L3） | 新增 | 文件生成逻辑；当前决策不实现 PDF 账单 |
 | | 人工核销 + 调账审批 | 增强 | bills, adjustment_notes |
-| 信控催收（US7） | Dunning 时间轴 | 新增 | dunning_records, dunning_actions 表 |
-| | 批量停机建议（人工触发） | 新增 | sim_cards:batch-deactivate |
-| | 复机恢复（人工） | 新增 | dunning:resolve 端点 |
+| 企业欠费汇总（US7） | 逾期账单识别与风险提示 | 新增 | dunning_records, dunning_actions 表（内部命名沿用） |
+| | 欠费汇总查询 | 新增 | `GET /enterprises/{enterpriseId}/overdue-summary` |
+| | 欠费处理 | 复用 | Billing `mark-paid` / `write-off` / `void` / `adjust` |
 | 上游对账（US8） | Reconciliation 任务 | 新增 | reconciliation_runs 表 |
 | | 供应商产品映射 | 新增 | vendor_product_mappings 表 |
 | | 开通同步订单 | 新增 | provisioning_orders 表 |
@@ -255,7 +255,7 @@ graph TD
 
 | 源 | 目标 | 同步方式 | 频率 |
 |:---|:-----|:---------|:-----|
-| 上游供应商 CDR | usage_daily_summary | SFTP 批量 + API | 每日批量 + 准实时 |
+| 上游供应商 CDR | usage_daily_summary | 按 `(supplier_id, operator_id)` 适配 CDR 格式；SFTP 批量 + API | 每日批量 + 准实时 |
 | 上游供应商 SIM 状态 | sim_cards.upstream_status | Webhook 回调 / 轮询 | 准实时 |
 | 计费引擎 rating_results | bills + bill_line_items | 内部批处理 | T+N 出账时 |
 | events 表 | webhook_deliveries | Worker 投递 | 事件驱动 |
@@ -1105,20 +1105,24 @@ ALTER TABLE jobs
 
 ### 4.1 SIM 生命周期状态机
 
-**状态图**
+> **[V1.1]** 权威条文：[spec.md](./spec.md) US2、[sim-api.md](./contracts/sim-api.md) §4.0、[integration-api.md](./contracts/integration-api.md) `JOB_FINISHED`。
+
+**稳态主图**（`status`；边为上游确认后迁移）
 
 ```mermaid
 stateDiagram-v2
     [*] --> INVENTORY
     INVENTORY --> TEST_READY : 分配/销售
-    INVENTORY --> ACTIVATED : 激活
-    TEST_READY --> ACTIVATED : 到期自动/手工激活
-    TEST_READY --> DEACTIVATED : 手工停机
-    ACTIVATED --> DEACTIVATED : 停机/信控/达量断网
-    DEACTIVATED --> ACTIVATED : 复机
-    DEACTIVATED --> RETIRED : 拆机(代理商,承诺期校验)
+    INVENTORY --> ACTIVATED : activate 确认后
+    TEST_READY --> ACTIVATED : activate 确认后
+    TEST_READY --> DEACTIVATED : deactivate 确认后
+    ACTIVATED --> DEACTIVATED : deactivate 确认后
+    DEACTIVATED --> ACTIVATED : reactivate 确认后
+    DEACTIVATED --> RETIRED : retire 确认后
     RETIRED --> [*]
 ```
+
+**复合态**：受理后 `lifecycle_sub_status=*ing` 且 `status` 保持源态；失败 `*_failed`；成功目标 `status` + `normal`。
 
 **流程图**
 
@@ -1136,17 +1140,15 @@ graph TD
     C -->|"其他合法迁移"| F{"企业信控校验"}
     F -->|"企业 SUSPENDED 且企业用户复机"| ERR5["返回 403 ENTERPRISE_SUSPENDED"]
     F -->|"通过"| E
-    E --> G["创建 provisioning_order"]
-    G --> H["调用上游供应商 API"]
-    H --> I{"上游响应"}
-    I -->|"成功"| J["更新 sim_cards.status"]
-    J --> K["写入 sim_state_history"]
-    K --> L["发布 SIM_STATUS_CHANGED 事件"]
-    L --> M["记录审计日志"]
-    M --> End["返回 202 + jobId"]
-    I -->|"失败"| N["标记 provisioning_order FAILED"]
-    N --> O["记录错误"]
-    O --> End2["返回错误"]
+    E --> B["job QUEUED + sim 源status + *ing"]
+    B --> C["202（job 非 SUCCEEDED）"]
+    C --> W["Worker → 供应商适配器"]
+    W --> I{"completed/pending/failed"}
+    I -->|"pending"| W
+    I -->|"completed"| J["目标 status + normal"]
+    J --> K["history + SIM_STATUS_CHANGED + JOB_FINISHED"]
+    I -->|"failed"| N["源 status + *_failed, job FAILED"]
+    N --> O["JOB_FINISHED"]
     ERR1 --> EndErr["结束"]
     ERR2 --> EndErr
     ERR3 --> EndErr
@@ -1181,35 +1183,31 @@ sequenceDiagram
     API->>DB: 校验企业状态
     DB-->>API: customer.status=ACTIVE
 
-    API->>DB: 创建 provisioning_order
-    API->>DB: 创建 job(QUEUED)
-    API-->>Client: 202 {jobId}
+    API->>DB: job QUEUED, sim 源态+activating
+    API-->>Client: 202 jobId（非 SUCCEEDED）
 
-    Note over API,Vendor: Worker 异步处理
+    Note over API,Vendor: Worker 异步
 
-    API->>SPI: activateSim(iccid, idempotencyKey)
-    SPI->>Vendor: POST /activate
-    Vendor-->>SPI: 200 OK
-    SPI-->>API: success
-
-    API->>DB: UPDATE sim_cards SET status=ACTIVATED
-    API->>DB: INSERT sim_state_history
-    API->>DB: INSERT events(SIM_STATUS_CHANGED)
-    API->>DB: INSERT audit_logs
-    API->>DB: UPDATE job SET status=SUCCEEDED
+    Worker->>SPI: activateSim
+    SPI->>Vendor: outbound
+    Vendor-->>SPI: completed（或 pending 后完成）
+    Worker->>DB: status=ACTIVATED, normal, job SUCCEEDED
+    Worker->>Client: Webhook SIM_STATUS_CHANGED + JOB_FINISHED
 ```
 
 **字段变更**
 
 | 字段 | 操作 | 逻辑 |
 |:-----|:-----|:-----|
-| sim_cards.status | 读/写 | 读取当前状态，校验状态机约束后更新 |
-| sim_cards.upstream_status | 写 | 同步上游确认状态 |
-| sim_cards.activation_date | 写 | 首次激活时写入 |
-| sim_state_history.* | 写 | 插入 Type 2 SCD 记录 |
-| provisioning_orders.* | 写 | 创建开通同步订单 |
-| events.* | 写 | 发布 SIM_STATUS_CHANGED 事件 |
-| audit_logs.* | 写 | 记录操作审计 |
+| sims.status | 读/写 | 过渡保持源态；上游确认后写目标稳态 |
+| sims.lifecycle_sub_status | 读/写 | *ing / *_failed / normal |
+| sims.status_sync_conflict | 读/写 | 对账漂移 |
+| sims.upstream_status | 写 | 供应商镜像 |
+| sims.activation_date | 写 | 首次 ACTIVATED 稳态时 |
+| sim_state_history.* | 写 | 仅稳态变更 |
+| jobs (SIM_STATUS_CHANGE) | 写 | SUCCEEDED=确认+改库；不可 cancel |
+| events.* | 写 | SIM_STATUS_CHANGED、JOB_FINISHED |
+| audit_logs.* | 写 | 受理与终态审计 |
 
 ### 4.2 计费引擎 — 高水位月租费
 
@@ -1347,18 +1345,18 @@ graph TD
     C -->|"是"| E{"当前 Dunning 状态?"}
 
     E -->|"NORMAL"| F["创建 dunning_record(OVERDUE_WARNING)"]
-    F --> G["发送逾期提醒"]
+    F --> G["生成离线提醒建议"]
 
     E -->|"OVERDUE_WARNING"| H{"宽限期已过?"}
-    H -->|"否"| I["发送每日催收提醒"]
-    H -->|"是"| J["更新 dunning_status=SUSPENDED"]
-    J --> K["更新企业 customers.status=SUSPENDED"]
-    K --> L["触发 ENTERPRISE_STATUS_CHANGED 事件"]
-    L --> M["异步批量停机 SIM"]
+    H -->|"否"| I["保持 WARNING 风险提示"]
+    H -->|"是"| J["更新内部风险状态=HIGH"]
+    J --> K["仅供管理员手工评估"]
+    K --> L["不自动变更企业状态"]
+    L --> M["不自动停机 SIM"]
 
     E -->|"SUSPENDED"| N{"继续逾期?"}
-    N -->|"是"| O["更新 dunning_status=SERVICE_INTERRUPTED"]
-    N -->|"否(已缴清)"| P["dunning:resolve 复机"]
+    N -->|"是"| O["更新内部风险状态=CRITICAL"]
+    N -->|"否(已缴清)"| P["欠费汇总恢复 NORMAL"]
 
     M --> Q["创建 batch-deactivate Job"]
     Q --> End["完成"]
@@ -1436,9 +1434,9 @@ graph TD
     F -->|"是"| ERR3["返回 409 MAIN_SUBSCRIPTION_EXISTS"]
     F -->|"否"| G["创建订阅"]
     E -->|"ADD_ON"| G
-    G --> H["发布 SUBSCRIPTION_CHANGED 事件"]
-    H --> I["创建 provisioning_order"]
-    I --> End["返回 201"]
+    G --> H["写入 subscriptions PROVISIONING/PENDING"]
+    H --> I["创建 SUBSCRIPTION_PROVISION Job"]
+    I --> End["返回 202 + jobId"]
 
     B -->|"套餐切换"| J["查询当前 MAIN 订阅"]
     J --> K{"effectiveStrategy?"}
@@ -1467,8 +1465,10 @@ graph TD
 | subscriptions.cancelled_at | 写 | 退订时间 |
 | sim_cards.status | 读 | SIM 状态校验 |
 | customers.status | 读 | 企业状态校验 |
-| provisioning_orders.* | 写 | 创建开通同步订单 |
-| events.* | 写 | SUBSCRIPTION_CHANGED 事件 |
+| provisioning_orders.* | 写 | （可选）开通审计；**真源** 为 `jobs` + `vendor_product_mappings`（见 clarifications/subscription-provisioning-upstream-mapping.md） |
+| vendor_product_mappings.* | 写 | Package `:publish` 时写入；`supplier_id` 由 Carrier Service 推导 |
+| jobs.* | 写 | `SUBSCRIPTION_PROVISION` Job |
+| events.* | 写 | SUBSCRIPTION_CHANGED / JOB_FINISHED / 失败类订阅事件 |
 
 ### 4.6 账单生成与出账
 
@@ -1517,6 +1517,17 @@ graph TD
 | bill_line_items.department_id/package_id | 写 | L2 交叉分组标记（department × package） |
 | adjustment_notes.* | 写 | 迟到话单调账草稿 |
 | events.* | 写 | BILL_PUBLISHED 事件 |
+
+**账单文件产物决策**
+
+- 当前 Billing API 验收范围只提供 CSV 账单文件，不实现 PDF 账单。
+- CSV 覆盖 L1/L2 汇总与 L3 SIM 级明细；后续如需 PDF，应作为独立产品/排版需求重新立项。
+
+**CDR 适配决策**
+
+- 不假设所有上游供应商提供统一 CDR schema；不同供应商文件字段可完全不同。
+- CDR ingestion 应像 Integration 模块一样按一组 `(supplierId, operatorId)` 选择 adapter，将供应商原始字段归一化到 `usage_daily_summary` 所需字段。
+- 大规模性能压测不属于当前 Rating 场景矩阵验收，后续在真实 CDR 采集量级明确后单独执行。
 
 ### 4.7 Webhook 投递
 
@@ -1712,24 +1723,26 @@ graph TD
 
 ---
 
-#### POST /v1/enterprises/{enterpriseId}/dunning:resolve
-
-**Request**:
-```json
-{
-  "reason": "string (optional)"
-}
-```
+#### GET /v1/enterprises/{enterpriseId}/overdue-summary
 
 **Response 200**:
 ```json
 {
   "enterpriseId": "uuid",
-  "dunningStatus": "NORMAL",
-  "enterpriseStatus": "ACTIVE",
-  "resolvedAt": "2026-03-08T10:00:00Z"
+  "overdueRiskLevel": "NORMAL | WARNING | HIGH | CRITICAL",
+  "overdueAmount": 15480.5,
+  "oldestOverdueBillId": "uuid",
+  "oldestOverduePeriod": "2026-02",
+  "daysOverdue": 15,
+  "gracePeriodDays": 3,
+  "recommendedAction": "MANUAL_REVIEW_RECOMMENDED",
+  "nextActionDate": "2026-03-08T00:00:00Z",
+  "autoSuspendEnabled": false,
+  "lateFeeAmount": 12.5
 }
 ```
+
+对外不再暴露 `dunning:resolve`。欠费商业处理复用 Billing 模块账单动作。
 
 ---
 

@@ -1,3 +1,6 @@
+import type { DiagnosticsCapabilityMode } from '../vendors/diagnosticsCapabilities.js'
+import type { SupplierAdapter } from '../vendors/spi.js'
+
 type SupabaseClient = {
   select: (table: string, queryString: string, options?: { headers?: Record<string, string>; suppressMissingColumns?: boolean }) => Promise<unknown>
   selectWithCount: (table: string, queryString: string) => Promise<{ data: unknown; total: number | null }>
@@ -5,9 +8,7 @@ type SupabaseClient = {
   update: (table: string, matchQueryString: string, patch: unknown, options?: { returning?: 'minimal' | 'representation' }) => Promise<unknown>
 }
 
-type WxClient = {
-  getSimStatus: (iccid: string) => Promise<any>
-}
+type UpstreamDiagnosticsClient = Pick<SupplierAdapter, 'getSimCardStatus' | 'getSimStatus' | 'cancelLocation'>
 
 type ErrorResult = {
   ok: false
@@ -26,38 +27,37 @@ type RegistrationStatus = 'REGISTERED_HOME' | 'REGISTERED_ROAMING' | 'NOT_REGIST
 type LocationType = 'CELL_BASED' | 'GPS'
 
 type ConnectivityStatus = {
-  iccid: string
+  simStatus: string | null
+  simStatusChangedAt: string | null
   onlineStatus: OnlineStatus
   registrationStatus: RegistrationStatus
-  lastActiveTime: string | null
-  ipAddress: string | null
+  lastActivityTime: string | null
+  visitedMccMnc: string | null
   ratType: string | null
-  servingCellId: string | null
-  servingMccMnc: string | null
   apn: string | null
-  sessionUptime: number | null
 }
 
 type LocationInfo = {
   iccid: string
-  locationType: LocationType
-  latitude: number | null
-  longitude: number | null
-  accuracy: number | null
-  timestamp: string | null
+  lastActivityTime: string | null
   visitedMccMnc: string | null
   country: string | null
-  cellInfo: {
-    mcc: string | null
-    mnc: string | null
-    lac: string | null
-    cellId: string | null
-  }
+  visitedOperator: string | null
+}
+
+type VisitedNetworkInfo = {
+  iccid: string
+  lastActivityTime: string | null
+  visitedMccMnc: string | null
+  country: string | null
+  visitedOperator: string | null
 }
 
 type ConnectivityInput = {
   supabase: SupabaseClient
-  wxClient: WxClient | null
+  upstreamClient?: UpstreamDiagnosticsClient | null
+  connectivityMode?: DiagnosticsCapabilityMode | null
+  cancelLocationMode?: DiagnosticsCapabilityMode | null
   iccid: string
   enterpriseId?: string | null
 }
@@ -71,6 +71,9 @@ type ResetConnectionInput = {
   traceId?: string | null
   reason?: string | null
   idempotencyKey?: string | null
+  upstreamClient?: UpstreamDiagnosticsClient | null
+  cancelLocationMode?: DiagnosticsCapabilityMode | null
+  integrationId?: string | null
 }
 
 function toError(status: number, code: string, message: string): ErrorResult {
@@ -98,7 +101,9 @@ function mapOnlineStatus(value: unknown): OnlineStatus | null {
   const raw = String(value).trim().toUpperCase()
   if (!raw) return null
   if (raw.includes('ONLINE') || raw.includes('CONNECTED') || raw === 'ON' || raw === 'ACTIVE') return 'ONLINE'
+  if (['ACTIVTY', 'ACTIVITY', 'TESTREADY', 'PREACTIVE'].includes(raw)) return 'ONLINE'
   if (raw.includes('OFF') || raw.includes('DISCONNECT')) return 'OFFLINE'
+  if (['STOP', 'SUSPENDED', 'NOACTIVTY', 'PRECANCEL', 'DISMANTLE', 'TERMINATE'].includes(raw)) return 'OFFLINE'
   return null
 }
 
@@ -128,7 +133,7 @@ async function loadSim(supabase: SupabaseClient, iccid: string, enterpriseId?: s
   const tenantFilter = enterpriseId ? `&enterprise_id=eq.${encodeURIComponent(String(enterpriseId))}` : ''
   const rows = await supabase.select(
     'sims',
-    `select=sim_id,iccid,enterprise_id,apn,supplier_id,operators(name,business_operator_id,business_operators(name,mcc,mnc)),suppliers(name)&iccid=eq.${encodeURIComponent(iccid)}${tenantFilter}&limit=1`
+    `select=sim_id,iccid,status,enterprise_id,apn,supplier_id,operators(name,business_operator_id,business_operators(name,mcc,mnc)),suppliers(name)&iccid=eq.${encodeURIComponent(iccid)}${tenantFilter}&limit=1`
   )
   return Array.isArray(rows) ? (rows[0] as Record<string, any>) : null
 }
@@ -137,9 +142,39 @@ async function loadLatestUsage(supabase: SupabaseClient, iccid: string, enterpri
   const tenantFilter = enterpriseId ? `&enterprise_id=eq.${encodeURIComponent(String(enterpriseId))}` : ''
   const rows = await supabase.select(
     'usage_daily_summary',
-    `select=created_at,visited_mccmnc,apn,rat&iccid=eq.${encodeURIComponent(iccid)}${tenantFilter}&order=usage_day.desc&limit=1`
+    `select=created_at,usage_day,visited_mccmnc,apn,rat&iccid=eq.${encodeURIComponent(iccid)}${tenantFilter}&order=usage_day.desc&limit=1`
   )
   return Array.isArray(rows) ? (rows[0] as Record<string, any>) : null
+}
+
+async function loadPublicInfoByMccMnc(supabase: SupabaseClient, visitedMccMnc: string | null) {
+  const parsed = parseMccMnc(visitedMccMnc)
+  if (!parsed.mcc || !parsed.mnc) return null
+  try {
+    const rows = await supabase.select(
+      'public_infos',
+      `select=country,name&mcc=eq.${encodeURIComponent(parsed.mcc)}&mnc=eq.${encodeURIComponent(parsed.mnc)}&limit=1`,
+      { suppressMissingColumns: true },
+    )
+    return Array.isArray(rows) ? (rows[0] as Record<string, any> | undefined) ?? null : null
+  } catch {
+    return null
+  }
+}
+
+async function loadLatestSimStatusChangeAt(supabase: SupabaseClient, simId: unknown) {
+  if (!simId) return null
+  try {
+    const rows = await supabase.select(
+      'sim_state_history',
+      `select=start_time&sim_id=eq.${encodeURIComponent(String(simId))}&order=start_time.desc&limit=1`,
+      { suppressMissingColumns: true },
+    )
+    const row = Array.isArray(rows) ? rows[0] as Record<string, any> | undefined : undefined
+    return normalizeDate(row?.start_time)
+  } catch {
+    return null
+  }
 }
 
 function extractUpstreamData(response: any) {
@@ -164,7 +199,17 @@ function buildStatusFromUpstream(data: Record<string, any>) {
   const apn = pickValue(data, ['apn'])
   const sessionUptime = pickValue(data, ['sessionUptime', 'session_uptime', 'uptime'])
   const lastActiveTime = normalizeDate(
-    pickValue(data, ['lastActiveTime', 'last_active_time', 'activeTime', 'lastOnlineTime', 'last_online_time'])
+    pickValue(data, [
+      'lastChangeStateTime',
+      'last_change_state_time',
+      'activateTime',
+      'activate_time',
+      'lastActiveTime',
+      'last_active_time',
+      'activeTime',
+      'lastOnlineTime',
+      'last_online_time',
+    ])
   )
   return {
     onlineStatus,
@@ -205,9 +250,120 @@ function buildLocationFromUpstream(data: Record<string, any>) {
   }
 }
 
-async function fetchUpstreamStatus(wxClient: WxClient | null, iccid: string) {
-  if (!wxClient) return null
-  const res = await wxClient.getSimStatus(iccid)
+async function loadLatestUpdateLocationEvent(
+  supabase: SupabaseClient,
+  iccid: string,
+  enterpriseId?: string | null,
+) {
+  const filters = [
+    'event_type=eq.UPDATE_LOCATION',
+    `payload->>iccid=eq.${encodeURIComponent(iccid)}`,
+  ]
+  if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(String(enterpriseId))}`)
+  const rows = await supabase.select(
+    'events',
+    `select=occurred_at,payload&${filters.join('&')}&order=occurred_at.desc&limit=1`,
+    { suppressMissingColumns: true },
+  )
+  return Array.isArray(rows) ? (rows[0] as Record<string, any>) : null
+}
+
+async function loadUpdateLocationEventsInRange(
+  supabase: SupabaseClient,
+  iccid: string,
+  enterpriseId: string | null | undefined,
+  from: string,
+  to: string,
+  limit: number,
+) {
+  const filters = [
+    'event_type=eq.UPDATE_LOCATION',
+    `payload->>iccid=eq.${encodeURIComponent(iccid)}`,
+    `occurred_at=gte.${encodeURIComponent(from)}`,
+    `occurred_at=lte.${encodeURIComponent(to)}`,
+  ]
+  if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(String(enterpriseId))}`)
+  const rows = await supabase.select(
+    'events',
+    `select=occurred_at,payload&${filters.join('&')}&order=occurred_at.desc&limit=${encodeURIComponent(String(Math.max(1, limit)))}`,
+    { suppressMissingColumns: true },
+  )
+  return Array.isArray(rows) ? (rows as Record<string, any>[]) : []
+}
+
+function parseFirstMncFromList(value: unknown) {
+  if (value == null) return null
+  const raw = String(value).trim()
+  if (!raw) return null
+  const bracketMatch = raw.match(/\[([^\]]+)\]/)
+  const inner = bracketMatch ? bracketMatch[1] : raw
+  const first = inner.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean)[0]
+  if (!first) return null
+  const digits = first.replace(/\D/g, '')
+  if (!digits) return null
+  return digits.length === 2 ? `0${digits}` : digits
+}
+
+export function visitedMccMncFromUpdateLocationPayload(payload: Record<string, any> | null | undefined) {
+  if (!payload || typeof payload !== 'object') {
+    return { visitedMccMnc: null as string | null, timestamp: null as string | null, mcc: null as string | null, mnc: null as string | null }
+  }
+  const mccRaw = pickValue(payload, ['mcc', 'data.mcc']) ?? (payload.data?.mcc != null ? payload.data.mcc : null)
+  const mncListRaw = pickValue(payload, ['mncList', 'data.mncList']) ?? payload.data?.mncList
+  const eventTimeRaw = pickValue(payload, ['eventTime', 'data.eventTime']) ?? payload.data?.eventTime
+  const mcc = mccRaw != null ? String(mccRaw).trim() : null
+  const mnc = parseFirstMncFromList(mncListRaw)
+  const visitedMccMnc =
+    mcc && mnc ? `${mcc}-${mnc}` : pickValue(payload, ['visitedMccMnc', 'servingMccMnc']) != null
+      ? String(pickValue(payload, ['visitedMccMnc', 'servingMccMnc']))
+      : null
+  const timestamp = normalizeDate(eventTimeRaw)
+  return { visitedMccMnc, timestamp, mcc, mnc }
+}
+
+function locationInfoFromLocalSources(
+  iccid: string,
+  eventRow: Record<string, any> | null,
+  usage: Record<string, any> | null,
+): LocationInfo {
+  const fromEvent = eventRow?.payload
+    ? visitedMccMncFromUpdateLocationPayload(eventRow.payload as Record<string, any>)
+    : null
+  const usageMccMnc = usage?.visited_mccmnc ? String(usage.visited_mccmnc) : null
+  const visitedMccMnc = fromEvent?.visitedMccMnc ?? usageMccMnc
+  const lastActivityTime =
+    fromEvent?.timestamp ??
+    normalizeDate(eventRow?.occurred_at) ??
+    normalizeDate(usage?.created_at) ??
+    (usage?.usage_day ? new Date(`${usage.usage_day}T00:00:00.000Z`).toISOString() : null)
+  return {
+    iccid,
+    lastActivityTime,
+    visitedMccMnc,
+    country: null,
+    visitedOperator: null,
+  }
+}
+
+async function enrichVisitedNetworkInfo(supabase: SupabaseClient, item: LocationInfo): Promise<LocationInfo> {
+  const publicInfo = await loadPublicInfoByMccMnc(supabase, item.visitedMccMnc)
+  return {
+    ...item,
+    country: publicInfo?.country ? String(publicInfo.country) : null,
+    visitedOperator: publicInfo?.name ? String(publicInfo.name) : null,
+  }
+}
+
+async function fetchUpstreamStatus(
+  upstreamClient: UpstreamDiagnosticsClient | null | undefined,
+  mode: DiagnosticsCapabilityMode | null | undefined,
+  iccid: string,
+) {
+  if (!upstreamClient) return null
+  if (mode !== 'UPSTREAM_PARTIAL' && mode !== 'UPSTREAM_FULL') return null
+  const query = upstreamClient.getSimCardStatus ?? upstreamClient.getSimStatus
+  if (!query) return null
+  const res = await query(iccid)
   return extractUpstreamData(res)
 }
 
@@ -273,115 +429,143 @@ async function insertJobWithFallback(supabase: SupabaseClient, payload: Record<s
 }
 
 export async function getConnectivityStatus(input: ConnectivityInput): Promise<OkResult<ConnectivityStatus> | ErrorResult> {
-  const { supabase, wxClient, iccid, enterpriseId } = input
+  const { supabase, upstreamClient, connectivityMode, iccid, enterpriseId } = input
   const sim = await loadSim(supabase, iccid, enterpriseId)
-  if (!sim) return toError(404, 'RESOURCE_NOT_FOUND', 'sim not found.')
+  if (!sim) return toError(404, 'RESOURCE_NOT_FOUND', 'sim not found in CMP inventory.')
   const usage = await loadLatestUsage(supabase, iccid, enterpriseId)
-  const upstreamData = await fetchUpstreamStatus(wxClient, iccid)
+  const simStatusChangedAt = await loadLatestSimStatusChangeAt(supabase, sim.sim_id)
+  let upstreamData: Record<string, any> | null = null
+  try {
+    upstreamData = await fetchUpstreamStatus(upstreamClient, connectivityMode, iccid)
+  } catch {
+    upstreamData = null
+  }
   const upstreamStatus = upstreamData ? buildStatusFromUpstream(upstreamData) : null
-  const lastActiveTime = upstreamStatus?.lastActiveTime ?? normalizeDate(usage?.created_at)
-  const servingMccMnc = upstreamStatus?.servingMccMnc ?? (usage?.visited_mccmnc ? String(usage.visited_mccmnc) : null)
+  const lastActivityTime = normalizeDate(usage?.created_at) ??
+    (usage?.usage_day ? new Date(`${usage.usage_day}T00:00:00.000Z`).toISOString() : null)
+  const visitedMccMnc = usage?.visited_mccmnc ? String(usage.visited_mccmnc) : null
   const businessOperator = sim?.operators?.business_operators ?? null
-  const registrationStatus = upstreamStatus?.registrationStatus ?? resolveRegistrationStatus(servingMccMnc, businessOperator?.mcc ?? null, businessOperator?.mnc ?? null)
-  const onlineStatus = upstreamStatus?.onlineStatus ?? resolveOnlineStatus(lastActiveTime)
+  const onlineStatus = upstreamStatus?.onlineStatus ?? resolveOnlineStatus(lastActivityTime)
+  const registrationStatus = upstreamStatus?.registrationStatus ??
+    (onlineStatus === 'OFFLINE'
+      ? 'NOT_REGISTERED'
+      : resolveRegistrationStatus(visitedMccMnc, businessOperator?.mcc ?? null, businessOperator?.mnc ?? null))
   return {
     ok: true,
     value: {
-      iccid: String(sim.iccid),
+      simStatus: sim.status ? String(sim.status) : null,
+      simStatusChangedAt,
       onlineStatus,
       registrationStatus,
-      lastActiveTime,
-      ipAddress: upstreamStatus?.ipAddress ?? null,
+      lastActivityTime,
+      visitedMccMnc,
       ratType: upstreamStatus?.ratType ?? (usage?.rat ? String(usage.rat) : null),
-      servingCellId: upstreamStatus?.servingCellId ?? null,
-      servingMccMnc,
       apn: upstreamStatus?.apn ?? (usage?.apn ? String(usage.apn) : sim.apn ? String(sim.apn) : null),
-      sessionUptime: upstreamStatus?.sessionUptime ?? null,
     },
   }
 }
 
-export async function getLocation(input: ConnectivityInput): Promise<OkResult<LocationInfo> | ErrorResult> {
-  const { supabase, wxClient, iccid, enterpriseId } = input
+export async function getLocation(input: ConnectivityInput): Promise<OkResult<VisitedNetworkInfo> | ErrorResult> {
+  const { supabase, iccid, enterpriseId } = input
   const sim = await loadSim(supabase, iccid, enterpriseId)
-  if (!sim) return toError(404, 'RESOURCE_NOT_FOUND', 'sim not found.')
+  if (!sim) return toError(404, 'RESOURCE_NOT_FOUND', 'sim not found in CMP inventory.')
+  const eventRow = await loadLatestUpdateLocationEvent(supabase, iccid, enterpriseId)
   const usage = await loadLatestUsage(supabase, iccid, enterpriseId)
-  const upstreamData = await fetchUpstreamStatus(wxClient, iccid)
-  const upstreamLocation = upstreamData ? buildLocationFromUpstream(upstreamData) : null
-  const servingMccMnc = upstreamLocation?.cellInfo?.mcc && upstreamLocation?.cellInfo?.mnc
-    ? `${upstreamLocation.cellInfo.mcc}-${upstreamLocation.cellInfo.mnc}`
-    : usage?.visited_mccmnc
-  const visitedMccMnc = servingMccMnc ? String(servingMccMnc) : null
-  const parsed = parseMccMnc(servingMccMnc)
-  const timestamp = upstreamLocation?.timestamp ?? normalizeDate(usage?.created_at)
+  const localInfo = locationInfoFromLocalSources(String(sim.iccid), eventRow, usage)
+  const lastActivityTime = normalizeDate(usage?.created_at) ??
+    (usage?.usage_day ? new Date(`${usage.usage_day}T00:00:00.000Z`).toISOString() : null)
+  const enriched = await enrichVisitedNetworkInfo(supabase, { ...localInfo, lastActivityTime })
   return {
     ok: true,
     value: {
       iccid: String(sim.iccid),
-      locationType: upstreamLocation?.locationType ?? 'CELL_BASED',
-      latitude: upstreamLocation?.latitude ?? null,
-      longitude: upstreamLocation?.longitude ?? null,
-      accuracy: upstreamLocation?.accuracy ?? null,
-      timestamp,
-      visitedMccMnc,
-      country: null,
-      cellInfo: {
-        mcc: parsed.mcc,
-        mnc: parsed.mnc,
-        lac: upstreamLocation?.cellInfo?.lac ?? null,
-        cellId: upstreamLocation?.cellInfo?.cellId ?? null,
-      },
+      lastActivityTime,
+      visitedMccMnc: enriched.visitedMccMnc,
+      country: enriched.country,
+      visitedOperator: enriched.visitedOperator,
     },
   }
 }
 
-export async function getLocationHistory(input: ConnectivityInput & { from?: string | null; to?: string | null; limit?: number | null; offset?: number | null }) {
+export async function getLocationHistory(
+  input: ConnectivityInput & { from?: string | null; to?: string | null; limit?: number | null; offset?: number | null },
+): Promise<OkResult<{ items: LocationInfo[]; total: number }> | ErrorResult> {
   const { supabase, iccid, enterpriseId, from, to, limit, offset } = input
   const sim = await loadSim(supabase, iccid, enterpriseId)
-  if (!sim) return toError(404, 'RESOURCE_NOT_FOUND', 'sim not found.')
+  if (!sim) return toError(404, 'RESOURCE_NOT_FOUND', 'sim not found in CMP inventory.')
+  const limitValue = Number.isFinite(limit as number) ? Math.max(1, Number(limit)) : 50
+  const offsetValue = Number.isFinite(offset as number) ? Math.max(0, Number(offset)) : 0
+  const fetchCap = Math.min(1000, limitValue + offsetValue + 50)
+
   const filters: string[] = [`iccid=eq.${encodeURIComponent(iccid)}`]
   if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(String(enterpriseId))}`)
   if (from) filters.push(`usage_day=gte.${encodeURIComponent(String(from).slice(0, 10))}`)
   if (to) filters.push(`usage_day=lte.${encodeURIComponent(String(to).slice(0, 10))}`)
-  const limitValue = Number.isFinite(limit as number) ? Math.max(1, Number(limit)) : 50
-  const offsetValue = Number.isFinite(offset as number) ? Math.max(0, Number(offset)) : 0
-  const { data, total } = await supabase.selectWithCount(
-    'usage_daily_summary',
-    `select=usage_day,created_at,visited_mccmnc&${filters.join('&')}&order=usage_day.desc&limit=${encodeURIComponent(String(limitValue))}&offset=${encodeURIComponent(String(offsetValue))}`
+
+  const [usageResult, eventRows] = await Promise.all([
+    supabase.selectWithCount(
+      'usage_daily_summary',
+      `select=usage_day,created_at,visited_mccmnc&${filters.join('&')}&order=usage_day.desc&limit=${encodeURIComponent(String(fetchCap))}`,
+    ),
+    from && to
+      ? loadUpdateLocationEventsInRange(supabase, iccid, enterpriseId, from, to, fetchCap)
+      : Promise.resolve([]),
+  ])
+
+  const usageRows = Array.isArray(usageResult.data) ? usageResult.data : []
+  const usageItems = usageRows.map((r: any) =>
+    locationInfoFromLocalSources(String(sim.iccid), null, r as Record<string, any>),
   )
-  const rows = Array.isArray(data) ? data : []
-  const items = rows.map((r: any) => {
-    const parsed = parseMccMnc(r.visited_mccmnc)
-    const visited = r.visited_mccmnc ? String(r.visited_mccmnc) : null
-    return {
-      iccid: String(sim.iccid),
-      locationType: 'CELL_BASED' as const,
-      latitude: null,
-      longitude: null,
-      accuracy: null,
-      timestamp: normalizeDate(r.created_at) ?? (r.usage_day ? new Date(`${r.usage_day}T00:00:00.000Z`).toISOString() : null),
-      visitedMccMnc: visited,
-      country: null,
-      cellInfo: {
-        mcc: parsed.mcc,
-        mnc: parsed.mnc,
-        lac: null,
-        cellId: null,
-      },
-    }
+  const eventItems = eventRows.map((row) =>
+    locationInfoFromLocalSources(String(sim.iccid), row, null),
+  )
+
+  const merged = [...eventItems, ...usageItems].sort((a, b) => {
+    const ta = a.lastActivityTime ? new Date(a.lastActivityTime).getTime() : 0
+    const tb = b.lastActivityTime ? new Date(b.lastActivityTime).getTime() : 0
+    return tb - ta
   })
-  return { ok: true, value: { items, total: typeof total === 'number' ? total : items.length } }
+
+  const items = await Promise.all(
+    merged.slice(offsetValue, offsetValue + limitValue)
+      .map((item) => enrichVisitedNetworkInfo(supabase, item))
+  )
+  const usageTotal = typeof usageResult.total === 'number' ? usageResult.total : usageRows.length
+  const total = usageTotal + eventRows.length
+  return { ok: true, value: { items, total } }
 }
 
 export async function requestResetConnection(input: ResetConnectionInput): Promise<OkResult<{ jobId: string | null; simId: string | null }> | ErrorResult> {
-  const { supabase, iccid, enterpriseId, resellerId, actorUserId, traceId, reason, idempotencyKey } = input
+  const {
+    supabase,
+    iccid,
+    enterpriseId,
+    resellerId,
+    actorUserId,
+    traceId,
+    reason,
+    idempotencyKey,
+    upstreamClient,
+    cancelLocationMode,
+    integrationId,
+  } = input
   if (!iccid) return toError(400, 'BAD_REQUEST', 'iccid is required.')
   const sim = await loadSim(supabase, iccid, enterpriseId)
-  if (!sim) return toError(404, 'RESOURCE_NOT_FOUND', 'sim not found.')
+  if (!sim) return toError(404, 'RESOURCE_NOT_FOUND', 'sim not found in CMP inventory.')
   const existing = await findIdempotentJobByKey(supabase, 'SIM_RESET_CONNECTION', idempotencyKey ?? null)
   if (existing) {
     return { ok: true, value: { jobId: existing.job_id ?? null, simId: sim.sim_id ?? null } }
   }
+
+  const upstreamSupported = cancelLocationMode === 'UPSTREAM_FULL' && typeof upstreamClient?.cancelLocation === 'function'
+  if (upstreamSupported && upstreamClient?.cancelLocation) {
+    try {
+      await upstreamClient.cancelLocation(iccid)
+    } catch (err: any) {
+      return toError(502, 'UPSTREAM_ERROR', String(err?.message || 'Upstream cancel-location failed.'))
+    }
+  }
+
   const nowIso = new Date().toISOString()
   const jobRows = await insertJobWithFallback(supabase, {
     job_type: 'SIM_RESET_CONNECTION',
@@ -391,13 +575,16 @@ export async function requestResetConnection(input: ResetConnectionInput): Promi
     request_id: traceId ? String(traceId) : null,
     actor_user_id: actorUserId ?? null,
     reseller_id: resellerId ?? null,
-    customer_id: enterpriseId ?? null,
+    enterprise_id: enterpriseId ?? null,
     idempotency_key: idempotencyKey ?? null,
     payload: {
       iccid,
       simId: sim.sim_id ?? null,
       reason: reason ?? null,
       requestedAt: nowIso,
+      integrationId: integrationId ?? null,
+      upstreamCancelSupported: upstreamSupported,
+      upstreamCancelMode: cancelLocationMode ?? 'NOT_SUPPORTED',
     },
   })
   const job = Array.isArray(jobRows) ? (jobRows[0] as Record<string, any>) : null

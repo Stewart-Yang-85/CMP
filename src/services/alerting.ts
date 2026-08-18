@@ -1,4 +1,6 @@
 import { emitEvent } from './eventEmitter.js'
+import { recordAlertDeliveries } from './alertDelivery.js'
+import { recordAlertAuditLog, recordAlertInternalEvent } from './alertAuditTrail.js'
 
 type SupabaseClient = {
   select: (table: string, queryString: string, options?: { headers?: Record<string, string> }) => Promise<unknown>
@@ -24,6 +26,7 @@ type AlertListItem = {
   alertType: string
   severity: string | null
   status: string | null
+  resellerId: string | null
   enterpriseId: string | null
   simId: string | null
   iccid: string | null
@@ -63,7 +66,15 @@ type AcknowledgeAlertInput = {
   supabase: SupabaseClient
   alertId: string
   resellerId?: string | null
+  enterpriseId?: string | null
   actorUserId?: string | null
+}
+
+type GetAlertInput = {
+  supabase: SupabaseClient
+  alertId: string
+  resellerId?: string | null
+  enterpriseId?: string | null
 }
 
 type CreateAlertInput = {
@@ -104,6 +115,11 @@ function normalizeAlertType(value: unknown) {
   return alertTypes.has(raw) ? raw : null
 }
 
+function shouldDispatchAlertWebhook(deliveryChannels: string[] | null | undefined) {
+  return Array.isArray(deliveryChannels)
+    && deliveryChannels.some((channel) => String(channel || '').trim().toUpperCase() === 'WEBHOOK')
+}
+
 function normalizeIso(value: unknown) {
   if (!value) return null
   const d = new Date(String(value))
@@ -135,11 +151,58 @@ function buildAlertFilters({
   if (resellerId) filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
   if (enterpriseId) filters.push(`customer_id=eq.${encodeURIComponent(enterpriseId)}`)
   if (alertType) filters.push(`alert_type=eq.${encodeURIComponent(alertType)}`)
-  if (from) filters.push(`window_start=gte.${encodeURIComponent(from)}`)
+  if (from) {
+    const encodedFrom = encodeURIComponent(from)
+    filters.push(`or=(window_end.gte.${encodedFrom},and(window_end.is.null,window_start.gte.${encodedFrom}))`)
+  }
   if (to) filters.push(`window_start=lte.${encodeURIComponent(to)}`)
   if (acknowledged === true) filters.push(`status=eq.ACKED`)
   if (acknowledged === false) filters.push(`status=neq.ACKED`)
   return filters
+}
+
+function mapAlertRow(row: any): AlertListItem {
+  return {
+    alertId: row.alert_id ?? null,
+    alertType: row.alert_type ?? null,
+    severity: row.severity ?? null,
+    status: row.status ?? null,
+    resellerId: row.reseller_id ?? null,
+    enterpriseId: row.customer_id ?? null,
+    simId: row.sim_id ?? null,
+    iccid: row.sims?.iccid ?? null,
+    threshold: toNumberOrNull(row.threshold),
+    currentValue: toNumberOrNull(row.current_value),
+    windowStart: row.window_start ? new Date(row.window_start).toISOString() : null,
+    windowEnd: row.window_end ? new Date(row.window_end).toISOString() : null,
+    firstSeenAt: row.first_seen_at ? new Date(row.first_seen_at).toISOString() : null,
+    lastSeenAt: row.last_seen_at ? new Date(row.last_seen_at).toISOString() : null,
+    acknowledgedAt: row.acknowledged_at ? new Date(row.acknowledged_at).toISOString() : null,
+    acknowledgedBy: row.acknowledged_by ?? null,
+    suppressedUntil: row.suppressed_until ? new Date(row.suppressed_until).toISOString() : null,
+    message: row.metadata?.message ?? null,
+    metadata: row.metadata ?? null,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+  }
+}
+
+async function loadAlertById(supabase: SupabaseClient, alertIdValue: string) {
+  const rows = await supabase.select(
+    'alerts',
+    `select=alert_id,alert_type,severity,status,rule_id,reseller_id,customer_id,sim_id,threshold,current_value,window_start,window_end,first_seen_at,last_seen_at,acknowledged_at,acknowledged_by,suppressed_until,created_at,updated_at,metadata,sims(iccid)&alert_id=eq.${encodeURIComponent(alertIdValue)}&limit=1`
+  )
+  return Array.isArray(rows) ? rows[0] ?? null : null
+}
+
+function validateAlertScope(row: any, resellerId?: string | null, enterpriseId?: string | null): ErrorResult | null {
+  if (resellerId && String(row.reseller_id ?? '') !== resellerId) {
+    return toError(403, 'FORBIDDEN', 'alert does not belong to reseller scope.')
+  }
+  if (enterpriseId && String(row.customer_id ?? '') !== enterpriseId) {
+    return toError(403, 'FORBIDDEN', 'alert does not belong to enterprise scope.')
+  }
+  return null
 }
 
 export async function listAlerts(input: ListAlertsInput): Promise<OkResult<AlertListResult> | ErrorResult> {
@@ -175,31 +238,10 @@ export async function listAlerts(input: ListAlertsInput): Promise<OkResult<Alert
   const offsetValue = Number.isFinite(offset as number) ? Math.max(0, Number(offset)) : 0
   const { data, total } = await supabase.selectWithCount(
     'alerts',
-    `select=alert_id,alert_type,severity,status,rule_id,customer_id,sim_id,threshold,current_value,window_start,window_end,first_seen_at,last_seen_at,acknowledged_at,acknowledged_by,suppressed_until,created_at,updated_at,metadata,sims(iccid)&order=window_start.desc&limit=${encodeURIComponent(String(limitValue))}&offset=${encodeURIComponent(String(offsetValue))}${filterQs}`
+    `select=alert_id,alert_type,severity,status,rule_id,reseller_id,customer_id,sim_id,threshold,current_value,window_start,window_end,first_seen_at,last_seen_at,acknowledged_at,acknowledged_by,suppressed_until,created_at,updated_at,metadata,sims(iccid)&order=window_start.desc&limit=${encodeURIComponent(String(limitValue))}&offset=${encodeURIComponent(String(offsetValue))}${filterQs}`
   )
   const rows = Array.isArray(data) ? data as any[] : []
-  const items = rows.map((r) => ({
-    alertId: r.alert_id ?? null,
-    alertType: r.alert_type ?? null,
-    severity: r.severity ?? null,
-    status: r.status ?? null,
-    enterpriseId: r.customer_id ?? null,
-    simId: r.sim_id ?? null,
-    iccid: r.sims?.iccid ?? null,
-    threshold: toNumberOrNull(r.threshold),
-    currentValue: toNumberOrNull(r.current_value),
-    windowStart: r.window_start ? new Date(r.window_start).toISOString() : null,
-    windowEnd: r.window_end ? new Date(r.window_end).toISOString() : null,
-    firstSeenAt: r.first_seen_at ? new Date(r.first_seen_at).toISOString() : null,
-    lastSeenAt: r.last_seen_at ? new Date(r.last_seen_at).toISOString() : null,
-    acknowledgedAt: r.acknowledged_at ? new Date(r.acknowledged_at).toISOString() : null,
-    acknowledgedBy: r.acknowledged_by ?? null,
-    suppressedUntil: r.suppressed_until ? new Date(r.suppressed_until).toISOString() : null,
-    message: r.metadata?.message ?? null,
-    metadata: r.metadata ?? null,
-    createdAt: r.created_at ? new Date(r.created_at).toISOString() : null,
-    updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
-  }))
+  const items = rows.map(mapAlertRow)
   return {
     ok: true,
     value: {
@@ -209,15 +251,28 @@ export async function listAlerts(input: ListAlertsInput): Promise<OkResult<Alert
   }
 }
 
-export async function acknowledgeAlert(input: AcknowledgeAlertInput): Promise<OkResult<AlertListItem> | ErrorResult> {
-  const { supabase, alertId, resellerId, actorUserId } = input
+export async function getAlert(input: GetAlertInput): Promise<OkResult<AlertListItem> | ErrorResult> {
+  const { supabase, alertId, resellerId, enterpriseId } = input
   const alertIdValue = String(alertId || '').trim()
   if (!alertIdValue) return toError(400, 'BAD_REQUEST', 'alertId is required.')
-  const filters = [`alert_id=eq.${encodeURIComponent(alertIdValue)}`]
-  if (resellerId) filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
-  const rows = await supabase.select('alerts', `select=alert_id&${filters.join('&')}&limit=1`)
-  const existing = Array.isArray(rows) ? rows[0] : null
+  const row = await loadAlertById(supabase, alertIdValue)
+  if (!row) return toError(404, 'RESOURCE_NOT_FOUND', 'alert not found.')
+  const scopeError = validateAlertScope(row, resellerId, enterpriseId)
+  if (scopeError) return scopeError
+  return { ok: true, value: mapAlertRow(row) }
+}
+
+export async function acknowledgeAlert(input: AcknowledgeAlertInput): Promise<OkResult<AlertListItem> | ErrorResult> {
+  const { supabase, alertId, resellerId, enterpriseId, actorUserId } = input
+  const alertIdValue = String(alertId || '').trim()
+  if (!alertIdValue) return toError(400, 'BAD_REQUEST', 'alertId is required.')
+  const existing = await loadAlertById(supabase, alertIdValue)
   if (!existing) return toError(404, 'RESOURCE_NOT_FOUND', 'alert not found.')
+  const scopeError = validateAlertScope(existing, resellerId, enterpriseId)
+  if (scopeError) return scopeError
+  if (existing.status !== 'OPEN') {
+    return toError(409, 'CONFLICT', 'Only OPEN alerts can be acknowledged.')
+  }
   const nowIso = new Date().toISOString()
   await supabase.update('alerts', `alert_id=eq.${encodeURIComponent(alertIdValue)}`, {
     status: 'ACKED',
@@ -225,9 +280,33 @@ export async function acknowledgeAlert(input: AcknowledgeAlertInput): Promise<Ok
     acknowledged_by: actorUserId ?? null,
     updated_at: nowIso,
   }, { returning: 'minimal' })
+  await recordAlertInternalEvent({
+    supabase,
+    eventType: 'ALERT_ACKNOWLEDGED',
+    enterpriseId: existing.customer_id ?? null,
+    resellerId: existing.reseller_id ?? resellerId ?? null,
+    actorUserId: actorUserId ?? null,
+    payload: {
+      alertId: alertIdValue,
+      alertType: existing.alert_type ?? null,
+      previousStatus: existing.status ?? null,
+      status: 'ACKED',
+    },
+  })
+  await recordAlertAuditLog({
+    supabase,
+    action: 'ALERT_ACKNOWLEDGE',
+    targetType: 'ALERT',
+    targetId: alertIdValue,
+    tenantId: existing.customer_id ?? existing.reseller_id ?? resellerId ?? null,
+    actorUserId: actorUserId ?? null,
+    actorRole: null,
+    beforeData: { status: existing.status ?? null },
+    afterData: { status: 'ACKED', acknowledgedAt: nowIso },
+  })
   const updatedRows = await supabase.select(
     'alerts',
-    `select=alert_id,alert_type,severity,status,rule_id,customer_id,sim_id,threshold,current_value,window_start,window_end,first_seen_at,last_seen_at,acknowledged_at,acknowledged_by,suppressed_until,created_at,updated_at,metadata,sims(iccid)&alert_id=eq.${encodeURIComponent(alertIdValue)}&limit=1`
+    `select=alert_id,alert_type,severity,status,rule_id,reseller_id,customer_id,sim_id,threshold,current_value,window_start,window_end,first_seen_at,last_seen_at,acknowledged_at,acknowledged_by,suppressed_until,created_at,updated_at,metadata,sims(iccid)&alert_id=eq.${encodeURIComponent(alertIdValue)}&limit=1`
   )
   const updated = Array.isArray(updatedRows) ? updatedRows[0] : null
   if (!updated) return toError(404, 'RESOURCE_NOT_FOUND', 'alert not found.')
@@ -238,6 +317,7 @@ export async function acknowledgeAlert(input: AcknowledgeAlertInput): Promise<Ok
       alertType: updated.alert_type ?? null,
       severity: updated.severity ?? null,
       status: updated.status ?? null,
+      resellerId: updated.reseller_id ?? null,
       enterpriseId: updated.customer_id ?? null,
       simId: updated.sim_id ?? null,
       iccid: updated.sims?.iccid ?? null,
@@ -284,10 +364,11 @@ export async function createAlert(input: CreateAlertInput): Promise<OkResult<{ c
   const now = new Date()
   const nowIso = now.toISOString()
   const suppressWindow = Number.isFinite(suppressMinutes as number) ? Math.max(0, Number(suppressMinutes)) : 0
-  if (suppressWindow > 0 && simId) {
+  if (suppressWindow > 0) {
+    const simFilter = simId ? `sim_id=eq.${encodeURIComponent(simId)}` : 'sim_id=is.null'
     const lastRows = await supabase.select(
       'alerts',
-      `select=alert_id,last_seen_at,suppressed_until&reseller_id=eq.${encodeURIComponent(resellerId)}&sim_id=eq.${encodeURIComponent(simId)}&alert_type=eq.${encodeURIComponent(normalizedType)}&order=last_seen_at.desc&limit=1`
+      `select=alert_id,last_seen_at,suppressed_until&reseller_id=eq.${encodeURIComponent(resellerId)}&${simFilter}&alert_type=eq.${encodeURIComponent(normalizedType)}&order=last_seen_at.desc&limit=1`
     )
     const last = Array.isArray(lastRows) ? lastRows[0] : null
     if (last) {
@@ -328,6 +409,39 @@ export async function createAlert(input: CreateAlertInput): Promise<OkResult<{ c
       metadata: metadata ?? null,
       delivery_channels: deliveryChannels ?? null,
     }, { returning: 'minimal' })
+    await recordAlertInternalEvent({
+      supabase,
+      eventType: 'ALERT_MERGED',
+      enterpriseId: customerId ?? null,
+      resellerId,
+      payload: {
+        alertId: existing.alert_id,
+        alertType: normalizedType,
+        severity,
+        customerId: customerId ?? null,
+        simId: simId ?? null,
+        threshold: threshold ?? null,
+        currentValue: currentValue ?? null,
+        windowStart: windowStartIso,
+        windowEnd: windowEndIso ?? null,
+      },
+    })
+    await recordAlertAuditLog({
+      supabase,
+      action: 'ALERT_MERGE',
+      targetType: 'ALERT',
+      targetId: existing.alert_id ?? null,
+      tenantId: customerId ?? resellerId,
+      actorRole: 'SYSTEM',
+      afterData: {
+        alertType: normalizedType,
+        severity,
+        threshold: threshold ?? null,
+        currentValue: currentValue ?? null,
+        windowStart: windowStartIso,
+        windowEnd: windowEndIso ?? null,
+      },
+    })
     return { ok: true, value: { created: false, alertId: existing.alert_id ?? null } }
   }
   const rows = await supabase.insert('alerts', {
@@ -353,20 +467,47 @@ export async function createAlert(input: CreateAlertInput): Promise<OkResult<{ c
   const row = Array.isArray(rows) ? rows[0] : null
   if (row?.alert_id) {
     try {
-      await emitEvent({
+      const eventResult = await emitEvent({
         eventType: 'ALERT_TRIGGERED',
-        tenantId: resellerId,
+        enterpriseId: customerId ?? null,
+        resellerId,
+        dispatchWebhooks: shouldDispatchAlertWebhook(deliveryChannels),
         payload: {
           alertId: row.alert_id,
           alertType: normalizedType,
           severity,
-          resellerId,
           customerId: customerId ?? null,
           simId: simId ?? null,
           threshold: threshold ?? null,
           currentValue: currentValue ?? null,
           windowStart: windowStartIso,
           windowEnd: windowEndIso ?? null,
+        },
+      })
+      await recordAlertDeliveries({
+        supabase,
+        alertId: row.alert_id,
+        channels: deliveryChannels,
+        eventId: eventResult?.eventId ?? null,
+        webhookDeliveryIds: eventResult?.webhookDeliveryIds ?? [],
+      })
+      await recordAlertAuditLog({
+        supabase,
+        action: 'ALERT_CREATE',
+        targetType: 'ALERT',
+        targetId: row.alert_id,
+        tenantId: customerId ?? resellerId,
+        actorRole: 'SYSTEM',
+        afterData: {
+          alertType: normalizedType,
+          severity,
+          customerId: customerId ?? null,
+          simId: simId ?? null,
+          threshold: threshold ?? null,
+          currentValue: currentValue ?? null,
+          windowStart: windowStartIso,
+          windowEnd: windowEndIso ?? null,
+          deliveryChannels: deliveryChannels ?? null,
         },
       })
     } catch {

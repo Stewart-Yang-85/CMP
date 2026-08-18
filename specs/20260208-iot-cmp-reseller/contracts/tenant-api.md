@@ -6,6 +6,25 @@
 
 ---
 
+## 0. 字段约定：`resellerId`（FR-058）
+
+与 OpenAPI `iot-cmp-api.yaml` 对齐：
+
+| 名称 | 语义 |
+|------|------|
+| `tenantId`（路径参数名：`/v1/resellers/{tenantId}/…` 等） | 与 **`resellerId`（§0 语义）** 相同：RESELLER 的 **`tenants.tenant_id`**（**FR-058**）；兼容解析 **`resellers.id`**。 |
+| `resellerId`（查询参数、JSON 字段、JWT claim `resellerId`） | 代理商 **RESELLER** 在表 **`tenants`** 中的 **`tenant_id`**（对外公网标识，与权限作用域一致）。 |
+| `resellerRecordId`（若响应中出现） | 域表 **`resellers.id`**（便于与库内行或对账）；新集成对外优先使用 `resellerId`。 |
+| `tenantId`（若与代理商资源同时出现） | 与上述 `resellerId` 同值时的兼容字段，含义仍为 RESELLER 的 `tenant_id`。 |
+
+**兼容**：若调用方误传 `resellers.id`，服务端在已启用兼容的部署上应解析为与 `tenants.tenant_id` **同一代理商主体**（与 OpenAPI `ResellerTenantIdPath` / 各 schema 描述一致）。
+
+**兼容截止**：自 **2027-03-31** 起，计划在后续版本中**停止**在路径与请求体中将裸 `resellers.id` 视为代理商标识；新集成应只使用 **`tenants.tenant_id`**。对外公告与移除清单见 [security-debt.md — SD-07](../security-debt.md)。
+
+**下文 JSON 示例** 中形如 `"resellerId": "uuid"` 的占位符，均指 **`tenants.tenant_id`**，除非另行说明。
+
+---
+
 ## 1. 代理商管理
 
 ### 1.1 创建代理商
@@ -35,6 +54,8 @@ POST /v1/resellers
 ```json
 {
   "resellerId": "uuid",
+  "resellerRecordId": "uuid",
+  "tenantId": "uuid",
   "name": "string",
   "currency": "CNY",
   "status": "ACTIVE",
@@ -42,6 +63,8 @@ POST /v1/resellers
   "createdAt": "2026-02-08T10:00:00Z"
 }
 ```
+
+- `resellerId` / `tenantId`：**RESELLER** 的 **`tenants.tenant_id`**（§0 / **FR-058**）。`resellerRecordId`：`resellers.id`（可选返回，以对齐 OpenAPI）。
 
 **Error Responses**:
 | 状态码 | code | 说明 |
@@ -75,11 +98,15 @@ GET /v1/resellers?page={page}&pageSize={pageSize}&status={status}
 }
 ```
 
+- 列表项中的 `resellerId`：**RESELLER `tenants.tenant_id`**（§0 / **FR-058**）；若条目含 `resellerRecordId` / `tenantId` 含义同 §0。
+
 ### 1.3 查询代理商详情
 
 ```
-GET /v1/resellers/{resellerId}
+GET /v1/resellers/{tenantId}
 ```
+
+**路径参数**: `tenantId` — §0（**FR-058**）；值为 RESELLER **`tenants.tenant_id`**（兼容场景下可与 `resellers.id` 解析为同一主体）。
 
 **权限**: 系统管理员 | 本代理商管理员
 
@@ -90,8 +117,10 @@ GET /v1/resellers/{resellerId}
 ### 1.4 更新代理商
 
 ```
-PATCH /v1/resellers/{resellerId}
+PATCH /v1/resellers/{tenantId}
 ```
+
+**路径参数**: `tenantId` — §0（**FR-058**）。
 
 **权限**: 系统管理员
 
@@ -117,17 +146,22 @@ PATCH /v1/resellers/{resellerId}
 ```json
 {
   "resellerId": "uuid",
+  "resellerRecordId": "uuid",
   "name": "string",
   "status": "ACTIVE",
   "updatedAt": "2026-02-08T10:00:00Z"
 }
 ```
 
+- `resellerId`：`tenants.tenant_id`（**FR-058**）；`resellerRecordId`：`resellers.id`（可选）。
+
 ### 1.5 变更代理商状态
 
 ```
-POST /v1/resellers/{resellerId}:change-status
+POST /v1/resellers/{tenantId}:change-status
 ```
+
+**路径参数**: `tenantId` — §0（**FR-058**）。
 
 **权限**: 系统管理员
 
@@ -150,11 +184,14 @@ POST /v1/resellers/{resellerId}:change-status
 ```json
 {
   "resellerId": "uuid",
+  "resellerRecordId": "uuid",
   "status": "SUSPENDED",
   "previousStatus": "ACTIVE",
   "changedAt": "2026-02-08T10:00:00Z"
 }
 ```
+
+- `resellerId`：`tenants.tenant_id`（**FR-058**）；`resellerRecordId` 可选。
 
 **备注**:
 - 不支持删除代理商，以状态变更代替
@@ -292,24 +329,29 @@ POST /v1/enterprises
 ```json
 {
   "name": "string (required, 2-200)",
-  "resellerId": "uuid (required)",
+  "resellerId": "uuid (optional for reseller_admin; required for platform_admin — see below)",
   "autoSuspendEnabled": "boolean (optional, default false)",
   "contactEmail": "string (required, email)",
   "contactPhone": "string (optional)"
 }
 ```
 
+- `resellerId`：**平台管理员**代建企业时需传入目标代理商的 **RESELLER `tenants.tenant_id`**（§0 / **FR-058**）。**代理商管理员**作用域来自 JWT 的 `resellerId`，请求体中可省略或留空；若传入则须与本代理商解析一致。**兼容**：短时内仍接受旧字段名 `tenantId`（与 `resellerId` 同义）。
+
 **Response 201**:
 ```json
 {
   "enterpriseId": "uuid",
   "name": "string",
+  "tenantId": "uuid",
   "resellerId": "uuid",
   "status": "ACTIVE",
   "autoSuspendEnabled": false,
   "createdAt": "2026-02-08T10:00:00Z"
 }
 ```
+
+- `tenantId` / `resellerId`：所属 RESELLER 的 **`tenants.tenant_id`**（**FR-058**），同值；新集成优先读 `resellerId`。
 
 **Error Responses**:
 | 状态码 | code | 说明 |
@@ -326,6 +368,14 @@ GET /v1/enterprises?resellerId={resellerId}&status={status}&page={page}&pageSize
 
 **权限**: 系统管理员 | 代理商角色（仅可见授权范围内企业）
 
+**Query Parameters**:
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| resellerId | uuid | 否 | 平台管理员可按 **RESELLER `tenants.tenant_id`**（§0 / **FR-058**）筛选；**兼容**查询参数 `tenantId`。代理商侧通常由 JWT 作用域约束 |
+| status | string | 否 | ACTIVE / INACTIVE / SUSPENDED |
+| page | integer | 否 | 默认 1 |
+| pageSize | integer | 否 | 默认 20 |
+
 **数据范围隔离**:
 - 系统管理员：全部企业
 - 代理商管理员：本代理商下全部企业
@@ -339,6 +389,8 @@ GET /v1/enterprises/{enterpriseId}
 ```
 
 **权限**: 系统管理员 | 代理商角色（授权范围） | 本企业角色
+
+**Response 200**（节选）：含 `tenantId` 与 `resellerId`（同为父级 RESELLER `tenants.tenant_id`，**FR-058**）。
 
 ### 2.4 变更企业状态
 
@@ -427,13 +479,16 @@ GET /v1/enterprises/{enterpriseId}/departments
 POST /v1/resellers/{resellerId}/users
 ```
 
+**路径参数**: `resellerId` — §0（**FR-058**，与旧参数名 `tenantId` 同义）。
+
 **权限**: 代理商管理员
 
 **Request Body**:
 ```json
 {
   "email": "string (required, email, unique)",
-  "name": "string (required)",
+  "name": "string (required; OpenAPI 字段名为 displayName，二者等价)",
+  "password": "string (required, 8–256 字符; 写入 users.password_hash，scrypt，响应中永不返回)",
   "role": "RESELLER_ADMIN | RESELLER_SALES_DIRECTOR | RESELLER_SALES | RESELLER_FINANCE",
   "assignedEnterpriseIds": ["uuid"]
 }
@@ -455,9 +510,175 @@ POST /v1/enterprises/{enterpriseId}/users
 ```json
 {
   "email": "string (required, email, unique)",
-  "name": "string (required)",
+  "name": "string (required; OpenAPI 字段名为 displayName，二者等价)",
+  "password": "string (required, 8–256 字符; 写入 users.password_hash，scrypt，响应中永不返回)",
   "role": "CUSTOMER_ADMIN | CUSTOMER_OPS",
   "departmentId": "uuid (OPS 角色必填)"
+}
+```
+
+### 4.3 查询企业用户部门分配
+
+```
+GET /v1/enterprises/{enterpriseId}/users/{userId}/departments
+```
+
+**Query**: `page`（可选，默认 1）、`pageSize`（可选，默认 20）；服务端将 `pageSize` 限制在合理上限内。
+
+**权限**: 企业管理员 | 代理商管理员 | 系统管理员
+
+**行为说明**:
+- 当目标用户为 `CUSTOMER_ADMIN`：返回该企业下全部部门。
+- 当目标用户为 `CUSTOMER_OPS`：返回该用户被分配的部门集合（来自 `enterprise_user_departments`）。
+
+**Response 200**:
+```json
+{
+  "userId": "uuid",
+  "enterpriseId": "uuid",
+  "departments": [
+    {
+      "departmentId": "uuid",
+      "enterpriseId": "uuid",
+      "name": "string",
+      "createdAt": "2026-02-08T10:00:00Z",
+      "updatedAt": "2026-02-08T10:00:00Z"
+    }
+  ],
+  "total": 0,
+  "page": 1,
+  "pageSize": 20
+}
+```
+
+`total` 为符合可见性规则的全部记录数（分页前）；`departments` 为当前页条目。
+
+### 4.4 分配（追加）企业用户部门
+
+```
+POST /v1/enterprises/{enterpriseId}/users/{userId}/assign-departments
+```
+
+**权限**: 企业管理员 | 代理商管理员 | 系统管理员
+
+**Request Body**:
+```json
+{
+  "mode": "replace | append (optional, default replace)",
+  "assignedDepartmentIds": ["uuid"]
+}
+```
+
+**行为说明**:
+- `mode=replace`（默认）：使用本次列表整体覆盖（适合前端勾选全量提交）。
+- `mode=append`：与现有分配集合合并并去重（适合增量追加）。
+- 仅允许分配当前 `enterpriseId` 下的部门；跨企业部门返回 `403 FORBIDDEN`。
+
+**Response 200**:
+```json
+{
+  "userId": "uuid",
+  "enterpriseId": "uuid",
+  "assignedDepartmentIds": ["uuid", "uuid"]
+}
+```
+
+**清空分配**:
+```
+DELETE /v1/enterprises/{enterpriseId}/users/{userId}/assign-departments
+```
+
+**Response 200**:
+```json
+{
+  "userId": "uuid",
+  "enterpriseId": "uuid",
+  "assignedDepartmentIds": []
+}
+```
+
+### 4.5 查询代理商用户企业分配
+
+```
+GET /v1/resellers/{resellerId}/users/{userId}/enterprises
+```
+
+**路径参数**: `resellerId` — §0（**FR-058**，与旧参数名 `tenantId` 同义）。
+
+**Query**: `page`（可选，默认 1）、`pageSize`（可选，默认 20）；服务端将 `pageSize` 限制在合理上限内。
+
+**权限**: 代理商管理员 | 系统管理员
+
+**行为说明**:
+- 当目标用户为 `RESELLER_ADMIN`：返回该代理商下全部企业。
+- 当目标用户为 `RESELLER_SALES_DIRECTOR | RESELLER_SALES | RESELLER_FINANCE`：返回该用户已分配企业集合（来自 `reseller_enterprise_assignments`）。
+
+**Response 200**:
+```json
+{
+  "userId": "uuid",
+  "resellerId": "uuid",
+  "enterprises": [
+    {
+      "enterpriseId": "uuid",
+      "name": "string",
+      "enterprise_status": "ACTIVE",
+      "auto_suspend_enabled": false,
+      "created_at": "2026-02-08T10:00:00Z",
+      "updated_at": "2026-02-08T10:00:00Z"
+    }
+  ],
+  "total": 0,
+  "page": 1,
+  "pageSize": 20
+}
+```
+
+`total` 为符合可见性规则的全部记录数（分页前）；`enterprises` 为当前页条目。
+
+### 4.6 分配（追加）代理商用户企业
+
+```
+POST /v1/resellers/{resellerId}/users/{userId}/assign-enterprises
+```
+
+**路径参数**: `resellerId` — §0（**FR-058**）。
+
+**权限**: 代理商管理员 | 系统管理员
+
+**Request Body**:
+```json
+{
+  "mode": "replace | append (optional, default replace)",
+  "assignedEnterpriseIds": ["uuid"]
+}
+```
+
+**行为说明**:
+- `mode=replace`（默认）：使用本次列表整体覆盖（适合前端勾选全量提交）。
+- `mode=append`：与现有分配集合合并并去重（适合增量追加）。
+- 仅允许分配当前 `resellerId` 下企业；越权企业返回 `403 FORBIDDEN`。
+
+**Response 200**:
+```json
+{
+  "userId": "uuid",
+  "resellerId": "uuid",
+  "assignedEnterpriseIds": ["uuid", "uuid"]
+}
+```
+
+**清空分配**:
+```
+DELETE /v1/resellers/{resellerId}/users/{userId}/assign-enterprises
+```
+
+**Response 200**:
+```json
+{
+  "userId": "uuid",
+  "resellerId": "uuid",
+  "assignedEnterpriseIds": []
 }
 ```
 
@@ -543,7 +764,37 @@ POST /v1/auth/login
 }
 ```
 
-### 6.2 刷新 Token
+- `user.resellerId`：当 `roleScope` 为 `reseller` 时，为 **RESELLER `tenants.tenant_id`**（§0 / **FR-058**）；否则为 `null`。
+
+### 6.2 修改自己的密码
+
+```
+POST /v1/auth/change-password
+```
+
+**Header**: `Authorization: Bearer <accessToken>`（须为 **6.1** 返回的、含 **UUID `userId`** 的交互式用户 JWT）。
+
+**Request Body**:
+```json
+{
+  "currentPassword": "string (required)",
+  "newPassword": "string (required, 8–256 字符，须与 currentPassword 不同)"
+}
+```
+
+**说明**:
+- 仅更新 **当前 token 对应** 的 `users` 行（`password_hash`，scrypt）。
+- **不可用**：M2M（`customer_m2m`）、无 UUID `userId` 的会话（如仅 admin API key）。
+- **Response 200**：`{ "ok": true }`；当前 access token 仍有效，客户端可自行决定是否在改密后重新登录。
+
+### 6.3 忘记密码 / 自助重置（邮箱链接）
+
+与 **6.2** 分离：用户**无需登录**、**无需**旧密码。Portal 落地页配合邮件链接。
+
+实现：迁移 `password_reset_tokens`；`POST /v1/auth/forgot-password`、`POST /v1/auth/reset-password`（见 OpenAPI）。
+发信：`MAIL_PROVIDER=auto|http|smtp|log`（默认 auto）。HTTP：`MAIL_HTTP_URL` + `MAIL_HTTP_FROM`/`MAIL_FROM`（`MAIL_HTTP_FORMAT=simple|resend|sendgrid`，Bearer/`MAIL_HTTP_API_KEY`）；SMTP：`SMTP_*`。都未配置时默认 `MAIL_DEV_LOG` 写服务端日志，非生产响应可含 `devResetUrl`。
+
+### 6.4 刷新 Token
 
 ```
 POST /v1/auth/refresh
@@ -560,6 +811,8 @@ GET /v1/audit-logs?resellerId={resellerId}&actor={actor}&action={action}&from={f
 ```
 
 **权限**: 系统管理员 | 代理商管理员（本代理商范围）
+
+**Query Parameters**: `resellerId` — 按 **RESELLER `tenants.tenant_id`**（§0 / **FR-058**）过滤（平台侧）；代理商管理员范围通常由 JWT 约束。
 
 **Response 200**:
 ```json
@@ -608,7 +861,7 @@ GET /v1/audit-logs?resellerId={resellerId}&actor={actor}&action={action}&from={f
 
 ### 8.3 认证方式
 
-- Bearer Token (JWT HS256)：`Authorization: Bearer <token>`
+- Bearer Token (JWT HS256)：`Authorization: Bearer <token>`（JWT 中的 `resellerId` 语义见 §0 **FR-058**）
 - API Key：`X-API-Key: <key>`（M2M 集成）
 
 ### 8.4 Rate Limiting

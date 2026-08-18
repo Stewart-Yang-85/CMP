@@ -7,7 +7,7 @@ describe('Phase 21: SIM Remark Field', () => {
   it('T111: migration file exists and adds remark column to sims table', async () => {
     const fs = await import('node:fs/promises')
     const content = await fs.readFile(
-      'supabase/migrations/20260324100005_sim_remark.sql',
+      'supabase/migrations/20260324100006_sim_remark.sql',
       'utf-8'
     )
     expect(content).toContain('ALTER TABLE sims ADD COLUMN IF NOT EXISTS remark TEXT')
@@ -77,7 +77,7 @@ describe('Phase 21b: eSIM Profile & SM-DP+ System routes', () => {
   it('T173: eSIM state history migration exists', async () => {
     const fs = await import('node:fs/promises')
     const content = await fs.readFile(
-      'supabase/migrations/20260324100006_esim_profiles_smdp.sql',
+      'supabase/migrations/20260324100007_esim_profiles_smdp.sql',
       'utf-8'
     )
     expect(content).toContain('esim_state_history')
@@ -91,7 +91,7 @@ describe('Phase 21b: eSIM Profile & SM-DP+ System routes', () => {
   it('T173: eSIM state history records before/after status', async () => {
     const fs = await import('node:fs/promises')
     const content = await fs.readFile(
-      'supabase/migrations/20260324100006_esim_profiles_smdp.sql',
+      'supabase/migrations/20260324100007_esim_profiles_smdp.sql',
       'utf-8'
     )
     expect(content).toContain('before_status')

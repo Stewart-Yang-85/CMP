@@ -62,6 +62,42 @@ npm.cmd start
 npm.cmd run smoke
 ```
 
+## Rating 场景矩阵验证（Phase 46）
+
+用于验证 `usage_daily_summary` → `rating_results` → `usage_package_daily_summary` 的 Rating 场景矩阵。写入/清理/rollup 步骤需要 `SUPABASE_SERVICE_ROLE_KEY`。
+
+推荐顺序：
+
+```powershell
+npm run build
+node tools/seed_rating_scenarios.js --period 2026-06 --dry-run
+node tools/seed_rating_scenarios.js --period 2026-06 --apply
+node tools/run_rating_scenario_rollup.js --period 2026-06 --apply --json
+node tools/verify_rating_scenarios.js --period 2026-06 --rating-results --usage-daily --package-summary
+node tools/verify_rating_scenarios.js --period 2026-06 --group baseline --alert-candidates
+```
+
+无 Supabase 写权限时，至少可以运行本地 schema/CLI 验收：
+
+```powershell
+npx vitest run tests/ratingScenarios.test.ts
+node tools/verify_rating_scenarios.js --period 2026-06 --json
+node tools/seed_rating_scenarios.js --period 2026-06 --list --json
+```
+
+清理或重置测试场景：
+
+```powershell
+node tools/seed_rating_scenarios.js --period 2026-06 --group fallback --cleanup --json
+node tools/seed_rating_scenarios.js --period 2026-06 --group fallback --cleanup --apply
+```
+
+API spot check（服务需按 Fastify/TS 路径启动：`npm run build` 后 `npm run start:ts`）：
+
+```powershell
+curl.exe -X GET "http://localhost:13080/v1/sims/<ICCID>/usage?startDate=2026-06-01&endDate=2026-06-30&page=1&pageSize=20" -H "accept: application/json" -H "X-API-Key: cmp-admin-key"
+```
+
 ## 端到端示例脚本与环境变量
 
 - 脚本：
@@ -72,13 +108,13 @@ npm.cmd run smoke
   - `ADMIN_API_KEY`：管理端接口与导出（审计/事件/任务）
   - `SUPABASE_SERVICE_ROLE_KEY`：触发管理端任务（评估测试到期、WX每日用量同步）
   - `CMP_WEBHOOK_KEY`、`SMOKE_SIM_ICCID`：CMP webhook（SIM状态变更）
-  - `WXZHONGGENG_WEBHOOK_KEY`、`SMOKE_SIM_ICCID`：WX webhook（供应商通知）
+  - `SMOKE_SUPPLIER_ID`、`SMOKE_OPERATOR_ID`、`SMOKE_WEBHOOK_KEY`、`SMOKE_SIM_ICCID`：入站供应商 Webhook（`…/webhooks/wxzhonggeng/*`，Header **`webhookKey`**，Fastify）
   
 - 最小变量集合（按脚本/功能拆分）：
   - 仅运行 `e2e_demo.js` 的认证/查询/审计CSV/事件CSV：`AUTH_CLIENT_ID`、`AUTH_CLIENT_SECRET`、`ADMIN_API_KEY`
   - 在上面基础上触发管理端任务：额外需要 `SUPABASE_SERVICE_ROLE_KEY`
   - 在上面基础上调用 CMP Webhook：额外需要 `CMP_WEBHOOK_KEY`、`SMOKE_SIM_ICCID`
-  - 仅运行 `e2e_demo_wx.js`（WX 供应商 webhook 三类）：`WXZHONGGENG_WEBHOOK_KEY`、`SMOKE_SIM_ICCID`
+  - 仅运行 `e2e_demo_wx.js`（WX 入站 webhook + 订阅演示）：先 `npm run build`，再设 `SMOKE_SUPPLIER_ID`、`SMOKE_OPERATOR_ID`、`SMOKE_WEBHOOK_KEY`、`SMOKE_SIM_ICCID`
 
 ## 指标暴露
 
@@ -117,6 +153,12 @@ npm.cmd run create-client -- --clientId demo-client --enterpriseId <tenant_uuid>
 - `GET /v1/docs`
 - `POST /v1/auth/token`
 
+Billing / Rating 当前边界：
+
+- Billing API 的账单文件产物当前只提供 CSV，包括 L1/L2 汇总与 L3 SIM 级明细；不实现 PDF 账单。
+- Rating Rollup 的自动化验收基于 `usage_daily_summary` 归一化输入。真实上游 CDR 文件字段不会假设统一格式，后续应按 `(supplierId, operatorId)` 选择 CDR adapter，再归一化写入 `usage_daily_summary`。
+- 大规模性能压测后置，当前本地验收以 Phase 46 场景矩阵和 API 功能测试为准。
+
 同时提供不带前缀的鉴权路径：`POST /auth/token`（与 OpenAPI 对齐）。
 
 同时提供不带前缀的路径：`/bills`、`/bills/{billId}` 等。
@@ -143,9 +185,9 @@ npm.cmd start
 Invoke-RestMethod "http://localhost:3000/v1/bills?period=2026-02" -Headers @{ Authorization = "Bearer demo" } | ConvertTo-Json -Depth 5
 ```
 
-## 订阅与 commercial_terms 规范
+## 订阅与 Commercial Terms 规范
 
-- 字段位置：`package_versions.commercial_terms`（JSON）。用于控制测试期与订阅承诺期。
+- 字段位置：Package 通过 `commercialTermsId` 绑定 `commercial_terms_modules` 已发布快照；不再使用旧的产品包版本模型或旧版本字段作为契约层模型。用于控制测试期与订阅承诺期。
 - 键名规范（统一使用 camelCase）：
   - `testPeriodDays`：测试期天数
   - `testQuotaKb`：测试期配额（KB）
@@ -166,8 +208,8 @@ Invoke-RestMethod "http://localhost:3000/v1/bills?period=2026-02" -Headers @{ Au
 ```
 
 - 生效逻辑（摘要）：
-  - 订阅创建：`POST /v1/subscriptions`，请求体包含 `iccid`、`packageVersionId`、可选 `kind`（默认 `MAIN`）、`effectiveAt`（不传则次月 1 日 00:00:00Z）。服务读取目标套餐版本的 `commercial_terms`，计算并返回 `commitmentEndAt`。
-  - 套餐切换：`POST /v1/subscriptions:switch`，原 `MAIN` 订阅标记为下月到期，新订阅在下月 1 日 00:00:00Z 生效，并依据新套餐版本的 `commercial_terms` 计算 `commitmentEndAt`。
+  - 订阅创建：`POST /v1/subscriptions`，请求体包含 `iccid`、`packageId`、可选 `kind`（默认 `MAIN`）、`effectiveAt`（不传则次月 1 日 00:00:00Z）。服务读取目标 Package 绑定的 Commercial Terms 快照，计算并返回 `commitmentEndAt`。
+  - 套餐切换：`POST /v1/subscriptions:switch`，原 `MAIN` 订阅标记为下月到期，新订阅在下月 1 日 00:00:00Z 生效，并依据新 Package 绑定的 Commercial Terms 快照计算 `commitmentEndAt`。
   - 取消订阅：`POST /v1/subscriptions/{subscriptionId}:cancel`，`immediate=true` 立即取消并设置 `expiresAt=now`；否则设置为当月末（UTC）到期。
   - `commitmentEndAt` 计算规则：优先使用 `commitmentPeriodMonths`，按 UTC 自 `effectiveAt` 起加整月；若未设置月则使用 `commitmentPeriodDays` 按天数计算；均未设置则返回 `null`。
 
@@ -176,7 +218,7 @@ Invoke-RestMethod "http://localhost:3000/v1/bills?period=2026-02" -Headers @{ Au
 ```powershell
 $body = @{
   iccid = "<SIM_ICCID>"
-  packageVersionId = "<PACKAGE_VERSION_UUID>"
+  packageId = "<PACKAGE_UUID>"
   kind = "MAIN"
   effectiveAt = "2026-02-01T00:00:00Z"
 } | ConvertTo-Json

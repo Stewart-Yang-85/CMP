@@ -48,7 +48,7 @@
 | `role_scope` | platform, reseller, customer |
 | `sim_form_factor` | consumer_removable, industrial_removable, consumer_embedded, industrial_embedded |
 | `sim_status` | INVENTORY, TEST_READY, ACTIVATED, DEACTIVATED, RETIRED |
-| `subscription_state` | PENDING, ACTIVE, CANCELLED, EXPIRED |
+| `subscription_state` | PENDING, **PROVISIONING**, ACTIVE, CANCELLED, EXPIRED |
 | `job_status` | QUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED |
 | `bill_status` | GENERATED, PUBLISHED, PAID, OVERDUE, WRITTEN_OFF |
 | `service_type` | DATA, VOICE, SMS |
@@ -80,11 +80,12 @@
 | 需求 | 现状 | 差距 |
 |------|------|------|
 | 5 状态生命周期 | ✅ `sim_status` ENUM 完整 | 无 |
+| 全方向过渡子状态 | ⚠️ DB 仅 activating 三值 | [V1.1] 扩展 `lifecycle_sub_status` 枚举；实现分叉 B（见 spec US2） |
 | SIM 清单字段 | ⚠️ 基础字段存在 | 需迁移 `sims` → `sim_cards`；补充：多 IMSI（imsi_secondary_1/2/3）、SIM 形态（4 种工业级 ENUM）、IMEI Lock、四方归属链（supplier→operator→reseller→customer）（CMP.xlsx Q4） |
-| 状态机约束 | ⚠️ 端点存在 | 需验证：禁止 ACTIVATED→RETIRED、承诺期门槛校验 |
-| sim_state_history | ✅ Type 2 SCD 表存在 | 无 |
+| 状态机约束 | ⚠️ 端点存在 | 实现：禁止 ACTIVATED→RETIRED、承诺期、`LIFECYCLE_IN_PROGRESS`、Job 不可 cancel |
+| sim_state_history | ✅ Type 2 SCD 表存在 | 仅稳态变更写入 |
 | 批量导入 | ⚠️ `jobs` 表存在 | 需验证 10 万条上限、幂等（batchId/fileHash） |
-| 上游状态同步 | ⚠️ vendor adapter 存在 | 需完善上游通知接收和双向同步 |
+| 上游状态同步 | ⚠️ vendor adapter 存在 | per-supplier pending 策略；Job SUCCEEDED=确认+改库；`JOB_FINISHED` Webhook |
 | 企业 SUSPENDED 手工批量停机 | ⚠️ 逻辑需验证 | 需确保异步批量停机流程完整 |
 
 ### 2.3 产品包与资费（User Story 3）

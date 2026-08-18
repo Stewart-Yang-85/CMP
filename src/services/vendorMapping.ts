@@ -41,6 +41,45 @@ function normalizePageSize(value: unknown, fallback: number) {
   return Math.min(200, Math.floor(num))
 }
 
+async function loadCarrierSupplierForPackage(supabase: SupabaseClient, packageId: string) {
+  const pkgRows = await supabase.select(
+    'packages',
+    `select=package_id,carrier_service_id&package_id=eq.${encodeURIComponent(packageId)}&limit=1`
+  )
+  const pkg = Array.isArray(pkgRows) ? (pkgRows[0] as Record<string, unknown>) : null
+  const carrierServiceId = pkg?.carrier_service_id ? String(pkg.carrier_service_id).trim() : ''
+  if (!carrierServiceId) return null
+  const csRows = await supabase.select(
+    'carrier_service_modules',
+    `select=supplier_id,operator_id&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}&limit=1`
+  )
+  const cs = Array.isArray(csRows) ? (csRows[0] as Record<string, unknown>) : null
+  if (!cs?.supplier_id) return null
+  return {
+    supplierId: String(cs.supplier_id),
+    operatorId: cs.operator_id ? String(cs.operator_id) : null,
+  }
+}
+
+async function assertMappingSupplierMatchesPackage(
+  supabase: SupabaseClient,
+  packageId: string,
+  supplierId: string
+): Promise<ServiceResult<null>> {
+  const ctx = await loadCarrierSupplierForPackage(supabase, packageId)
+  if (!ctx) {
+    return toError(404, 'NOT_FOUND', 'Package or carrier service not found.')
+  }
+  if (String(supplierId) !== ctx.supplierId) {
+    return toError(
+      400,
+      'BAD_REQUEST',
+      'supplierId must match the Package Carrier Service supplier (derived from carrier_service_modules).'
+    )
+  }
+  return { ok: true, value: null }
+}
+
 export async function createVendorProductMapping({
   supabase,
   payload,
@@ -70,10 +109,19 @@ export async function createVendorProductMapping({
   if (!externalProductId) {
     return toError(400, 'BAD_REQUEST', 'externalProductId is required.')
   }
+  const supplierCheck = await assertMappingSupplierMatchesPackage(supabase, packageVersionId, supplierId)
+  if (!supplierCheck.ok) return supplierCheck
+  const existingRows = await supabase.select(
+    'vendor_product_mappings',
+    `select=mapping_id&package_id=eq.${encodeURIComponent(packageVersionId)}&limit=1`
+  )
+  if (Array.isArray(existingRows) && existingRows.length > 0) {
+    return toError(409, 'MAPPING_ALREADY_EXISTS', 'Vendor product mapping already exists for this package.')
+  }
   const rows = await supabase.insert(
     'vendor_product_mappings',
     {
-      package_version_id: packageVersionId,
+      package_id: packageVersionId,
       supplier_id: supplierId,
       external_product_id: externalProductId,
       provisioning_parameters: payload?.provisioningParameters ?? null,
@@ -93,7 +141,7 @@ export async function createVendorProductMapping({
     source_ip: audit?.sourceIp ?? null,
     after_data: {
       mappingId: mapping.mapping_id,
-      packageVersionId: mapping.package_version_id,
+      packageVersionId: mapping.package_id,
       supplierId: mapping.supplier_id,
       externalProductId: mapping.external_product_id,
       provisioningParameters: mapping.provisioning_parameters ?? null,
@@ -103,7 +151,7 @@ export async function createVendorProductMapping({
     ok: true,
     value: {
       mappingId: mapping.mapping_id,
-      packageVersionId: mapping.package_version_id,
+      packageVersionId: mapping.package_id,
       supplierId: mapping.supplier_id,
       externalProductId: mapping.external_product_id,
       provisioningParameters: mapping.provisioning_parameters ?? null,
@@ -128,11 +176,11 @@ export async function listVendorProductMappings({
   if (!supabase) return toError(500, 'INTERNAL_ERROR', 'supabase client is required.')
   const filters: string[] = []
   if (supplierId) filters.push(`supplier_id=eq.${encodeURIComponent(String(supplierId))}`)
-  if (packageVersionId) filters.push(`package_version_id=eq.${encodeURIComponent(String(packageVersionId))}`)
+  if (packageVersionId) filters.push(`package_id=eq.${encodeURIComponent(String(packageVersionId))}`)
   const filterQs = filters.length ? `&${filters.join('&')}` : ''
   const rows = await supabase.select(
     'vendor_product_mappings',
-    `select=mapping_id,package_version_id,supplier_id,external_product_id,provisioning_parameters,created_at&order=created_at.desc${filterQs}`
+    `select=mapping_id,package_id,supplier_id,external_product_id,provisioning_parameters,created_at&order=created_at.desc${filterQs}`
   )
   let items = Array.isArray(rows) ? rows : []
   const p = normalizePage(page, 1)
@@ -141,7 +189,7 @@ export async function listVendorProductMappings({
   const total = items.length
   items = items.slice(start, start + ps).map((row: any) => ({
     mappingId: row.mapping_id,
-    packageVersionId: row.package_version_id,
+    packageVersionId: row.package_id,
     supplierId: row.supplier_id,
     externalProductId: row.external_product_id,
     provisioningParameters: row.provisioning_parameters ?? null,
@@ -170,7 +218,7 @@ export async function getVendorProductMapping({
   }
   const rows = await supabase.select(
     'vendor_product_mappings',
-    `select=mapping_id,package_version_id,supplier_id,external_product_id,provisioning_parameters,created_at&mapping_id=eq.${encodeURIComponent(mappingId)}&limit=1`
+    `select=mapping_id,package_id,supplier_id,external_product_id,provisioning_parameters,created_at&mapping_id=eq.${encodeURIComponent(mappingId)}&limit=1`
   )
   const mapping = Array.isArray(rows) ? (rows[0] as Record<string, any>) : null
   if (!mapping?.mapping_id) return toError(404, 'NOT_FOUND', 'vendor product mapping not found.')
@@ -178,7 +226,7 @@ export async function getVendorProductMapping({
     ok: true,
     value: {
       mappingId: mapping.mapping_id,
-      packageVersionId: mapping.package_version_id,
+      packageVersionId: mapping.package_id,
       supplierId: mapping.supplier_id,
       externalProductId: mapping.external_product_id,
       provisioningParameters: mapping.provisioning_parameters ?? null,
@@ -211,7 +259,7 @@ export async function updateVendorProductMapping({
   }
   const beforeRows = await supabase.select(
     'vendor_product_mappings',
-    `select=mapping_id,package_version_id,supplier_id,external_product_id,provisioning_parameters,created_at&mapping_id=eq.${encodeURIComponent(mappingId)}&limit=1`
+    `select=mapping_id,package_id,supplier_id,external_product_id,provisioning_parameters,created_at&mapping_id=eq.${encodeURIComponent(mappingId)}&limit=1`
   )
   const before = Array.isArray(beforeRows) ? (beforeRows[0] as Record<string, any>) : null
   const update: Record<string, unknown> = {}
@@ -246,7 +294,7 @@ export async function updateVendorProductMapping({
     before_data: before
       ? {
           mappingId: before.mapping_id,
-          packageVersionId: before.package_version_id,
+          packageVersionId: before.package_id,
           supplierId: before.supplier_id,
           externalProductId: before.external_product_id,
           provisioningParameters: before.provisioning_parameters ?? null,
@@ -254,7 +302,7 @@ export async function updateVendorProductMapping({
       : null,
     after_data: {
       mappingId: mapping.mapping_id,
-      packageVersionId: mapping.package_version_id,
+      packageVersionId: mapping.package_id,
       supplierId: mapping.supplier_id,
       externalProductId: mapping.external_product_id,
       provisioningParameters: mapping.provisioning_parameters ?? null,
@@ -264,7 +312,7 @@ export async function updateVendorProductMapping({
     ok: true,
     value: {
       mappingId: mapping.mapping_id,
-      packageVersionId: mapping.package_version_id,
+      packageVersionId: mapping.package_id,
       supplierId: mapping.supplier_id,
       externalProductId: mapping.external_product_id,
       provisioningParameters: mapping.provisioning_parameters ?? null,
@@ -288,7 +336,7 @@ export async function deleteVendorProductMapping({
   }
   const rows = await supabase.select(
     'vendor_product_mappings',
-    `select=mapping_id,package_version_id,supplier_id,external_product_id,provisioning_parameters,created_at&mapping_id=eq.${encodeURIComponent(mappingId)}&limit=1`
+    `select=mapping_id,package_id,supplier_id,external_product_id,provisioning_parameters,created_at&mapping_id=eq.${encodeURIComponent(mappingId)}&limit=1`
   )
   const mapping = Array.isArray(rows) ? (rows[0] as Record<string, any>) : null
   await supabase.delete('vendor_product_mappings', `mapping_id=eq.${encodeURIComponent(mappingId)}`)
@@ -304,7 +352,7 @@ export async function deleteVendorProductMapping({
     before_data: mapping
       ? {
           mappingId: mapping.mapping_id,
-          packageVersionId: mapping.package_version_id,
+          packageVersionId: mapping.package_id,
           supplierId: mapping.supplier_id,
           externalProductId: mapping.external_product_id,
           provisioningParameters: mapping.provisioning_parameters ?? null,

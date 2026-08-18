@@ -1,6 +1,18 @@
-import { computeMonthlyCharges } from '../billing.js'
+/** Monthly rating / line items: Covered -> carrier OOP roaming -> UNCLASSIFIED — see `computeMonthlyCharges` in `billing.js` (Phase 30 / billing-api §4.2). */
+import { computeMonthlyCharges, updateUsageDailySummaryClassifiedUsage, updateUsagePackageDailySummary } from '../billing.js'
 import { transitionBillStatus } from './billStatusMachine.js'
+import {
+  buildAdjustmentBillLineItems,
+  computeAdjustedBillTotal,
+  loadApprovedAdjustmentSettlement,
+  markAdjustmentNotesApplied,
+} from './adjustmentNote.js'
+import {
+  findInvalidAdjustmentNoteIccids,
+  emitAdjustmentIccidSettlementWarnings,
+} from './adjustmentNoteIccid.js'
 import { resolveBillingSchedule } from './billingSchedule.js'
+import { actorUserIdForDb } from '../utils/actorUserId.js'
 
 type SupabaseClient = {
   select: (table: string, queryString: string) => Promise<unknown>
@@ -27,12 +39,31 @@ function isValidPeriod(value: unknown) {
   return /^\d{4}-\d{2}$/.test(String(value || '').trim())
 }
 
+/** YYYY-MM for the UTC calendar month containing `now`. */
+export function currentBillingYearMonthUtc(now: Date = new Date()): string {
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`
+}
+
+/** Billing period must be a completed month strictly before the current UTC month. */
+export function isPastBillingPeriod(period: unknown, now: Date = new Date()): boolean {
+  const value = String(period ?? '').trim()
+  if (!isValidPeriod(value)) return false
+  return value < currentBillingYearMonthUtc(now)
+}
+
 function toDateOnly(date: Date) {
   return date.toISOString().slice(0, 10)
 }
 
 async function writeAuditLog(supabase: SupabaseClient, payload: Record<string, unknown>) {
-  await supabase.insert('audit_logs', payload, { returning: 'minimal' })
+  await supabase.insert(
+    'audit_logs',
+    {
+      ...payload,
+      actor_user_id: actorUserIdForDb(payload.actor_user_id as string | null | undefined),
+    },
+    { returning: 'minimal' }
+  )
 }
 
 function parsePeriod(period: string) {
@@ -95,7 +126,8 @@ function aggregateLineItems({
   }
   const packageMeta = new Map<string, any>()
   for (const pkg of packages) {
-    if (pkg?.package_version_id) packageMeta.set(String(pkg.package_version_id), pkg)
+    const pid = pkg?.package_id ? String(pkg.package_id) : pkg?.package_version_id ? String(pkg.package_version_id) : ''
+    if (pid) packageMeta.set(pid, pkg)
   }
   const departmentMeta = new Map<string, any>()
   for (const dept of departments) {
@@ -104,11 +136,11 @@ function aggregateLineItems({
   const extraItems: Record<string, any>[] = []
   for (const item of lineItems) {
     const simId = item.sim_id ? String(item.sim_id) : null
-    const pkgId = item.package_version_id ? String(item.package_version_id) : null
+    const pkgId = item.package_id ? String(item.package_id) : item.package_version_id ? String(item.package_version_id) : null
     if (!simId) {
       extraItems.push({
         sim_id: null,
-        package_version_id: pkgId,
+        package_id: pkgId,
         item_type: 'PACKAGE_TOTAL',
         amount: Number(item.amount ?? 0),
         metadata: {
@@ -152,7 +184,7 @@ function aggregateLineItems({
     const groupType = sim.department_id ? 'DEPARTMENT' : entry.packageVersionId ? 'PACKAGE' : null
     l3Items.push({
       sim_id: entry.simId,
-      package_version_id: entry.packageVersionId ?? null,
+      package_id: entry.packageVersionId ?? null,
       item_type: 'SIM_TOTAL',
       amount: subtotal,
       group_key: groupKey ?? null,
@@ -163,7 +195,7 @@ function aggregateLineItems({
         departmentId: sim.department_id ?? null,
         departmentName: dept?.name ?? null,
         packageVersionId: entry.packageVersionId ?? null,
-        packageName: pkg?.packages?.name ?? null,
+        packageName: pkg?.name ?? pkg?.packages?.name ?? null,
         monthlyFee: Number(entry.monthlyFee.toFixed(2)),
         usageCharge: Number(entry.usageCharge.toFixed(2)),
         overageCharge: Number(entry.overageCharge.toFixed(2)),
@@ -175,12 +207,12 @@ function aggregateLineItems({
   return { l3Items, extraItems }
 }
 
-async function loadPackageVersions(supabase: SupabaseClient, packageVersionIds: string[]) {
-  if (!packageVersionIds.length) return []
-  const idFilter = packageVersionIds.map((id) => encodeURIComponent(id)).join(',')
+async function loadPackagesForBilling(supabase: SupabaseClient, packageIds: string[]) {
+  if (!packageIds.length) return []
+  const idFilter = packageIds.map((id) => encodeURIComponent(id)).join(',')
   const rows = await supabase.select(
-    'package_versions',
-    `select=package_version_id,packages(name)&package_version_id=in.(${idFilter})`
+    'packages',
+    `select=package_id,name&package_id=in.(${idFilter})`
   )
   return Array.isArray(rows) ? (rows as Record<string, any>[]) : []
 }
@@ -221,6 +253,9 @@ export async function runBillingGenerate({
   if (!isValidPeriod(period)) {
     return toError(400, 'BAD_REQUEST', 'period must be YYYY-MM.')
   }
+  if (!isPastBillingPeriod(period)) {
+    return toError(400, 'BAD_REQUEST', 'period must be a month before the current month.')
+  }
   const { start, endExclusive, endInclusive } = parsePeriod(period)
   const enterprises = await loadEnterpriseList(supabase, enterpriseId ?? null, resellerId ?? null)
   if (!enterprises.length) {
@@ -233,6 +268,7 @@ export async function runBillingGenerate({
   })
   if (!schedule.ok) return schedule
   const results: Record<string, any>[] = []
+  const settlementWarnings: Array<Record<string, unknown>> = []
   for (const enterprise of enterprises) {
     const calc = await computeMonthlyCharges({
       enterpriseId: enterprise.tenant_id,
@@ -242,7 +278,7 @@ export async function runBillingGenerate({
     if (!calc) continue
     const existing = await supabase.select(
       'bills',
-      `select=bill_id&enterprise_id=eq.${encodeURIComponent(enterprise.tenant_id)}&period_start=eq.${encodeURIComponent(toDateOnly(start))}&period_end=eq.${encodeURIComponent(toDateOnly(endInclusive))}&limit=1`
+      `select=bill_id&enterprise_id=eq.${encodeURIComponent(enterprise.tenant_id)}&period_start=eq.${encodeURIComponent(toDateOnly(start))}&period_end=eq.${encodeURIComponent(toDateOnly(endInclusive))}&status=neq.VOIDED&limit=1`
     )
     if (Array.isArray(existing) && existing.length) {
       continue
@@ -253,10 +289,17 @@ export async function runBillingGenerate({
     )
     const sims = Array.isArray(simsRows) ? (simsRows as Record<string, any>[]) : []
     const departmentIds = Array.from(new Set(sims.map((s) => s.department_id).filter(Boolean).map(String)))
-    const packageIds = Array.from(new Set<string>(calc.lineItems.map((i: any) => i.package_version_id).filter(Boolean).map(String)))
+    const packageIds = Array.from(
+      new Set<string>(
+        calc.lineItems
+          .map((i: any) => i.package_id ?? i.package_version_id)
+          .filter(Boolean)
+          .map(String)
+      )
+    )
     const [departments, packages] = await Promise.all([
       loadDepartments(supabase, departmentIds),
-      loadPackageVersions(supabase, packageIds),
+      loadPackagesForBilling(supabase, packageIds),
     ])
     const { l3Items, extraItems } = aggregateLineItems({
       lineItems: calc.lineItems,
@@ -264,6 +307,21 @@ export async function runBillingGenerate({
       packages,
       departments,
     })
+    const billCurrency = calc.currency ?? schedule.value.currency ?? 'USD'
+    const adjustmentSettlement = await loadApprovedAdjustmentSettlement(
+      supabase,
+      String(enterprise.tenant_id),
+      billCurrency
+    )
+    const adjustmentIccidIssues = adjustmentSettlement.noteIds.length
+      ? await findInvalidAdjustmentNoteIccids(
+        supabase,
+        String(enterprise.tenant_id),
+        adjustmentSettlement.noteIds
+      )
+      : []
+    const ratingTotal = Number(calc.totalBillAmount.toFixed(2))
+    const finalTotal = computeAdjustedBillTotal(ratingTotal, adjustmentSettlement.netAdjustment)
     const nowIso = new Date().toISOString()
     const dueDate = toDateOnly(addDays(endInclusive, 30))
     const billRows = await supabase.insert('bills', {
@@ -272,8 +330,8 @@ export async function runBillingGenerate({
       period_start: toDateOnly(start),
       period_end: toDateOnly(endInclusive),
       status: 'GENERATED',
-      total_amount: Number(calc.totalBillAmount.toFixed(2)),
-      currency: calc.currency ?? schedule.value.currency ?? 'USD',
+      total_amount: finalTotal,
+      currency: billCurrency,
       generated_at: nowIso,
       due_date: dueDate,
     }, { returning: 'representation' })
@@ -296,12 +354,18 @@ export async function runBillingGenerate({
         periodStart: toDateOnly(start),
         periodEnd: toDateOnly(endInclusive),
         status: 'GENERATED',
-        totalAmount: Number(calc.totalBillAmount.toFixed(2)),
-        currency: calc.currency ?? schedule.value.currency ?? 'USD',
+        ratingTotal,
+        adjustmentCreditTotal: adjustmentSettlement.creditTotal,
+        adjustmentDebitTotal: adjustmentSettlement.debitTotal,
+        adjustmentNet: adjustmentSettlement.netAdjustment,
+        totalAmount: finalTotal,
+        currency: billCurrency,
         dueDate,
+        appliedAdjustmentNoteIds: adjustmentSettlement.noteIds,
       },
     })
-    const allItems = [...l3Items, ...extraItems]
+    const adjustmentLineItems = buildAdjustmentBillLineItems(adjustmentSettlement, billId)
+    const allItems = [...l3Items, ...extraItems, ...adjustmentLineItems]
     if (allItems.length) {
       const batchSize = 100
       for (let i = 0; i < allItems.length; i += batchSize) {
@@ -309,7 +373,7 @@ export async function runBillingGenerate({
           bill_id: billId,
           item_type: item.item_type,
           sim_id: item.sim_id,
-          package_version_id: item.package_version_id,
+          package_id: item.package_id ?? item.package_version_id ?? null,
           amount: item.amount,
           metadata: item.metadata,
           group_key: item.group_key ?? null,
@@ -318,12 +382,43 @@ export async function runBillingGenerate({
         await supabase.insert('bill_line_items', batch, { returning: 'minimal' })
       }
     }
+    if (adjustmentSettlement.noteIds.length) {
+      const applied = await markAdjustmentNotesApplied({
+        supabase,
+        noteIds: adjustmentSettlement.noteIds,
+        appliedBillId: billId,
+        enterpriseId: String(enterprise.tenant_id),
+        actorUserId: actorUserId ?? null,
+        requestId: requestId ?? null,
+      })
+      if (!applied.ok) {
+        return applied
+      }
+      if (adjustmentIccidIssues.length) {
+        await emitAdjustmentIccidSettlementWarnings({
+          supabase,
+          enterpriseId: String(enterprise.tenant_id),
+          appliedBillId: billId,
+          jobId: jobId ?? null,
+          requestId: requestId ?? null,
+          actorUserId: actorUserId ?? null,
+          issues: adjustmentIccidIssues,
+        })
+        settlementWarnings.push({
+          enterpriseId: enterprise.tenant_id,
+          billId,
+          issues: adjustmentIccidIssues,
+        })
+      }
+    }
     if (Array.isArray(calc.ratingResults) && calc.ratingResults.length) {
       const batchSize = 200
       for (let i = 0; i < calc.ratingResults.length; i += batchSize) {
         const batch = calc.ratingResults.slice(i, i + batchSize)
         await supabase.insert('rating_results', batch, { returning: 'minimal' })
       }
+      await updateUsageDailySummaryClassifiedUsage(supabase, calc.ratingResults)
+      await updateUsagePackageDailySummary(supabase, calc.ratingResults)
     }
     const shouldPublish = typeof autoPublish === 'boolean' ? autoPublish : schedule.value.autoPublish
     if (shouldPublish) {
@@ -340,8 +435,21 @@ export async function runBillingGenerate({
       billId,
       enterpriseId: enterprise.tenant_id,
       status: shouldPublish ? 'PUBLISHED' : 'GENERATED',
-      totalAmount: Number(calc.totalBillAmount.toFixed(2)),
+      ratingTotal,
+      adjustmentNet: adjustmentSettlement.netAdjustment,
+      totalAmount: finalTotal,
+      appliedAdjustmentNoteIds: adjustmentSettlement.noteIds,
+      ...(adjustmentIccidIssues.length
+        ? { adjustmentIccidWarnings: adjustmentIccidIssues }
+        : {}),
     })
   }
-  return { ok: true, value: { period, results } }
+  return {
+    ok: true,
+    value: {
+      period,
+      results,
+      ...(settlementWarnings.length ? { adjustmentIccidWarnings: settlementWarnings } : {}),
+    },
+  }
 }

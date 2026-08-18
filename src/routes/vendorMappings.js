@@ -21,7 +21,7 @@ export function registerVendorMappingRoutes({ app, prefix, deps }) {
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const result = await createVendorProductMapping({ supabase, payload: req.body ?? {}, audit })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.status(201).json(result.value)
+    res.code().send(result.value)
   })
 
   app.get(`${prefix}/vendor-product-mappings`, async (req, res) => {
@@ -37,7 +37,7 @@ export function registerVendorMappingRoutes({ app, prefix, deps }) {
       pageSize: query.pageSize,
     })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 
   app.get(`${prefix}/vendor-product-mappings/:mappingId`, async (req, res) => {
@@ -50,7 +50,7 @@ export function registerVendorMappingRoutes({ app, prefix, deps }) {
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const result = await getVendorProductMapping({ supabase, mappingId })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 
   app.patch(`${prefix}/vendor-product-mappings/:mappingId`, async (req, res) => {
@@ -69,7 +69,7 @@ export function registerVendorMappingRoutes({ app, prefix, deps }) {
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const result = await updateVendorProductMapping({ supabase, mappingId, payload: req.body ?? {}, audit })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 
   app.delete(`${prefix}/vendor-product-mappings/:mappingId`, async (req, res) => {
@@ -88,6 +88,6 @@ export function registerVendorMappingRoutes({ app, prefix, deps }) {
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const result = await deleteVendorProductMapping({ supabase, mappingId, audit })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
-    res.json(result.value)
+    res.send(result.value)
   })
 }

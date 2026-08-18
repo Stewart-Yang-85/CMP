@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { validateMarkTestReadyPreconditions } from '../src/services/simLifecycle.ts'
+import { evaluateJobCancel } from '../src/routes/jobs.ts'
 
 /**
  * SIM Lifecycle State Machine Tests
@@ -19,6 +21,7 @@ const actionMap = {
   DEACTIVATE: { targetStatus: 'DEACTIVATED', allowedFrom: new Set(['ACTIVATED', 'TEST_READY']), requireReason: true },
   REACTIVATE: { targetStatus: 'ACTIVATED', allowedFrom: new Set(['DEACTIVATED']), requireReason: false },
   RETIRE: { targetStatus: 'RETIRED', allowedFrom: new Set(['DEACTIVATED']), requireReason: true },
+  MARK_TEST_READY: { targetStatus: 'TEST_READY', allowedFrom: new Set(['INVENTORY']), requireReason: true },
 }
 
 function canTransition(currentStatus: string, action: string): boolean {
@@ -94,6 +97,66 @@ describe('SIM State Machine', () => {
     })
   })
 
+  describe('MARK_TEST_READY transition (state machine)', () => {
+    it('allows INVENTORY → TEST_READY when assigned', () => {
+      expect(canTransition('INVENTORY', 'MARK_TEST_READY')).toBe(true)
+    })
+    it('rejects TEST_READY → TEST_READY', () => {
+      expect(canTransition('TEST_READY', 'MARK_TEST_READY')).toBe(false)
+    })
+  })
+
+  describe('validateMarkTestReadyPreconditions', () => {
+    const enterpriseId = '3fa85f64-5717-4562-b3fc-2c963f66afa6'
+
+    it('accepts INVENTORY with enterprise', () => {
+      const r = validateMarkTestReadyPreconditions({
+        status: 'INVENTORY',
+        lifecycle_sub_status: 'normal',
+        enterprise_id: enterpriseId,
+      })
+      expect(r.ok).toBe(true)
+    })
+
+    it('rejects unassigned INVENTORY', () => {
+      const r = validateMarkTestReadyPreconditions({
+        status: 'INVENTORY',
+        lifecycle_sub_status: 'normal',
+        enterprise_id: null,
+      })
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.code).toBe('ENTERPRISE_REQUIRED')
+    })
+
+    it('rejects ACTIVATED', () => {
+      const r = validateMarkTestReadyPreconditions({
+        status: 'ACTIVATED',
+        lifecycle_sub_status: 'normal',
+        enterprise_id: enterpriseId,
+      })
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.code).toBe('INVALID_STATE')
+    })
+
+    it('rejects when lifecycle in progress', () => {
+      const r = validateMarkTestReadyPreconditions({
+        status: 'INVENTORY',
+        lifecycle_sub_status: 'activating',
+        enterprise_id: enterpriseId,
+      })
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.code).toBe('LIFECYCLE_IN_PROGRESS')
+    })
+  })
+
+  describe('job cancel policy', () => {
+    it('SIM_STATUS_CHANGE is not cancellable', () => {
+      const r = evaluateJobCancel({ job_type: 'SIM_STATUS_CHANGE', status: 'RUNNING' })
+      expect(r.ok).toBe(false)
+      if (!r.ok) expect(r.code).toBe('JOB_NOT_CANCELLABLE')
+    })
+  })
+
   describe('requireReason flag', () => {
     it('DEACTIVATE requires reason', () => {
       expect(actionMap.DEACTIVATE.requireReason).toBe(true)
@@ -106,6 +169,9 @@ describe('SIM State Machine', () => {
     })
     it('REACTIVATE does not require reason', () => {
       expect(actionMap.REACTIVATE.requireReason).toBe(false)
+    })
+    it('MARK_TEST_READY requires reason', () => {
+      expect(actionMap.MARK_TEST_READY.requireReason).toBe(true)
     })
   })
 })

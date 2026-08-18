@@ -39,6 +39,12 @@ export async function handleQueueMessage(message: unknown) {
   const { runBillingGenerate } = require('../services/billingGenerate.js') as {
     runBillingGenerate: (input: Record<string, unknown>) => Promise<Record<string, unknown>>
   }
+  const { runUsageRatingRollup } = require('../services/usageRatingRollup.js') as {
+    runUsageRatingRollup: (input: Record<string, unknown>) => Promise<Record<string, unknown>>
+  }
+  const { runUsageMonthlyRollup } = require('../services/usageMonthlyRollup.js') as {
+    runUsageMonthlyRollup: (input: Record<string, unknown>) => Promise<Record<string, unknown>>
+  }
   const { runDunningCheck } = require('../services/dunning.js') as {
     runDunningCheck: (input: Record<string, unknown>) => Promise<Record<string, unknown>>
   }
@@ -105,6 +111,26 @@ export async function handleQueueMessage(message: unknown) {
       autoPublish: payload.autoPublish ?? null,
       actorUserId: payload.actorUserId ?? null,
       requestId: payload.requestId ?? traceId ?? null,
+      jobId: payload.jobId ?? null,
+    })
+    return { ok: result.ok, result }
+  }
+  if (type === 'USAGE_RATING_ROLLUP') {
+    const result = await runUsageRatingRollup({
+      supabase,
+      period: payload.period ?? null,
+      enterpriseId: payload.enterpriseId ?? null,
+      resellerId: payload.resellerId ?? null,
+      jobId: payload.jobId ?? null,
+    })
+    return { ok: result.ok, result }
+  }
+  if (type === 'USAGE_MONTHLY_ROLLUP') {
+    const result = await runUsageMonthlyRollup({
+      supabase,
+      period: payload.period ?? null,
+      enterpriseId: payload.enterpriseId ?? null,
+      resellerId: payload.resellerId ?? null,
       jobId: payload.jobId ?? null,
     })
     return { ok: result.ok, result }

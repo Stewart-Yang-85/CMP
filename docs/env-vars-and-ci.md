@@ -15,8 +15,9 @@
 | 变量 | 必填 | 说明 |
 |------|------|------|
 | `AUTH_TOKEN_SECRET` | ✅ | JWT 签发/校验密钥（HS256），至少 32 字符 |
-| `AUTH_CLIENT_ID` | 可选 | 默认 `cmp`，用于 `/auth/token` |
-| `AUTH_CLIENT_SECRET` | 可选 | 默认 `cmp-secret` |
+| `AUTH_CLIENT_ID` | 可选 | 本地 M2M，用于 `POST /v1/auth/token` 与 `POST /v1/auth/login`（clientId/clientSecret） |
+| `AUTH_CLIENT_SECRET` | 可选 | 与 `AUTH_CLIENT_ID` 配对 |
+| `AUTH_ENTERPRISE_ID` | 可选 | 设置后 env M2M JWT 为 **customer_m2m**；测 **platform_admin**（如 upstream-integrations）时不要设置 |
 | `ADMIN_API_KEY` | 可选 | 管理端 `X-API-Key`，smoke 中 admin 测试需要 |
 
 ## .env 检查结果
@@ -53,3 +54,12 @@
 | `ADMIN_API_KEY` | 可选 | 用于 admin 接口测试 |
 
 配置完成后，每次 push 或 PR 将自动运行 smoke 测试。
+
+## Worker / Scheduler 环境变量
+
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `USAGE_RATING_ROLLUP_CRON` | 可选 | 周期性 Rating / Usage Rollup 排队计划，默认 `*/30 * * * *`。任务创建 `USAGE_RATING_ROLLUP` Job，刷新当前账期 `rating_results`、`usage_daily_summary` classified MB 与 `usage_package_daily_summary`，不生成账单。 |
+| `ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_PERCENT` | 可选 | `OUT_OF_PROFILE_SURGE` 百分比阈值，默认 `20`，表示当前账期产品包 out-of-profile 用量达到适用配额的 20% 时触发。旧 `ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB` 仅在数值不超过 100 时作为兼容 fallback。 |
+| `ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_PERCENT_BY_RESELLER` | 可选 | JSON map，按 reseller 覆盖 `OUT_OF_PROFILE_SURGE` 百分比阈值。 |
+| `ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_PERCENT_BY_ENTERPRISE` | 可选 | JSON map，按 enterprise 覆盖 `OUT_OF_PROFILE_SURGE` 百分比阈值。 |

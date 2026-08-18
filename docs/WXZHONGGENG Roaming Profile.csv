@@ -1,0 +1,176 @@
+MCC,MNC,Country,Network,ratePerMb
+,, Austria ,A1 Telekom & T-Mobile,0.001
+,, Belgium ,KPN & Mobistar & Proximus,0.001
+,, Bulgaria ,COSMO & MobilTel AD & VivaTel,0.001
+,, Croatia ,Croatian Telecom & Tele2 & VipnetGSM,0.001
+,, Cyprus ,Vodafone & MTN & Primetel,0.001
+,, Czech Republic ,O2 & T-Mobile & Vodafone,0.001
+,, Denmark ,Hi3G & TDC & Telenor & Telia,0.001
+,, Estonia ,Eesti & Elisa & Tele2,0.001
+,, Finland ,DNA & Elisa & TeliaSonera,0.001
+,, France ,Bouygues & Free & Orange & SFR,0.001
+,, Germany ,Telefonica & DT & Vodafone,0.001
+,, Greece ,COSMOTE & Vodafone & Wind,0.001
+,, Hungary ,Pannon & T-Mobile & Vodafone,0.001
+,, Ireland ,Hutchison & Meeor & O2 & Vodafone,0.001
+,, Italy ,Iliad & TIM & Vodafone & WIND,0.001
+,, Latvia ,Bite & Latvian Mob & Tele2,0.001
+,, Lithuania ,Omnitel & Tele2 & UAB Bite,0.001
+,, Luxembourg ,P&T Tango & VOXmobile,0.001
+,, Malta ,Melita & Mobisle & Vodafone,0.001
+,, Netherlands ,KPN,0.001
+,, Poland ,Orange & P4 & Polkomtel & Telefonica,0.001
+,, Portugal ,TMN & Optimus & Vodafone,0.001
+,, Romania ,Cosmote & Orange & RCS & Vodafone,0.001
+,, Slovakia ,O2 & Orange & T-Mobile,0.001
+,, Slovenia ,T-Mobile & A1 & Mobitel & TUSMobile,0.001
+,, Spain ,Orange & Telefonica & Vodafone & Xfera,0.001
+,, Sweden ,Hi3G & Tele2 & Telenor & TeliaSonera,0.001
+,, United Kingdom ,T-Mobile & Hutchison & O2 & Vodafone,0.001
+,, Thailand ,AIS,0.001
+,, Malaysia ,Celcom & DiGi & Maxis,0.001
+,, Indonesia ,Hutchison & PT & XL & Telkomsel,0.001
+,, Viet nam ,Mobifone & Viettel & VNPT,0.001
+,, Cambodia ,CamGSM & Metfone Vietel,0.001
+,, Australia ,Optus & Telstra,0.001
+,, Singapore ,SingTel & StarHub & Tpg,0.001
+,, United States ,,0.0014
+,, Canada ,Bell & Rogers & SaskTel & TELUS,0.0037
+,, Mexico ,Iusacell & Movistar & Telcel,0.0024
+,, Colombia ,Movil & Comcel & Telefonica,0.0024
+,, Brazil ,Claro & VIVO,0.0024
+,, Argentina ,CTI & Telefonica,0.0024
+,, Peru ,Claro & Nextel & Telefonica,0.0024
+,, Chile ,Claro & Entel & Telefonica,0.0024
+,, Philippines ,Globe,0.0056
+,, Myanmar ,Posts and Telecom,0.0071
+,, Qatar ,Vodafone & Q-Tel,0.0075
+,, Bahrain ,Batelco,0.0063
+,, Saudi Arabia ,Mobily & Zain,0.0081
+,, United Arab Emirates ,DU & Etisalat,0.0103
+,, Oman ,Omantel,0.0088
+,, Jordan ,JMTS,0.0103
+,, South Africa ,MTN & 8ta,0.0045
+,, China ,CM & CU,0.0038
+,, Afghanistan ,MTN,0.0096
+,, Albania ,Telekom Albania,0.007
+,, Algeria ,Optimum & Wataniya,0.0221
+,, Andorra ,Andorra Telecom,0.007
+,, Angola ,Unitel,0.9525
+,, Anguilla ,Cable and Wireless,0.0193
+,, Antigua And Barbuda ,Cable and Wireless,0.0193
+,, Armenia ,ArmenTel & VivaCell,0.0123
+,, Aruba ,Setar,0.0075
+,, Azerbaijan ,Bakcell,0.021
+,, Bahamas ,Bahamas Telecom & Be Aliv,0.0284
+,, Barbados ,Cable and Wireless,0.0193
+,, Belarus ,FE VELCOM,0.0158
+,, Belize ,Belize Telemedia,0.021
+,, Benin ,Spacetel,0.0096
+,, Bermuda ,Digital,0.0194
+,, Bolivia ,Telefonica,0.007
+,, Bosnia And Herzegovina ,BH TELECOM,0.007
+,, Botswana ,Mascom & Orange,0.0101
+,, Burkina Faso ,Celtel & Telmob,0.123
+,, Burundi ,Viettel,0.762
+,, Cameroon ,Orange & MTN,0.0101
+,, Cape Verde ,Cabo Verde Telecom & T+,0.0588
+,, Cayman Islands ,Cable and Wireless,0.0193
+,, Central African Republic ,Orange,0.0105
+,, Chad ,Celtel,0.0105
+,, Congo Republic ,Zain,0.0105
+,, Costa Rica ,Claro & Azules,0.0073
+,, Democratic Republic Of The Congo ,Celtel & Orange,0.0105
+,, Dominica ,Cable adn Wireless,0.0193
+,, Dominican Republic ,Claro,0.007
+,, Ethiopia ,ETC,0.021
+,, Ecuador ,OteCel,0.007
+,, Egypt ,Orange & Etisalat,0.002
+,, El Salvador ,CTE & Telefonica,0.007
+,, Faroe Islands ,Faroese Telecom,0.007
+,, French Guiana ,DIGICEL,0.0019
+,, French Polynesia ,Vodafone,0.12
+,, Gabon ,Zain,0.0105
+,, Gambia ,Africell & Qcel,0.3885
+,, Georgia ,Magticom & Mobitel,0.014
+,, Ghana ,Millicom & Scancom,0.0124
+,, Gibraltar ,Gibtelecom,0.007
+,, Greenland ,TeleGreenland,0.063
+,, Grenada ,Cable and Wireless,0.0193
+,, Guadeloupe ,Dauphin,0.007
+,, Guatemala ,Sercom,0.007
+,, Guinea ,MTN & Orange,0.0101
+,, Guinea-Bissau ,Orange & Spacetel,0.0101
+,, Guyana ,GT&T & U-Mobile,0.0139
+,, Haiti ,Natcom,1.1175
+,, Honduras ,Celtel & Claro,0.007
+,, Iceland ,Nova & Siminn & Vodafone,0.0019
+,, Iraq ,Asiacell & Zain & Korek,0.0105
+,, Israel ,Orange & Cellcom & HOT & Pelephone,0.007
+,, Ivory Coast ,MTN,0.0096
+,, Jamaica ,Cable and Wireless & Digicel,0.0139
+,, Kazakhstan ,KaR,0.0075
+,, Kenya ,Airtel & Safaricom,0.0101
+,, Kosovo ,IPKO,0.0255
+,, Kuwait ,VIVA & Zain & Wataniya,0.007
+,, Kyrgyzstan ,SKY Mobile,0.0088
+,, Lebanon ,MTC,0.7
+,, Lesotho ,ETL,0.7696
+,, Liberia ,Cellcom,0.0105
+,, Libya ,Libyana Mobile,0.2204
+,, Liechtenstein ,Mobikom & Orange,0.007
+,, Macedonia ,T-Mobile & VIP-Net,0.0089
+,, Madagascar ,Zain,0.0105
+,, Malawi ,Zain,0.0105
+,, Mali ,Orange,0.168
+,, Mauritania ,Mauritel,0.7344
+,, Moldova ,Moldcell & Orange,0.007
+,, Monaco ,Monaco Telecom,0.0095
+,, Montenegro ,M-Tel & Telenor & T-Mobile,0.0081
+,, Morocco ,MORIAM & Wana & Orange,0.0041
+,, Mozambique ,mCell & Movitel,0.216
+,, Namibia ,CellOne,0.21
+,, Netherlands Antilles ,Digicell & UTS Setel,0.0091
+,, Nicaragua ,Claro & Telefonica,0.007
+,, Niger ,Zain,0.0105
+,, Nigeria ,Etisalat & Celtel & Globacom & MTN,0.0038
+,, Norway ,NetCom & Telenor,0.0016
+,, Pakistan ,JAZZ & Telenor,0.0089
+,, Palestinian Territory ,Palestine Telecom,0.0124
+,, Panama ,CWP & Telefonica,0.0089
+,, Paraguay ,Claro & Neucleo & TIGO,0.008
+,, Puerto Rico ,Claro,0.007
+,, Reunion ,SRR,0.0019
+,, Russian Federation ,MTS & VimpelCom,0.0054
+,, Rwanda ,MTN & Tigo,0.0101
+,, Sao Tome And Principe ,Unitel,0.9364
+,, Senegal ,Sonatel & Sentel,0.0179
+,, Serbia ,Telenor,0.007
+,, Seychelles ,Telecom Seychelles,0.0105
+,, Sierra Leone ,Africell & Airtel,0.4253
+,, South Sudan ,MTN & 8ta,0.007
+,, St Kitts And Nevis ,Cable and Wireless,0.0193
+,, St Lucia ,Cable and Wireless,0.0193
+,, St Vincent And The Grenadines ,Cable and Wireless,0.0193
+,, Sudan ,MTN,0.007
+,, Suriname ,Digcel & Telesur,0.0078
+,, Swaziland ,MTN,0.0096
+,, Switzerland ,Sunrise & Orange,0.0045
+,, Tajikistan ,Indigo,0.1935
+,, Tanzania ,Airtel & Mobitel,0.0586
+,, Togo ,Telecom Togo,0.4449
+,, Trinidad And Tobago ,Digiccel,0.0084
+,, Tunisia ,Orange & Orascom & Tunisie Telecom,0.0081
+,, Turkey ,Avea & Turkcel,0.007
+,, Turks And Caicos Islands ,Cble and Wireless,0.0193
+,, Uk Channel Islands - Guernsey ,Guernsey Telecoms,0.0019
+,, Uk Channel Islands - Isle Of Man ,Manx Telecom,0.0019
+,, Uk Channel Islands - Jersey ,AirTel & Telecoms,0.0019
+,, Uganda ,Zain & MTN,0.0101
+,, Ukraine ,Kyivstar & MTS,0.0058
+,, Uruguay ,Claro & Telefonica,0.0076
+,, Uzbekistan ,Unitel,0.0655
+,, Venezuela ,Digitel & Telcel,0.0378
+,, Virgin Islands (British) ,CCT & LIME,0.0199
+,, Zambia ,Airtel,0.0105
+,, Zimbabwe ,Econet & Telecel,0.2995

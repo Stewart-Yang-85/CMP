@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import type { FastifyReply, FastifyRequest } from 'fastify'
+import { verifyJwtHs256 } from '../jwt.js'
 
 type JwkKey = {
   kid?: string
@@ -42,6 +43,38 @@ type CacheEntry = {
 const jwksCache: CacheEntry = {
   expiresAt: 0,
   keys: new Map(),
+}
+
+/** Same issuer as `/auth/token` HS256 tokens and `tools/gen_token.js` dev tokens */
+const CMP_HS256_ISSUER = 'iot-cmp-api'
+
+function bearerHs256Fallback(
+  token: string,
+  req: FastifyRequest,
+  reply: FastifyReply,
+): boolean {
+  const secret = String(process.env.AUTH_TOKEN_SECRET ?? '').trim()
+  if (!secret) return false
+  const result = verifyJwtHs256(token, secret)
+  if (!result.ok) {
+    reply.status(401).send({ code: 'UNAUTHORIZED', message: 'Invalid token.' })
+    return true
+  }
+  const payloadJson = result.payload as Record<string, unknown>
+  if (String(payloadJson.iss || '') !== CMP_HS256_ISSUER) {
+    reply.status(401).send({ code: 'UNAUTHORIZED', message: 'Invalid issuer.' })
+    return true
+  }
+  setAuthContext(req, {
+    userId: payloadJson.userId ? String(payloadJson.userId) : payloadJson.sub ? String(payloadJson.sub) : null,
+    resellerId: payloadJson.resellerId ? String(payloadJson.resellerId) : null,
+    customerId: payloadJson.customerId ? String(payloadJson.customerId) : null,
+    departmentId: payloadJson.departmentId ? String(payloadJson.departmentId) : null,
+    roleScope: payloadJson.roleScope ? String(payloadJson.roleScope) : null,
+    role: payloadJson.role ? String(payloadJson.role) : null,
+    permissions: normalizePermissions(payloadJson),
+  })
+  return true
 }
 
 function setAuthContext(req: FastifyRequest, ctx: AuthContext) {
@@ -133,8 +166,15 @@ export function oidcAuth(options: OidcOptions = {}) {
       }
       return
     }
-    if (!jwksUrl || !issuer || !audience) {
-      reply.status(500).send({ code: 'INTERNAL_ERROR', message: 'OIDC is not configured.' })
+    const oidcReady = Boolean(jwksUrl && issuer && audience)
+    if (!oidcReady) {
+      if (bearerHs256Fallback(token, req, reply)) return
+      // bearerHs256Fallback returns false only when AUTH_TOKEN_SECRET is unset (HS256 path unavailable).
+      reply.status(500).send({
+        code: 'INTERNAL_ERROR',
+        message:
+          'AUTH_TOKEN_SECRET is not configured; set it for HS256 Bearer tokens or configure OIDC_ISSUER, OIDC_AUDIENCE, and OIDC_JWKS_URL.',
+      })
       return
     }
     const parts = token.split('.')
@@ -180,10 +220,8 @@ export function oidcAuth(options: OidcOptions = {}) {
       reply.status(401).send({ code: 'UNAUTHORIZED', message: 'Invalid token signature.' })
       return
     }
-    // Phase 24: OIDC claims MUST use tenants.tenant_id for resellerId.
-    // If the OIDC provider sends the legacy resellers.id, the tenant hierarchy
-    // queries (e.g. tenants.parent_id) will silently fail. Configure your IDP
-    // to issue the reseller's tenant_id, not resellers.id.
+    // Phase 24 / FR-058: OIDC **`resellerId` claim MUST** be RESELLER **`tenants.tenant_id`**.
+    // The API layer no longer resolves **`resellers.id`** to tenant scope — misconfigured claims break hierarchy checks.
     setAuthContext(req, {
       userId: payloadJson.userId ? String(payloadJson.userId) : payloadJson.sub ? String(payloadJson.sub) : null,
       resellerId: payloadJson.resellerId ? String(payloadJson.resellerId) : null,

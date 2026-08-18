@@ -1,1575 +1,2995 @@
+import { extractControlPolicyFromPayload, finalizeControlPolicyMerged, normalizeControlPolicy, stripLegacyControlPolicyKeys, } from '../utils/controlPolicyJson.js';
+import { buildPaginationResponse, parsePagination } from '../utils/pagination.js';
+import { actorUserIdForDb } from '../utils/actorUserId.js';
+import { pricePlanTypeUsesCoveredNetwork, batchMapPricePlanSnapshotsByIds } from './pricePlan.js';
 function isValidUuid(value) {
-  const s = String(value || '').trim().toLowerCase()
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s)
+    const s = String(value || '').trim().toLowerCase();
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s);
 }
-
 function toError(status, code, message) {
-  return { ok: false, status, code, message }
+    return { ok: false, status, code, message };
 }
-
 async function writeAuditLog(supabase, payload) {
-  await supabase.insert('audit_logs', payload, { returning: 'minimal' })
+    await supabase.insert('audit_logs', {
+        ...payload,
+        actor_user_id: actorUserIdForDb(payload.actor_user_id),
+    }, { returning: 'minimal' });
 }
-
 function toInteger(value) {
-  const num = Number(value)
-  if (!Number.isFinite(num)) return null
-  return Number.isInteger(num) ? num : Math.trunc(num)
+    const num = Number(value);
+    if (!Number.isFinite(num))
+        return null;
+    return Number.isInteger(num) ? num : Math.trunc(num);
 }
-
-function normalizeAllowedMccMnc(list) {
-  const arr = Array.isArray(list) ? list : []
-  return arr.map((v) => String(v || '').trim()).filter(Boolean)
-}
-
 function firstDayNextMonthUtc() {
-  const now = new Date()
-  const y = now.getUTCFullYear()
-  const m = now.getUTCMonth()
-  return new Date(Date.UTC(m === 11 ? y + 1 : y, (m + 1) % 12, 1, 0, 0, 0, 0))
+    const now = new Date();
+    const y = now.getUTCFullYear();
+    const m = now.getUTCMonth();
+    return new Date(Date.UTC(m === 11 ? y + 1 : y, (m + 1) % 12, 1, 0, 0, 0, 0));
 }
-
-async function loadOperator(supabase, operatorId) {
-  const rows = await supabase.select(
-    'operators',
-    `select=operator_id,supplier_id&operator_id=eq.${encodeURIComponent(operatorId)}&limit=1`
-  )
-  return Array.isArray(rows) ? rows[0] : null
+async function loadOperatorByOperatorId(supabase, operatorId, supplierId) {
+    const supplierFilter = supplierId ? `&supplier_id=eq.${encodeURIComponent(supplierId)}` : '';
+    const rows = await supabase.select('operators', `select=operator_id,supplier_id,business_operator_id&operator_id=eq.${encodeURIComponent(operatorId)}${supplierFilter}&limit=1`);
+    return Array.isArray(rows) ? rows[0] : null;
 }
-
-function normalizeRoamingProfile(carrierServiceConfig) {
-  const allowedMccMnc = normalizeAllowedMccMnc(carrierServiceConfig?.roamingProfile?.allowedMccMnc)
-  const rat = carrierServiceConfig?.rat ? String(carrierServiceConfig.rat) : '4G'
-  const profileId = carrierServiceConfig?.roamingProfileId ? String(carrierServiceConfig.roamingProfileId).trim() : null
-  const profileVersionId = carrierServiceConfig?.roamingProfileVersionId
-    ? String(carrierServiceConfig.roamingProfileVersionId).trim()
-    : null
-  const payload = {
-    type: 'MCCMNC_ALLOWLIST',
-    mccmnc: allowedMccMnc,
-    rat,
-    ...(profileId ? { profileId } : {}),
-    ...(profileVersionId ? { profileVersionId } : {}),
-  }
-  return payload
+async function loadOperatorByBusinessOperatorId(supabase, businessOperatorId, supplierId) {
+    const supplierFilter = supplierId ? `&supplier_id=eq.${encodeURIComponent(supplierId)}` : '';
+    const rows = await supabase.select('operators', `select=operator_id,supplier_id,business_operator_id&business_operator_id=eq.${encodeURIComponent(businessOperatorId)}${supplierFilter}&limit=1`);
+    return Array.isArray(rows) ? rows[0] : null;
 }
-
+/** Resolves supplier-scoped operators row: try operators.operator_id first, then business_operator_id (+ optional supplier). */
+async function loadOperator(supabase, operatorId, supplierId) {
+    const byOperatorId = await loadOperatorByOperatorId(supabase, operatorId, supplierId);
+    if (byOperatorId)
+        return byOperatorId;
+    return loadOperatorByBusinessOperatorId(supabase, operatorId, supplierId);
+}
+/** Same as GET /apn-profiles: `operatorId` may be `operators.operator_id` or `operators.business_operator_id`. */
+async function resolveBoundOperatorIds(supabase, operatorId, supplierId) {
+    const ids = new Set();
+    const byOperatorId = await loadOperatorByOperatorId(supabase, operatorId, supplierId);
+    if (byOperatorId?.operator_id)
+        ids.add(String(byOperatorId.operator_id));
+    const byBusinessOperatorId = await loadOperatorByBusinessOperatorId(supabase, operatorId, supplierId);
+    if (byBusinessOperatorId?.operator_id)
+        ids.add(String(byBusinessOperatorId.operator_id));
+    return Array.from(ids);
+}
+function mccmncAllowlistStringsFromRoamingProfileList(list) {
+    if (!Array.isArray(list))
+        return [];
+    const out = [];
+    for (const e of list) {
+        if (!e || typeof e !== 'object')
+            continue;
+        const mcc = String(e.mcc ?? '').trim();
+        const mncRaw = String(e.mnc ?? '').trim();
+        if (!mcc)
+            continue;
+        if (!mncRaw || mncRaw === '*')
+            out.push(`${mcc}-*`);
+        else
+            out.push(`${mcc}-${mncRaw}`);
+    }
+    return out;
+}
+async function loadApnFromApnProfile(supabase, apnProfileId) {
+    const rows = await supabase.select('apn_profiles', `select=apn&apn_profile_id=eq.${encodeURIComponent(apnProfileId)}&limit=1`);
+    const row = Array.isArray(rows) ? rows[0] : null;
+    const apn = row && row.apn != null ? String(row.apn).trim() : '';
+    if (!apn)
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.apnProfileId is not found or apn is empty.');
+    return { ok: true, value: apn };
+}
+async function batchApnStringsByProfileIds(supabase, profileIds) {
+    const out = new Map();
+    const unique = [...new Set(profileIds.map((x) => String(x).trim()).filter(Boolean))];
+    if (!unique.length)
+        return out;
+    const list = unique.map((x) => encodeURIComponent(x)).join(',');
+    const rows = await supabase.select('apn_profiles', `select=apn_profile_id,apn&apn_profile_id=in.(${list})`);
+    for (const r of Array.isArray(rows) ? rows : []) {
+        const id = r?.apn_profile_id != null ? String(r.apn_profile_id).trim() : '';
+        const apn = r?.apn != null ? String(r.apn).trim() : '';
+        if (id && apn)
+            out.set(id, apn);
+    }
+    return out;
+}
+async function buildRoamingProfileSnapshotFromProfiles(supabase, carrierServiceConfig) {
+    const rat = String(carrierServiceConfig.rat ?? '4G').trim();
+    const roamingProfileId = String(carrierServiceConfig.roamingProfileId ?? '').trim();
+    const apnProfileIdRaw = carrierServiceConfig.apnProfileId;
+    const apnProfileId = apnProfileIdRaw ? String(apnProfileIdRaw).trim() : '';
+    const rows = await supabase.select('roaming_profiles', `select=mccmnc_list&roaming_profile_id=eq.${encodeURIComponent(roamingProfileId)}&limit=1`);
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row)
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.roamingProfileId is not found.');
+    const mccmnc = mccmncAllowlistStringsFromRoamingProfileList(row.mccmnc_list);
+    const payload = {
+        type: 'MCCMNC_ALLOWLIST',
+        mccmnc,
+        rat,
+        profileId: roamingProfileId,
+    };
+    if (apnProfileId)
+        payload.apnProfileId = apnProfileId;
+    return { ok: true, value: payload };
+}
 function isPlainObject(value) {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
-
-function extractPricePlanMeta(version) {
-  const paygRates = version?.payg_rates
-  if (!isPlainObject(paygRates)) return {}
-  const meta = paygRates.meta
-  return isPlainObject(meta) ? meta : {}
+function extractPricePlanMeta(_version) {
+    return {};
 }
-
 function normalizeCommercialTerms(input) {
-  if (input === undefined || input === null) return { ok: true, value: null }
-  if (!isPlainObject(input)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms must be an object.')
-  }
-  const src = input
-  const testPeriodDaysRaw = src.testPeriodDays
-  const testQuotaMbRaw = src.testQuotaMb
-  const commitmentPeriodMonthsRaw = src.commitmentPeriodMonths
-  const testExpiryConditionRaw = src.testExpiryCondition
-  const testExpiryActionRaw = src.testExpiryAction
-  const testPeriodDays = testPeriodDaysRaw === undefined ? undefined : toInteger(testPeriodDaysRaw)
-  const testQuotaMb = testQuotaMbRaw === undefined ? undefined : toInteger(testQuotaMbRaw)
-  const commitmentPeriodMonths = commitmentPeriodMonthsRaw === undefined ? undefined : toInteger(commitmentPeriodMonthsRaw)
-  const testExpiryCondition = testExpiryConditionRaw === undefined ? undefined : String(testExpiryConditionRaw).trim().toUpperCase()
-  const testExpiryAction = testExpiryActionRaw === undefined ? undefined : String(testExpiryActionRaw).trim().toUpperCase()
-  if (testPeriodDays !== undefined && (testPeriodDays === null || testPeriodDays < 0)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms.testPeriodDays must be a non-negative integer.')
-  }
-  if (testQuotaMb !== undefined && (testQuotaMb === null || testQuotaMb < 0)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms.testQuotaMb must be a non-negative integer.')
-  }
-  if (commitmentPeriodMonths !== undefined && (commitmentPeriodMonths === null || commitmentPeriodMonths < 0)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms.commitmentPeriodMonths must be a non-negative integer.')
-  }
-  const allowedCondition = new Set(['PERIOD_ONLY', 'QUOTA_ONLY', 'PERIOD_OR_QUOTA'])
-  if (testExpiryCondition !== undefined && !allowedCondition.has(testExpiryCondition)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms.testExpiryCondition is invalid.')
-  }
-  const allowedAction = new Set(['ACTIVATED', 'DEACTIVATED'])
-  if (testExpiryAction !== undefined && !allowedAction.has(testExpiryAction)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms.testExpiryAction is invalid.')
-  }
-  return {
-    ok: true,
-    value: {
-      ...(testPeriodDays !== undefined ? { testPeriodDays } : {}),
-      ...(testQuotaMb !== undefined ? { testQuotaMb } : {}),
-      ...(testExpiryCondition !== undefined ? { testExpiryCondition } : {}),
-      ...(testExpiryAction !== undefined ? { testExpiryAction } : {}),
-      ...(commitmentPeriodMonths !== undefined ? { commitmentPeriodMonths } : {}),
-    },
-  }
-}
-
-function normalizeControlPolicy(input) {
-  if (input === undefined || input === null) return { ok: true, value: null }
-  if (!isPlainObject(input)) {
-    return toError(400, 'BAD_REQUEST', 'controlPolicy must be an object.')
-  }
-  const src = input
-  const enabledRaw = src.enabled
-  const cutoffPolicyId = src.cutoffPolicyId ? String(src.cutoffPolicyId).trim() : null
-  const throttlingPolicyId = src.throttlingPolicyId ? String(src.throttlingPolicyId).trim() : null
-  const cutoffThresholdMbRaw = src.cutoffThresholdMb
-  const cutoffThresholdMb = cutoffThresholdMbRaw === undefined ? undefined : toInteger(cutoffThresholdMbRaw)
-  if (enabledRaw !== undefined && typeof enabledRaw !== 'boolean') {
-    return toError(400, 'BAD_REQUEST', 'controlPolicy.enabled must be a boolean.')
-  }
-  if (cutoffPolicyId && !isValidUuid(cutoffPolicyId)) {
-    return toError(400, 'BAD_REQUEST', 'controlPolicy.cutoffPolicyId must be a valid uuid.')
-  }
-  if (throttlingPolicyId && !isValidUuid(throttlingPolicyId)) {
-    return toError(400, 'BAD_REQUEST', 'controlPolicy.throttlingPolicyId must be a valid uuid.')
-  }
-  if (cutoffThresholdMb !== undefined && (cutoffThresholdMb === null || cutoffThresholdMb < 0)) {
-    return toError(400, 'BAD_REQUEST', 'controlPolicy.cutoffThresholdMb must be a non-negative integer.')
-  }
-  return {
-    ok: true,
-    value: {
-      ...(enabledRaw !== undefined ? { enabled: enabledRaw } : {}),
-      ...(cutoffPolicyId ? { cutoffPolicyId } : {}),
-      ...(throttlingPolicyId ? { throttlingPolicyId } : {}),
-      ...(cutoffThresholdMb !== undefined ? { cutoffThresholdMb } : {}),
-    },
-  }
-}
-
-function normalizeCarrierServiceConfig(input) {
-  if (!isPlainObject(input)) {
-    return toError(400, 'BAD_REQUEST', 'carrierServiceConfig must be an object.')
-  }
-  const src = input
-  const supplierId = String(src.supplierId ?? '').trim()
-  if (!isValidUuid(supplierId)) {
-    return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.supplierId must be a valid uuid.')
-  }
-  const operatorIdRaw = String(src.operatorId ?? src.carrierId ?? '').trim()
-  if (!isValidUuid(operatorIdRaw)) {
-    return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.operatorId must be a valid uuid.')
-  }
-  const apn = String(src.apn ?? '').trim()
-  if (!apn) {
-    return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.apn is required.')
-  }
-  const rat = String(src.rat ?? '4G').trim().toUpperCase()
-  const allowedRat = new Set(['3G', '4G', '5G', 'NB-IOT'])
-  if (!allowedRat.has(rat)) {
-    return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.rat is invalid.')
-  }
-  const apnProfileId = src.apnProfileId ? String(src.apnProfileId).trim() : null
-  if (apnProfileId && !isValidUuid(apnProfileId)) {
-    return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.apnProfileId must be a valid uuid.')
-  }
-  const apnProfileVersionId = src.apnProfileVersionId ? String(src.apnProfileVersionId).trim() : null
-  if (apnProfileVersionId && !isValidUuid(apnProfileVersionId)) {
-    return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.apnProfileVersionId must be a valid uuid.')
-  }
-  const roamingProfileId = src.roamingProfileId ? String(src.roamingProfileId).trim() : null
-  if (roamingProfileId && !isValidUuid(roamingProfileId)) {
-    return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.roamingProfileId must be a valid uuid.')
-  }
-  const roamingProfileVersionId = String(src.roamingProfileVersionId ?? '').trim()
-  if (roamingProfileVersionId && !isValidUuid(roamingProfileVersionId)) {
-    return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.roamingProfileVersionId must be a valid uuid.')
-  }
-  if (!roamingProfileId && !roamingProfileVersionId) {
-    return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.roamingProfileId or carrierServiceConfig.roamingProfileVersionId is required.')
-  }
-  return {
-    ok: true,
-    value: {
-      supplierId,
-      operatorId: operatorIdRaw,
-      apn,
-      rat,
-      ...(apnProfileId ? { apnProfileId } : {}),
-      ...(apnProfileVersionId ? { apnProfileVersionId } : {}),
-      ...(roamingProfileId ? { roamingProfileId } : {}),
-      ...(roamingProfileVersionId ? { roamingProfileVersionId } : {}),
-    },
-  }
-}
-
-async function ensureProfileVersionExists(supabase, profileVersionId, profileType) {
-  const rows = await supabase.select(
-    'profile_versions',
-    `select=profile_version_id,profile_type&profile_version_id=eq.${encodeURIComponent(profileVersionId)}&limit=1`
-  )
-  const row = Array.isArray(rows) ? rows[0] : null
-  if (!row || String(row.profile_type ?? '').toUpperCase() !== profileType) {
-    return toError(
-      400,
-      'BAD_REQUEST',
-      `carrierServiceConfig.${profileType === 'APN' ? 'apnProfileVersionId' : 'roamingProfileVersionId'} is not found.`
-    )
-  }
-  return { ok: true, value: null }
-}
-
-async function ensureProfileExists(supabase, profileId, profileType) {
-  const table = profileType === 'APN' ? 'apn_profiles' : 'roaming_profiles'
-  const key = profileType === 'APN' ? 'apn_profile_id' : 'roaming_profile_id'
-  const rows = await supabase.select(table, `select=${key}&${key}=eq.${encodeURIComponent(profileId)}&limit=1`)
-  const row = Array.isArray(rows) ? rows[0] : null
-  if (!row || !row[key]) {
-    return toError(400, 'BAD_REQUEST', `carrierServiceConfig.${profileType === 'APN' ? 'apnProfileId' : 'roamingProfileId'} is not found.`)
-  }
-  return { ok: true, value: null }
-}
-
-async function validateModuleReferences(supabase, carrierServiceConfig, controlPolicy) {
-  const operatorId = String(carrierServiceConfig.operatorId)
-  const supplierId = String(carrierServiceConfig.supplierId)
-  const operator = await loadOperator(supabase, operatorId)
-  if (!operator) return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.operatorId is not found.')
-  if (String(operator?.supplier_id ?? '') !== supplierId) {
-    return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.operatorId is not linked to supplierId.')
-  }
-  const apnProfileId = carrierServiceConfig.apnProfileId
-  if (apnProfileId) {
-    const apnCheck = await ensureProfileExists(supabase, String(apnProfileId), 'APN')
-    if (!apnCheck.ok) return apnCheck
-  }
-  const apnProfileVersionId = carrierServiceConfig.apnProfileVersionId
-  if (apnProfileVersionId) {
-    const apnCheck = await ensureProfileVersionExists(supabase, String(apnProfileVersionId), 'APN')
-    if (!apnCheck.ok) return apnCheck
-  }
-  const roamingProfileId = String(carrierServiceConfig.roamingProfileId ?? '').trim()
-  if (roamingProfileId) {
-    const roamingCheck = await ensureProfileExists(supabase, roamingProfileId, 'ROAMING')
-    if (!roamingCheck.ok) return roamingCheck
-  }
-  const roamingProfileVersionId = String(carrierServiceConfig.roamingProfileVersionId ?? '').trim()
-  if (roamingProfileVersionId) {
-    const roamingCheck = await ensureProfileVersionExists(supabase, roamingProfileVersionId, 'ROAMING')
-    if (!roamingCheck.ok) return roamingCheck
-  }
-  const cutoffPolicyId = controlPolicy?.cutoffPolicyId ? String(controlPolicy.cutoffPolicyId) : null
-  if (cutoffPolicyId) {
-    const rows = await supabase.select(
-      'cutoff_policies',
-      `select=cutoff_policy_id&cutoff_policy_id=eq.${encodeURIComponent(cutoffPolicyId)}&limit=1`
-    )
-    if (!Array.isArray(rows) || !rows[0]) {
-      return toError(400, 'BAD_REQUEST', 'controlPolicy.cutoffPolicyId is not found.')
+    if (input === undefined || input === null)
+        return { ok: true, value: null };
+    if (!isPlainObject(input)) {
+        return toError(400, 'BAD_REQUEST', 'commercialTerms is invalid.');
     }
-  }
-  const throttlingPolicyId = controlPolicy?.throttlingPolicyId ? String(controlPolicy.throttlingPolicyId) : null
-  if (throttlingPolicyId) {
-    const rows = await supabase.select(
-      'throttling_policies',
-      `select=throttling_policy_id&throttling_policy_id=eq.${encodeURIComponent(throttlingPolicyId)}&limit=1`
-    )
-    if (!Array.isArray(rows) || !rows[0]) {
-      return toError(400, 'BAD_REQUEST', 'controlPolicy.throttlingPolicyId is not found.')
-    }
-  }
-  return { ok: true, value: { operatorId, supplierId } }
-}
-
-async function validateControlPolicyReferences(supabase, controlPolicy) {
-  const cutoffPolicyId = controlPolicy?.cutoffPolicyId ? String(controlPolicy.cutoffPolicyId) : null
-  if (cutoffPolicyId) {
-    const rows = await supabase.select(
-      'cutoff_policies',
-      `select=cutoff_policy_id&cutoff_policy_id=eq.${encodeURIComponent(cutoffPolicyId)}&limit=1`
-    )
-    if (!Array.isArray(rows) || !rows[0]) {
-      return toError(400, 'BAD_REQUEST', 'controlPolicy.cutoffPolicyId is not found.')
-    }
-  }
-  const throttlingPolicyId = controlPolicy?.throttlingPolicyId ? String(controlPolicy.throttlingPolicyId) : null
-  if (throttlingPolicyId) {
-    const rows = await supabase.select(
-      'throttling_policies',
-      `select=throttling_policy_id&throttling_policy_id=eq.${encodeURIComponent(throttlingPolicyId)}&limit=1`
-    )
-    if (!Array.isArray(rows) || !rows[0]) {
-      return toError(400, 'BAD_REQUEST', 'controlPolicy.throttlingPolicyId is not found.')
-    }
-  }
-  return { ok: true, value: null }
-}
-
-function normalizePackageModules(payload, pricePlanVersion) {
-  const meta = extractPricePlanMeta(pricePlanVersion)
-  const carrierSource = payload?.carrierServiceConfig ?? meta.carrierService
-  const commercialSource = payload?.commercialTerms ?? meta.commercialTerms
-  const controlSource = payload?.controlPolicy ?? meta.controlPolicy
-  const carrierNormalized = normalizeCarrierServiceConfig(carrierSource)
-  if (!carrierNormalized.ok) return carrierNormalized
-  const commercialNormalized = normalizeCommercialTerms(commercialSource)
-  if (!commercialNormalized.ok) return commercialNormalized
-  if (!commercialNormalized.value) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms is required.')
-  }
-  const controlNormalized = normalizeControlPolicy(controlSource)
-  if (!controlNormalized.ok) return controlNormalized
-  if (!controlNormalized.value) {
-    return toError(400, 'BAD_REQUEST', 'controlPolicy is required.')
-  }
-  return {
-    ok: true,
-    value: {
-      carrierServiceConfig: carrierNormalized.value,
-      commercialTerms: commercialNormalized.value,
-      controlPolicy: controlNormalized.value,
-    },
-  }
-}
-
-export function validateCommercialTermsModule(payload) {
-  const commercialNormalized = normalizeCommercialTerms(payload?.commercialTerms ?? payload)
-  if (!commercialNormalized.ok) return commercialNormalized
-  if (!commercialNormalized.value || !Object.keys(commercialNormalized.value).length) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms is required.')
-  }
-  return { ok: true, value: { commercialTerms: commercialNormalized.value } }
-}
-
-export async function validateControlPolicyModule({ supabase, payload }) {
-  const controlNormalized = normalizeControlPolicy(payload?.controlPolicy ?? payload)
-  if (!controlNormalized.ok) return controlNormalized
-  if (!controlNormalized.value || !Object.keys(controlNormalized.value).length) {
-    return toError(400, 'BAD_REQUEST', 'controlPolicy is required.')
-  }
-  const references = await validateControlPolicyReferences(supabase, controlNormalized.value)
-  if (!references.ok) return references
-  return { ok: true, value: { controlPolicy: controlNormalized.value } }
-}
-
-export async function validateCarrierServiceModule({ supabase, payload }) {
-  const carrierNormalized = normalizeCarrierServiceConfig(payload?.carrierServiceConfig ?? payload)
-  if (!carrierNormalized.ok) return carrierNormalized
-  const references = await validateModuleReferences(supabase, carrierNormalized.value, null)
-  if (!references.ok) return references
-  return { ok: true, value: { carrierServiceConfig: carrierNormalized.value } }
-}
-
-function normalizeOptionalTenantId(value, fieldName) {
-  if (value === undefined || value === null || String(value).trim() === '') return { ok: true, value: null }
-  const id = String(value).trim()
-  if (!isValidUuid(id)) return toError(400, 'BAD_REQUEST', `${fieldName} must be a valid uuid.`)
-  return { ok: true, value: id }
-}
-
-function mapCommercialTermsModule(row) {
-  return {
-    commercialTermsId: row?.commercial_terms_id ?? null,
-    commercialTerms: row?.commercial_terms ?? {},
-    enterpriseId: row?.enterprise_id ?? null,
-    resellerId: row?.reseller_id ?? null,
-    createdAt: row?.created_at ?? null,
-    updatedAt: row?.updated_at ?? null,
-  }
-}
-
-function mapControlPolicyModule(row) {
-  return {
-    controlPolicyId: row?.control_policy_id ?? null,
-    controlPolicy: row?.control_policy ?? {},
-    enterpriseId: row?.enterprise_id ?? null,
-    resellerId: row?.reseller_id ?? null,
-    createdAt: row?.created_at ?? null,
-    updatedAt: row?.updated_at ?? null,
-  }
-}
-
-function mapCarrierServiceModule(row) {
-  return {
-    carrierServiceId: row?.carrier_service_id ?? null,
-    supplierId: row?.supplier_id ?? null,
-    operatorId: row?.operator_id ?? null,
-    carrierServiceConfig: row?.carrier_service_config ?? {},
-    enterpriseId: row?.enterprise_id ?? null,
-    resellerId: row?.reseller_id ?? null,
-    status: row?.status ?? null,
-    effectiveFrom: row?.effective_from ?? null,
-    createdAt: row?.created_at ?? null,
-    updatedAt: row?.updated_at ?? null,
-  }
-}
-
-export async function createCommercialTerms({ supabase, payload, audit }) {
-  const normalized = validateCommercialTermsModule(payload)
-  if (!normalized.ok) return normalized
-  const enterpriseIdResult = normalizeOptionalTenantId(payload?.enterpriseId, 'enterpriseId')
-  if (!enterpriseIdResult.ok) return enterpriseIdResult
-  const resellerIdResult = normalizeOptionalTenantId(payload?.resellerId, 'resellerId')
-  if (!resellerIdResult.ok) return resellerIdResult
-  const rows = await supabase.insert(
-    'commercial_terms_modules',
-    {
-      enterprise_id: enterpriseIdResult.value,
-      reseller_id: resellerIdResult.value,
-      commercial_terms: normalized.value.commercialTerms,
-    },
-    { returning: 'representation' }
-  )
-  const created = Array.isArray(rows) ? rows[0] : null
-  if (!created?.commercial_terms_id) return toError(500, 'INTERNAL_ERROR', 'Failed to create commercial terms.')
-  await writeAuditLog(supabase, {
-    actor_user_id: audit?.actorUserId ?? null,
-    actor_role: audit?.actorRole ?? null,
-    tenant_id: enterpriseIdResult.value ?? null,
-    action: 'COMMERCIAL_TERMS_CREATED',
-    target_type: 'COMMERCIAL_TERMS',
-    target_id: created.commercial_terms_id,
-    request_id: audit?.requestId ?? null,
-    source_ip: audit?.sourceIp ?? null,
-    after_data: mapCommercialTermsModule(created),
-  })
-  return { ok: true, value: mapCommercialTermsModule(created) }
-}
-
-export async function updateCommercialTerms({ supabase, commercialTermsId, payload, audit }) {
-  if (!isValidUuid(commercialTermsId)) return toError(400, 'BAD_REQUEST', 'commercialTermsId must be a valid uuid.')
-  const rows = await supabase.select(
-    'commercial_terms_modules',
-    `select=commercial_terms_id,enterprise_id,reseller_id,commercial_terms,created_at,updated_at&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`
-  )
-  const existing = Array.isArray(rows) ? rows[0] : null
-  if (!existing?.commercial_terms_id) return toError(404, 'NOT_FOUND', 'Commercial terms not found.')
-  const normalized = normalizeCommercialTerms(payload?.commercialTerms ?? payload)
-  if (!normalized.ok) return normalized
-  if (!normalized.value || !Object.keys(normalized.value).length) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms is required.')
-  }
-  const merged = { ...(existing.commercial_terms ?? {}), ...normalized.value }
-  await supabase.update(
-    'commercial_terms_modules',
-    `commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}`,
-    { commercial_terms: merged, updated_at: new Date().toISOString() },
-    { returning: 'minimal' }
-  )
-  const refreshedRows = await supabase.select(
-    'commercial_terms_modules',
-    `select=commercial_terms_id,enterprise_id,reseller_id,commercial_terms,created_at,updated_at&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`
-  )
-  const refreshed = Array.isArray(refreshedRows) ? refreshedRows[0] : null
-  await writeAuditLog(supabase, {
-    actor_user_id: audit?.actorUserId ?? null,
-    actor_role: audit?.actorRole ?? null,
-    tenant_id: existing?.enterprise_id ?? null,
-    action: 'COMMERCIAL_TERMS_UPDATED',
-    target_type: 'COMMERCIAL_TERMS',
-    target_id: commercialTermsId,
-    request_id: audit?.requestId ?? null,
-    source_ip: audit?.sourceIp ?? null,
-    before_data: mapCommercialTermsModule(existing),
-    after_data: mapCommercialTermsModule(refreshed),
-  })
-  return { ok: true, value: mapCommercialTermsModule(refreshed) }
-}
-
-export async function getCommercialTermsDetail({ supabase, commercialTermsId }) {
-  if (!isValidUuid(commercialTermsId)) return toError(400, 'BAD_REQUEST', 'commercialTermsId must be a valid uuid.')
-  const rows = await supabase.select(
-    'commercial_terms_modules',
-    `select=commercial_terms_id,enterprise_id,reseller_id,commercial_terms,created_at,updated_at&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`
-  )
-  const item = Array.isArray(rows) ? rows[0] : null
-  if (!item?.commercial_terms_id) return toError(404, 'NOT_FOUND', 'Commercial terms not found.')
-  return { ok: true, value: mapCommercialTermsModule(item) }
-}
-
-export async function createControlPolicy({ supabase, payload, audit }) {
-  const normalized = await validateControlPolicyModule({ supabase, payload })
-  if (!normalized.ok) return normalized
-  const enterpriseIdResult = normalizeOptionalTenantId(payload?.enterpriseId, 'enterpriseId')
-  if (!enterpriseIdResult.ok) return enterpriseIdResult
-  const resellerIdResult = normalizeOptionalTenantId(payload?.resellerId, 'resellerId')
-  if (!resellerIdResult.ok) return resellerIdResult
-  const rows = await supabase.insert(
-    'control_policy_modules',
-    {
-      enterprise_id: enterpriseIdResult.value,
-      reseller_id: resellerIdResult.value,
-      control_policy: normalized.value.controlPolicy,
-    },
-    { returning: 'representation' }
-  )
-  const created = Array.isArray(rows) ? rows[0] : null
-  if (!created?.control_policy_id) return toError(500, 'INTERNAL_ERROR', 'Failed to create control policy.')
-  await writeAuditLog(supabase, {
-    actor_user_id: audit?.actorUserId ?? null,
-    actor_role: audit?.actorRole ?? null,
-    tenant_id: enterpriseIdResult.value ?? null,
-    action: 'CONTROL_POLICY_CREATED',
-    target_type: 'CONTROL_POLICY',
-    target_id: created.control_policy_id,
-    request_id: audit?.requestId ?? null,
-    source_ip: audit?.sourceIp ?? null,
-    after_data: mapControlPolicyModule(created),
-  })
-  return { ok: true, value: mapControlPolicyModule(created) }
-}
-
-export async function updateControlPolicy({ supabase, controlPolicyId, payload, audit }) {
-  if (!isValidUuid(controlPolicyId)) return toError(400, 'BAD_REQUEST', 'controlPolicyId must be a valid uuid.')
-  const rows = await supabase.select(
-    'control_policy_modules',
-    `select=control_policy_id,enterprise_id,reseller_id,control_policy,created_at,updated_at&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`
-  )
-  const existing = Array.isArray(rows) ? rows[0] : null
-  if (!existing?.control_policy_id) return toError(404, 'NOT_FOUND', 'Control policy not found.')
-  const normalized = normalizeControlPolicy(payload?.controlPolicy ?? payload)
-  if (!normalized.ok) return normalized
-  if (!normalized.value || !Object.keys(normalized.value).length) {
-    return toError(400, 'BAD_REQUEST', 'controlPolicy is required.')
-  }
-  const merged = { ...(existing.control_policy ?? {}), ...normalized.value }
-  const references = await validateControlPolicyReferences(supabase, merged)
-  if (!references.ok) return references
-  await supabase.update(
-    'control_policy_modules',
-    `control_policy_id=eq.${encodeURIComponent(controlPolicyId)}`,
-    { control_policy: merged, updated_at: new Date().toISOString() },
-    { returning: 'minimal' }
-  )
-  const refreshedRows = await supabase.select(
-    'control_policy_modules',
-    `select=control_policy_id,enterprise_id,reseller_id,control_policy,created_at,updated_at&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`
-  )
-  const refreshed = Array.isArray(refreshedRows) ? refreshedRows[0] : null
-  await writeAuditLog(supabase, {
-    actor_user_id: audit?.actorUserId ?? null,
-    actor_role: audit?.actorRole ?? null,
-    tenant_id: existing?.enterprise_id ?? null,
-    action: 'CONTROL_POLICY_UPDATED',
-    target_type: 'CONTROL_POLICY',
-    target_id: controlPolicyId,
-    request_id: audit?.requestId ?? null,
-    source_ip: audit?.sourceIp ?? null,
-    before_data: mapControlPolicyModule(existing),
-    after_data: mapControlPolicyModule(refreshed),
-  })
-  return { ok: true, value: mapControlPolicyModule(refreshed) }
-}
-
-export async function getControlPolicyDetail({ supabase, controlPolicyId }) {
-  if (!isValidUuid(controlPolicyId)) return toError(400, 'BAD_REQUEST', 'controlPolicyId must be a valid uuid.')
-  const rows = await supabase.select(
-    'control_policy_modules',
-    `select=control_policy_id,enterprise_id,reseller_id,control_policy,created_at,updated_at&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`
-  )
-  const item = Array.isArray(rows) ? rows[0] : null
-  if (!item?.control_policy_id) return toError(404, 'NOT_FOUND', 'Control policy not found.')
-  return { ok: true, value: mapControlPolicyModule(item) }
-}
-
-export async function listCommercialTerms({ supabase, status, page, pageSize, enterpriseId, resellerId }) {
-  if (enterpriseId && !isValidUuid(enterpriseId)) {
-    return toError(400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
-  }
-  if (resellerId && !isValidUuid(resellerId)) {
-    return toError(400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
-  }
-  const filters = [
-    'select=commercial_terms_id,enterprise_id,reseller_id,commercial_terms,created_at,updated_at',
-  ]
-  if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
-  if (resellerId) filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
-  filters.push('order=created_at.desc')
-  const rows = await supabase.select('commercial_terms_modules', filters.join('&'))
-  let items = (Array.isArray(rows) ? rows : []).map(mapCommercialTermsModule)
-  if (status) items = items.filter((it) => String(it?.status ?? '') === String(status))
-  const p = Number(page) || 1
-  const ps = Number(pageSize) || 20
-  const start = (p - 1) * ps
-  const total = items.length
-  items = items.slice(start, start + ps)
-  return { ok: true, value: { items, total } }
-}
-
-export async function listControlPolicies({ supabase, status, page, pageSize, enterpriseId, resellerId }) {
-  if (enterpriseId && !isValidUuid(enterpriseId)) {
-    return toError(400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
-  }
-  if (resellerId && !isValidUuid(resellerId)) {
-    return toError(400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
-  }
-  const filters = [
-    'select=control_policy_id,enterprise_id,reseller_id,control_policy,created_at,updated_at',
-  ]
-  if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
-  if (resellerId) filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
-  filters.push('order=created_at.desc')
-  const rows = await supabase.select('control_policy_modules', filters.join('&'))
-  let items = (Array.isArray(rows) ? rows : []).map(mapControlPolicyModule)
-  if (status) items = items.filter((it) => String(it?.status ?? '') === String(status))
-  const p = Number(page) || 1
-  const ps = Number(pageSize) || 20
-  const start = (p - 1) * ps
-  const total = items.length
-  items = items.slice(start, start + ps)
-  return { ok: true, value: { items, total } }
-}
-
-export async function cloneCommercialTerms({ supabase, commercialTermsId, payload, audit }) {
-  if (!isValidUuid(commercialTermsId)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTermsId must be a valid uuid.')
-  }
-  const sourceRows = await supabase.select(
-    'commercial_terms_modules',
-    `select=commercial_terms_id,enterprise_id,reseller_id,commercial_terms,created_at,updated_at&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`
-  )
-  const source = Array.isArray(sourceRows) ? sourceRows[0] : null
-  if (!source?.commercial_terms_id) return toError(404, 'NOT_FOUND', 'Source commercial terms not found.')
-  const rows = await supabase.insert(
-    'commercial_terms_modules',
-    {
-      enterprise_id: payload?.enterpriseId ?? source.enterprise_id,
-      reseller_id: payload?.resellerId ?? source.reseller_id,
-      commercial_terms: payload?.commercialTerms ?? source.commercial_terms,
-    },
-    { returning: 'representation' }
-  )
-  const cloned = Array.isArray(rows) ? rows[0] : null
-  if (!cloned?.commercial_terms_id) {
-    return toError(500, 'INTERNAL_ERROR', 'Failed to clone commercial terms.')
-  }
-  await writeAuditLog(supabase, {
-    actor_user_id: audit?.actorUserId ?? null,
-    actor_role: audit?.actorRole ?? null,
-    tenant_id: source.enterprise_id ?? null,
-    action: 'COMMERCIAL_TERMS_CLONED',
-    target_type: 'COMMERCIAL_TERMS',
-    target_id: cloned.commercial_terms_id,
-    request_id: audit?.requestId ?? null,
-    source_ip: audit?.sourceIp ?? null,
-    after_data: {
-      commercialTermsId: cloned.commercial_terms_id,
-      sourceCommercialTermsId: commercialTermsId,
-    },
-  })
-  return {
-    ok: true,
-    value: {
-      ...mapCommercialTermsModule(cloned),
-      sourceCommercialTermsId: commercialTermsId,
-    },
-  }
-}
-
-export async function cloneControlPolicy({ supabase, controlPolicyId, payload, audit }) {
-  if (!isValidUuid(controlPolicyId)) {
-    return toError(400, 'BAD_REQUEST', 'controlPolicyId must be a valid uuid.')
-  }
-  const sourceRows = await supabase.select(
-    'control_policy_modules',
-    `select=control_policy_id,enterprise_id,reseller_id,control_policy,created_at,updated_at&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`
-  )
-  const source = Array.isArray(sourceRows) ? sourceRows[0] : null
-  if (!source?.control_policy_id) return toError(404, 'NOT_FOUND', 'Source control policy not found.')
-  const rows = await supabase.insert(
-    'control_policy_modules',
-    {
-      enterprise_id: payload?.enterpriseId ?? source.enterprise_id,
-      reseller_id: payload?.resellerId ?? source.reseller_id,
-      control_policy: payload?.controlPolicy ?? source.control_policy,
-    },
-    { returning: 'representation' }
-  )
-  const cloned = Array.isArray(rows) ? rows[0] : null
-  if (!cloned?.control_policy_id) {
-    return toError(500, 'INTERNAL_ERROR', 'Failed to clone control policy.')
-  }
-  await writeAuditLog(supabase, {
-    actor_user_id: audit?.actorUserId ?? null,
-    actor_role: audit?.actorRole ?? null,
-    tenant_id: source.enterprise_id ?? null,
-    action: 'CONTROL_POLICY_CLONED',
-    target_type: 'CONTROL_POLICY',
-    target_id: cloned.control_policy_id,
-    request_id: audit?.requestId ?? null,
-    source_ip: audit?.sourceIp ?? null,
-    after_data: {
-      controlPolicyId: cloned.control_policy_id,
-      sourceControlPolicyId: controlPolicyId,
-    },
-  })
-  return {
-    ok: true,
-    value: {
-      ...mapControlPolicyModule(cloned),
-      sourceControlPolicyId: controlPolicyId,
-    },
-  }
-}
-
-export async function createCarrierService({ supabase, payload, audit }) {
-  const normalized = await validateCarrierServiceModule({ supabase, payload })
-  if (!normalized.ok) return normalized
-  const resellerIdResult = normalizeOptionalTenantId(payload?.resellerId, 'resellerId')
-  if (!resellerIdResult.ok) return resellerIdResult
-  const carrierServiceConfig = normalized.value.carrierServiceConfig
-  const rows = await supabase.insert(
-    'carrier_service_modules',
-    {
-      enterprise_id: null,
-      reseller_id: resellerIdResult.value,
-      supplier_id: carrierServiceConfig.supplierId,
-      operator_id: carrierServiceConfig.operatorId,
-      carrier_service_config: carrierServiceConfig,
-    },
-    { returning: 'representation' }
-  )
-  const created = Array.isArray(rows) ? rows[0] : null
-  if (!created?.carrier_service_id) return toError(500, 'INTERNAL_ERROR', 'Failed to create carrier service.')
-  await writeAuditLog(supabase, {
-    actor_user_id: audit?.actorUserId ?? null,
-    actor_role: audit?.actorRole ?? null,
-    tenant_id: null,
-    action: 'CARRIER_SERVICE_CREATED',
-    target_type: 'CARRIER_SERVICE',
-    target_id: created.carrier_service_id,
-    request_id: audit?.requestId ?? null,
-    source_ip: audit?.sourceIp ?? null,
-    after_data: mapCarrierServiceModule(created),
-  })
-  return { ok: true, value: mapCarrierServiceModule(created) }
-}
-
-export async function updateCarrierService({ supabase, carrierServiceId, payload, audit }) {
-  if (!isValidUuid(carrierServiceId)) return toError(400, 'BAD_REQUEST', 'carrierServiceId must be a valid uuid.')
-  const rows = await supabase.select(
-    'carrier_service_modules',
-    `select=carrier_service_id,enterprise_id,reseller_id,carrier_service_config,created_at,updated_at&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}&limit=1`
-  )
-  const existing = Array.isArray(rows) ? rows[0] : null
-  if (!existing?.carrier_service_id) return toError(404, 'NOT_FOUND', 'Carrier service not found.')
-  const mergedInput = {
-    ...(existing.carrier_service_config ?? {}),
-    ...(payload?.carrierServiceConfig ?? payload ?? {}),
-  }
-  const normalized = await validateCarrierServiceModule({ supabase, payload: { carrierServiceConfig: mergedInput } })
-  if (!normalized.ok) return normalized
-  const carrierServiceConfig = normalized.value.carrierServiceConfig
-  await supabase.update(
-    'carrier_service_modules',
-    `carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}`,
-    {
-      supplier_id: carrierServiceConfig.supplierId,
-      operator_id: carrierServiceConfig.operatorId,
-      carrier_service_config: carrierServiceConfig,
-      updated_at: new Date().toISOString(),
-    },
-    { returning: 'minimal' }
-  )
-  const refreshedRows = await supabase.select(
-    'carrier_service_modules',
-    `select=carrier_service_id,enterprise_id,reseller_id,carrier_service_config,created_at,updated_at&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}&limit=1`
-  )
-  const refreshed = Array.isArray(refreshedRows) ? refreshedRows[0] : null
-  await writeAuditLog(supabase, {
-    actor_user_id: audit?.actorUserId ?? null,
-    actor_role: audit?.actorRole ?? null,
-    tenant_id: existing?.enterprise_id ?? null,
-    action: 'CARRIER_SERVICE_UPDATED',
-    target_type: 'CARRIER_SERVICE',
-    target_id: carrierServiceId,
-    request_id: audit?.requestId ?? null,
-    source_ip: audit?.sourceIp ?? null,
-    before_data: mapCarrierServiceModule(existing),
-    after_data: mapCarrierServiceModule(refreshed),
-  })
-  return { ok: true, value: mapCarrierServiceModule(refreshed) }
-}
-
-export async function getCarrierServiceDetail({ supabase, carrierServiceId }) {
-  if (!isValidUuid(carrierServiceId)) return toError(400, 'BAD_REQUEST', 'carrierServiceId must be a valid uuid.')
-  const rows = await supabase.select(
-    'carrier_service_modules',
-    `select=carrier_service_id,enterprise_id,reseller_id,carrier_service_config,created_at,updated_at&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}&limit=1`
-  )
-  const item = Array.isArray(rows) ? rows[0] : null
-  if (!item?.carrier_service_id) return toError(404, 'NOT_FOUND', 'Carrier service not found.')
-  return { ok: true, value: mapCarrierServiceModule(item) }
-}
-
-function collectCarrierServiceConfigProfileRefs(config, key) {
-  const refs = new Set()
-  if (!config || typeof config !== 'object') return refs
-  if (key === 'apnProfileId') {
-    const profileId = String(config.apnProfileId ?? config.apn_profile_id ?? '').trim()
-    const profileVersionId = String(config.apnProfileVersionId ?? '').trim()
-    if (profileId) refs.add(profileId)
-    if (profileVersionId) refs.add(profileVersionId)
-    return refs
-  }
-  const profileId = String(config.roamingProfileId ?? config.roaming_profile_id ?? '').trim()
-  const profileVersionId = String(config.roamingProfileVersionId ?? '').trim()
-  if (profileId) refs.add(profileId)
-  if (profileVersionId) refs.add(profileVersionId)
-  return refs
-}
-
-async function resolveCompatibleProfileRefs(supabase, profileRef, profileType) {
-  const refs = new Set()
-  const normalized = String(profileRef ?? '').trim()
-  if (!normalized) return refs
-  refs.add(normalized)
-  const byVersionRows = await supabase.select(
-    'profile_versions',
-    `select=profile_id,profile_version_id,profile_type&profile_version_id=eq.${encodeURIComponent(normalized)}&profile_type=eq.${encodeURIComponent(profileType)}&limit=1`
-  )
-  const byVersion = Array.isArray(byVersionRows) ? byVersionRows[0] : null
-  const profileIdFromVersion = String(byVersion?.profile_id ?? '').trim()
-  const profileVersionId = String(byVersion?.profile_version_id ?? '').trim()
-  if (profileIdFromVersion) refs.add(profileIdFromVersion)
-  if (profileVersionId) refs.add(profileVersionId)
-  const byProfileRows = await supabase.select(
-    'profile_versions',
-    `select=profile_id,profile_version_id,profile_type&profile_id=eq.${encodeURIComponent(normalized)}&profile_type=eq.${encodeURIComponent(profileType)}`
-  )
-  for (const row of Array.isArray(byProfileRows) ? byProfileRows : []) {
-    const profileId = String(row?.profile_id ?? '').trim()
-    const profileVersion = String(row?.profile_version_id ?? '').trim()
-    if (profileId) refs.add(profileId)
-    if (profileVersion) refs.add(profileVersion)
-  }
-  return refs
-}
-
-function chooseLatestCarrierServiceReference(current, candidate) {
-  const candidateRef = {
-    carrier_service_id: String(candidate?.carrier_service_id ?? '').trim(),
-    status: candidate?.status ?? null,
-    effective_from: candidate?.effective_from ?? null,
-    created_at: candidate?.created_at ?? null,
-    version: Number(candidate?.version ?? 0) || 0,
-  }
-  if (!candidateRef.carrier_service_id) return current
-  if (!current) return candidateRef
-  const candidateTime = new Date(candidateRef.effective_from || candidateRef.created_at || 0).getTime()
-  const currentTime = new Date(current.effective_from || current.created_at || 0).getTime()
-  if (candidateTime > currentTime) return candidateRef
-  if (candidateTime < currentTime) return current
-  if ((candidateRef.version ?? 0) > (current.version ?? 0)) return candidateRef
-  return current
-}
-
-export async function listCarrierServices({
-  supabase,
-  apnProfileId,
-  roamingProfileId,
-  status,
-  page,
-  pageSize,
-  enterpriseId,
-  resellerId,
-}) {
-  const apnProfileIdValue = apnProfileId ? String(apnProfileId).trim() : null
-  const roamingProfileIdValue = roamingProfileId ? String(roamingProfileId).trim() : null
-  if (!apnProfileIdValue && !roamingProfileIdValue) {
-    return toError(400, 'BAD_REQUEST', 'apnProfileId or roamingProfileId is required.')
-  }
-  if (apnProfileIdValue && !isValidUuid(apnProfileIdValue)) {
-    return toError(400, 'BAD_REQUEST', 'apnProfileId must be a valid uuid.')
-  }
-  if (roamingProfileIdValue && !isValidUuid(roamingProfileIdValue)) {
-    return toError(400, 'BAD_REQUEST', 'roamingProfileId must be a valid uuid.')
-  }
-  if (enterpriseId && !isValidUuid(enterpriseId)) {
-    return toError(400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
-  }
-  if (resellerId && !isValidUuid(resellerId)) {
-    return toError(400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
-  }
-  const filters = ['select=carrier_service_id,enterprise_id,reseller_id,supplier_id,operator_id,carrier_service_config,created_at,updated_at']
-  if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
-  if (resellerId) filters.push(`reseller_id=eq.${encodeURIComponent(resellerId)}`)
-  filters.push('order=created_at.desc')
-  const [apnAcceptableRefs, roamingAcceptableRefs] = await Promise.all([
-    apnProfileIdValue ? resolveCompatibleProfileRefs(supabase, apnProfileIdValue, 'APN') : Promise.resolve(new Set()),
-    roamingProfileIdValue
-      ? resolveCompatibleProfileRefs(supabase, roamingProfileIdValue, 'ROAMING')
-      : Promise.resolve(new Set()),
-  ])
-  const rows = await supabase.select('carrier_service_modules', filters.join('&'))
-  const services = Array.isArray(rows) ? rows : []
-  const filteredServices = services.filter((row) => {
-    const config = row?.carrier_service_config ?? {}
-    const apnRefs = collectCarrierServiceConfigProfileRefs(config, 'apnProfileId')
-    const roamingRefs = collectCarrierServiceConfigProfileRefs(config, 'roamingProfileId')
-    if (apnProfileIdValue && !Array.from(apnRefs).some((ref) => apnAcceptableRefs.has(ref))) return false
-    if (roamingProfileIdValue && !Array.from(roamingRefs).some((ref) => roamingAcceptableRefs.has(ref))) return false
-    return true
-  })
-  const serviceIds = filteredServices.map((row) => String(row?.carrier_service_id ?? '').trim()).filter(Boolean)
-  const latestRefByCarrierServiceId = new Map()
-  if (serviceIds.length) {
-    const idFilter = serviceIds.map((id) => encodeURIComponent(id)).join(',')
-    const refs = await supabase.select(
-      'package_versions',
-      `select=carrier_service_id,status,effective_from,created_at,version&carrier_service_id=in.(${idFilter})`
-    )
-    for (const ref of Array.isArray(refs) ? refs : []) {
-      const carrierServiceIdKey = String(ref?.carrier_service_id ?? '').trim()
-      if (!carrierServiceIdKey) continue
-      const current = latestRefByCarrierServiceId.get(carrierServiceIdKey)
-      const next = chooseLatestCarrierServiceReference(current, ref)
-      if (next) latestRefByCarrierServiceId.set(carrierServiceIdKey, next)
-    }
-  }
-  let items = filteredServices.map((row) => {
-    const mapped = mapCarrierServiceModule(row)
-    const ref = latestRefByCarrierServiceId.get(String(row?.carrier_service_id ?? '').trim())
-    const resolvedStatus = ref?.status ?? 'DRAFT'
-    const resolvedEffectiveFrom = ref?.effective_from ?? null
-    return {
-      ...mapped,
-      status: resolvedStatus,
-      effectiveFrom: resolvedEffectiveFrom,
-    }
-  })
-  if (status) items = items.filter((it) => String(it?.status ?? '') === String(status))
-  const p = Number(page) || 1
-  const ps = Number(pageSize) || 20
-  const start = (p - 1) * ps
-  const total = items.length
-  items = items.slice(start, start + ps)
-  return { ok: true, value: { items, total } }
-}
-
-function parsePaygPatterns(paygRates) {
-  const zones = paygRates?.zones || {}
-  const entries = []
-  for (const zone of Object.values(zones)) {
-    const list = Array.isArray(zone?.mccmnc) ? zone.mccmnc : []
-    for (const raw of list) {
-      entries.push({ zone, value: String(raw || '').trim() })
-    }
-  }
-  return entries
-}
-
-function normalizePattern(value) {
-  if (!value) return null
-  if (value === '*') return { level: 'GLOBAL', key: '*' }
-  const mccWildcard = value.match(/^(\d{3})-\*$/)
-  if (mccWildcard) return { level: 'MCC', key: `${mccWildcard[1]}-*` }
-  const exact = value.match(/^(\d{3})-?(\d{2,3})$/)
-  if (exact) return { level: 'EXACT', key: `${exact[1]}-${exact[2]}` }
-  return null
-}
-
-function detectPaygConflicts(paygRates) {
-  const seen = new Map()
-  const entries = parsePaygPatterns(paygRates)
-  for (const entry of entries) {
-    const normalized = normalizePattern(entry.value)
-    if (!normalized) {
-      return { ok: false, message: `Invalid payg country pattern: ${entry.value}` }
-    }
-    const key = `${normalized.level}:${normalized.key}`
-    const prev = seen.get(key)
-    if (prev && prev !== entry.zone) {
-      return { ok: false, message: `PAYG conflict on ${normalized.key}` }
-    }
-    seen.set(key, entry.zone)
-  }
-  return { ok: true }
-}
-
-async function loadPackage(supabase, packageId) {
-  const rows = await supabase.select(
-    'packages',
-    `select=package_id,enterprise_id,name,created_at&package_id=eq.${encodeURIComponent(packageId)}&limit=1`
-  )
-  return Array.isArray(rows) ? rows[0] : null
-}
-
-async function loadLatestPackageVersion(supabase, packageId) {
-  const rows = await supabase.select(
-    'package_versions',
-    `select=package_version_id,package_id,version,status,effective_from,supplier_id,operator_id,service_type,apn,roaming_profile,carrier_service_id,carrier_service_config,control_policy_id,control_policy,commercial_terms_id,commercial_terms,price_plan_id,price_plan_id,created_at&package_id=eq.${encodeURIComponent(packageId)}&order=version.desc&limit=1`
-  )
-  return Array.isArray(rows) ? rows[0] : null
-}
-
-function mapPackageVersion(version) {
-  if (!version) return null
-  const roamingProfile = version.roaming_profile
-  const carrierServiceConfig =
-    version.carrier_service_config && typeof version.carrier_service_config === 'object'
-      ? version.carrier_service_config
-      : {
-          supplierId: version.supplier_id ?? null,
-          operatorId: version.operator_id ?? null,
-          apn: version.apn ?? null,
-          rat: roamingProfile?.rat ?? null,
-          apnProfileId: roamingProfile?.apnProfileId ?? null,
-          apnProfileVersionId: roamingProfile?.apnProfileVersionId ?? null,
-          roamingProfileId: roamingProfile?.profileId ?? null,
-          roamingProfileVersionId: roamingProfile?.profileVersionId ?? null,
+    const rawObj = input;
+    const allowedKeys = new Set([
+        'testPeriodDays',
+        'testQuotaMb',
+        'testExpiryCondition',
+        'testExpiryAction',
+        'commitmentPeriodMonths',
+        'commitmentPeriodDays',
+    ]);
+    for (const key of Object.keys(rawObj)) {
+        if (!allowedKeys.has(key)) {
+            return toError(400, 'BAD_REQUEST', `commercialTerms.${key} is not allowed.`);
         }
-  return {
-    packageVersionId: version.package_version_id,
-    version: version.version,
-    status: version.status,
-    effectiveFrom: version.effective_from,
-    supplierId: version.supplier_id,
-    carrierId: version.operator_id ?? null,
-    serviceType: version.service_type,
-    apn: version.apn,
-    roamingProfile: version.roaming_profile,
-    carrierServiceConfig,
-    carrierServiceId: version.carrier_service_id ?? null,
-    controlPolicyId: version.control_policy_id ?? null,
-    commercialTermsId: version.commercial_terms_id ?? null,
-    controlPolicy: version.control_policy,
-    commercialTerms: version.commercial_terms,
-    pricePlanId: version.price_plan_id ?? null,
-    pricePlanId: version.price_plan_id,
-    createdAt: version.created_at,
-  }
-}
-
-async function resolveModulePayloadByIds({ supabase, carrierServiceId, controlPolicyId, commercialTermsId }) {
-  let carrierServiceConfig = null
-  let controlPolicy = null
-  let commercialTerms = null
-  if (carrierServiceId) {
-    if (!isValidUuid(carrierServiceId)) return toError(400, 'BAD_REQUEST', 'carrierServiceId must be a valid uuid.')
-    const rows = await supabase.select(
-      'carrier_service_modules',
-      `select=carrier_service_id,carrier_service_config&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}&limit=1`
-    )
-    const row = Array.isArray(rows) ? rows[0] : null
-    if (!row?.carrier_service_id) return toError(404, 'NOT_FOUND', 'Carrier service not found.')
-    carrierServiceConfig = row.carrier_service_config ?? null
-  }
-  if (controlPolicyId) {
-    if (!isValidUuid(controlPolicyId)) return toError(400, 'BAD_REQUEST', 'controlPolicyId must be a valid uuid.')
-    const rows = await supabase.select(
-      'control_policy_modules',
-      `select=control_policy_id,control_policy&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`
-    )
-    const row = Array.isArray(rows) ? rows[0] : null
-    if (!row?.control_policy_id) return toError(404, 'NOT_FOUND', 'Control policy not found.')
-    controlPolicy = row.control_policy ?? null
-  }
-  if (commercialTermsId) {
-    if (!isValidUuid(commercialTermsId)) return toError(400, 'BAD_REQUEST', 'commercialTermsId must be a valid uuid.')
-    const rows = await supabase.select(
-      'commercial_terms_modules',
-      `select=commercial_terms_id,commercial_terms&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`
-    )
-    const row = Array.isArray(rows) ? rows[0] : null
-    if (!row?.commercial_terms_id) return toError(404, 'NOT_FOUND', 'Commercial terms not found.')
-    commercialTerms = row.commercial_terms ?? null
-  }
-  return { ok: true, value: { carrierServiceConfig, controlPolicy, commercialTerms } }
-}
-
-export async function createPackage({ supabase, enterpriseId, payload, audit }) {
-  if (!isValidUuid(enterpriseId)) {
-    return toError(400, 'BAD_REQUEST', 'enterpriseId is required and must be a valid uuid.')
-  }
-  const name = String(payload?.name || '').trim()
-  if (!name) return toError(400, 'BAD_REQUEST', 'name is required.')
-  const pricePlanId = String(payload?.pricePlanId || '').trim()
-  if (!pricePlanId) {
-    return toError(400, 'BAD_REQUEST', 'pricePlanId is required.')
-  }
-  if (pricePlanId && !isValidUuid(pricePlanId)) {
-    return toError(400, 'BAD_REQUEST', 'pricePlanId must be a valid uuid.')
-  }
-  if (pricePlanId && !isValidUuid(pricePlanId)) {
-    return toError(400, 'BAD_REQUEST', 'pricePlanId must be a valid uuid.')
-  }
-  const planVersionQuery = pricePlanId
-    ? `select=price_plan_id,price_plan_id,payg_rates&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
-    : `select=price_plan_id,price_plan_id,payg_rates&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc&limit=1`
-  const pricePlanVersionRows = await supabase.select('price_plans', planVersionQuery)
-  const pricePlanVersion = Array.isArray(pricePlanVersionRows) ? pricePlanVersionRows[0] : null
-  if (!pricePlanVersion) return toError(404, 'NOT_FOUND', 'Price plan not found.')
-  const carrierServiceId = payload?.carrierServiceId ? String(payload.carrierServiceId).trim() : null
-  const controlPolicyId = payload?.controlPolicyId ? String(payload.controlPolicyId).trim() : null
-  const commercialTermsId = payload?.commercialTermsId ? String(payload.commercialTermsId).trim() : null
-  const moduleById = await resolveModulePayloadByIds({
-    supabase,
-    carrierServiceId,
-    controlPolicyId,
-    commercialTermsId,
-  })
-  if (!moduleById.ok) return moduleById
-  const normalizeInput = {
-    ...payload,
-    ...(moduleById.value.carrierServiceConfig ? { carrierServiceConfig: moduleById.value.carrierServiceConfig } : {}),
-    ...(moduleById.value.controlPolicy ? { controlPolicy: moduleById.value.controlPolicy } : {}),
-    ...(moduleById.value.commercialTerms ? { commercialTerms: moduleById.value.commercialTerms } : {}),
-  }
-  const normalizedModules = normalizePackageModules(normalizeInput, pricePlanVersion)
-  if (!normalizedModules.ok) return normalizedModules
-  const modulesValidate = await validateModuleReferences(
-    supabase,
-    normalizedModules.value.carrierServiceConfig,
-    normalizedModules.value.controlPolicy
-  )
-  if (!modulesValidate.ok) return modulesValidate
-  const planRows = await supabase.select(
-    'price_plans',
-    `select=price_plan_id,service_type&price_plan_id=eq.${encodeURIComponent(pricePlanVersion.price_plan_id)}&limit=1`
-  )
-  const plan = Array.isArray(planRows) ? planRows[0] : null
-  if (!plan) return toError(404, 'NOT_FOUND', 'Price plan not found.')
-  const carrierServiceConfig = normalizedModules.value.carrierServiceConfig
-  const supplierId = modulesValidate.value.supplierId
-  const operatorId = modulesValidate.value.operatorId
-  const apn = String(carrierServiceConfig.apn)
-  const roamingProfile = normalizeRoamingProfile({
-    rat: carrierServiceConfig.rat,
-    roamingProfileId: carrierServiceConfig.roamingProfileId,
-    roamingProfileVersionId: carrierServiceConfig.roamingProfileVersionId,
-  })
-  if (carrierServiceConfig.apnProfileId) {
-    roamingProfile.apnProfileId = carrierServiceConfig.apnProfileId
-  }
-  if (carrierServiceConfig.apnProfileVersionId) {
-    roamingProfile.apnProfileVersionId = carrierServiceConfig.apnProfileVersionId
-  }
-  const packageRows = await supabase.insert(
-    'packages',
-    { enterprise_id: enterpriseId, name },
-    { returning: 'representation' }
-  )
-  const pkg = Array.isArray(packageRows) ? packageRows[0] : null
-  if (!pkg?.package_id) return toError(500, 'INTERNAL_ERROR', 'Failed to create package.')
-  const versionRows = await supabase.insert(
-    'package_versions',
-    {
-      package_id: pkg.package_id,
-      version: 1,
-      status: 'DRAFT',
-      effective_from: null,
-      supplier_id: supplierId,
-      operator_id: operatorId,
-      service_type: plan.service_type ?? 'DATA',
-      apn,
-      roaming_profile: roamingProfile,
-      carrier_service_id: carrierServiceId,
-      carrier_service_config: normalizedModules.value.carrierServiceConfig,
-      control_policy_id: controlPolicyId,
-      control_policy: normalizedModules.value.controlPolicy,
-      commercial_terms_id: commercialTermsId,
-      commercial_terms: normalizedModules.value.commercialTerms,
-      price_plan_id: pricePlanVersion.price_plan_id,
-      price_plan_id: pricePlanVersion.price_plan_id,
-    },
-    { returning: 'representation' }
-  )
-  const version = Array.isArray(versionRows) ? versionRows[0] : null
-  if (pkg?.package_id) {
-    await writeAuditLog(supabase, {
-      actor_user_id: audit?.actorUserId ?? null,
-      actor_role: audit?.actorRole ?? null,
-      tenant_id: enterpriseId ?? null,
-      action: 'PACKAGE_CREATED',
-      target_type: 'PACKAGE',
-      target_id: pkg.package_id,
-      request_id: audit?.requestId ?? null,
-      source_ip: audit?.sourceIp ?? null,
-      after_data: {
-        packageId: pkg.package_id,
-        packageVersionId: version?.package_version_id ?? null,
-        version: version?.version ?? 1,
-        status: version?.status ?? 'DRAFT',
-      },
-    })
-  }
-  return {
-    ok: true,
-    value: {
-      packageId: pkg.package_id,
-      packageVersionId: version?.package_version_id,
-      version: version?.version ?? 1,
-      status: version?.status ?? 'DRAFT',
-      createdAt: version?.created_at ?? pkg.created_at,
-    },
-  }
-}
-
-export async function updatePackage({ supabase, packageId, payload, audit }) {
-  if (!isValidUuid(packageId)) return toError(400, 'BAD_REQUEST', 'packageId must be a valid uuid.')
-  const pkg = await loadPackage(supabase, packageId)
-  if (!pkg) return toError(404, 'NOT_FOUND', 'Package not found.')
-  const latestVersion = await loadLatestPackageVersion(supabase, packageId)
-  if (!latestVersion) return toError(404, 'NOT_FOUND', 'Package version not found.')
-  if (latestVersion.status !== 'DRAFT') {
-    return toError(409, 'INVALID_STATUS', 'Only DRAFT package can be updated.')
-  }
-  const name = payload?.name ? String(payload.name).trim() : null
-  if (name) {
-    await supabase.update('packages', `package_id=eq.${encodeURIComponent(packageId)}`, { name }, { returning: 'minimal' })
-  }
-  const carrierServiceId = payload?.carrierServiceId ? String(payload.carrierServiceId).trim() : null
-  const controlPolicyId = payload?.controlPolicyId ? String(payload.controlPolicyId).trim() : null
-  const commercialTermsId = payload?.commercialTermsId ? String(payload.commercialTermsId).trim() : null
-  const moduleById = await resolveModulePayloadByIds({
-    supabase,
-    carrierServiceId,
-    controlPolicyId,
-    commercialTermsId,
-  })
-  if (!moduleById.ok) return moduleById
-  const mergedCarrierServiceConfig = {
-    supplierId: payload?.carrierServiceConfig?.supplierId ?? moduleById.value.carrierServiceConfig?.supplierId ?? latestVersion.supplier_id,
-    operatorId:
-      payload?.carrierServiceConfig?.operatorId ??
-      payload?.carrierServiceConfig?.carrierId ??
-      moduleById.value.carrierServiceConfig?.operatorId ??
-      latestVersion.operator_id,
-    apn: payload?.carrierServiceConfig?.apn ?? moduleById.value.carrierServiceConfig?.apn ?? latestVersion.apn,
-    rat: payload?.carrierServiceConfig?.rat ?? moduleById.value.carrierServiceConfig?.rat ?? latestVersion?.roaming_profile?.rat ?? '4G',
-    apnProfileId:
-      payload?.carrierServiceConfig?.apnProfileId ??
-      moduleById.value.carrierServiceConfig?.apnProfileId ??
-      latestVersion?.roaming_profile?.apnProfileId ??
-      null,
-    apnProfileVersionId:
-      payload?.carrierServiceConfig?.apnProfileVersionId ??
-      moduleById.value.carrierServiceConfig?.apnProfileVersionId ??
-      latestVersion?.roaming_profile?.apnProfileVersionId ??
-      null,
-    roamingProfileId:
-      payload?.carrierServiceConfig?.roamingProfileId ??
-      moduleById.value.carrierServiceConfig?.roamingProfileId ??
-      latestVersion?.roaming_profile?.profileId ??
-      null,
-    roamingProfileVersionId:
-      payload?.carrierServiceConfig?.roamingProfileVersionId ??
-      moduleById.value.carrierServiceConfig?.roamingProfileVersionId ??
-      latestVersion?.roaming_profile?.profileVersionId ??
-      null,
-  }
-  const carrierNormalized = normalizeCarrierServiceConfig(mergedCarrierServiceConfig)
-  if (!carrierNormalized.ok) return carrierNormalized
-  const commercialNormalized = normalizeCommercialTerms(
-    payload?.commercialTerms !== undefined ? payload.commercialTerms : moduleById.value.commercialTerms ?? latestVersion.commercial_terms
-  )
-  if (!commercialNormalized.ok) return commercialNormalized
-  const controlNormalized = normalizeControlPolicy(
-    payload?.controlPolicy !== undefined ? payload.controlPolicy : moduleById.value.controlPolicy ?? latestVersion.control_policy
-  )
-  if (!controlNormalized.ok) return controlNormalized
-  const modulesValidate = await validateModuleReferences(supabase, carrierNormalized.value, controlNormalized.value)
-  if (!modulesValidate.ok) return modulesValidate
-  const roamingProfile = normalizeRoamingProfile({
-    rat: carrierNormalized.value.rat,
-    roamingProfileId: carrierNormalized.value.roamingProfileId,
-    roamingProfileVersionId: carrierNormalized.value.roamingProfileVersionId,
-  })
-  if (carrierNormalized.value.apnProfileId) {
-    roamingProfile.apnProfileId = carrierNormalized.value.apnProfileId
-  }
-  if (carrierNormalized.value.apnProfileVersionId) {
-    roamingProfile.apnProfileVersionId = carrierNormalized.value.apnProfileVersionId
-  }
-  const patch = {}
-  patch.supplier_id = modulesValidate.value.supplierId
-  patch.operator_id = modulesValidate.value.operatorId
-  patch.apn = carrierNormalized.value.apn
-  patch.roaming_profile = roamingProfile
-  patch.carrier_service_config = carrierNormalized.value
-  if (carrierServiceId !== null) patch.carrier_service_id = carrierServiceId
-  if (controlPolicyId !== null) patch.control_policy_id = controlPolicyId
-  if (commercialTermsId !== null) patch.commercial_terms_id = commercialTermsId
-  patch.control_policy = controlNormalized.value
-  patch.commercial_terms = commercialNormalized.value
-  if (payload?.pricePlanId) {
-    const pricePlanId = String(payload.pricePlanId).trim()
-    if (!isValidUuid(pricePlanId)) {
-      return toError(400, 'BAD_REQUEST', 'pricePlanId must be a valid uuid.')
     }
-    patch.price_plan_id = pricePlanId
-  }
-  if (Object.keys(patch).length) {
-    await supabase.update(
-      'package_versions',
-      `package_version_id=eq.${encodeURIComponent(latestVersion.package_version_id)}`,
-      patch,
-      { returning: 'minimal' }
-    )
-  }
-  const updatedVersion = await loadLatestPackageVersion(supabase, packageId)
-  await writeAuditLog(supabase, {
-    actor_user_id: audit?.actorUserId ?? null,
-    actor_role: audit?.actorRole ?? null,
-    tenant_id: pkg.enterprise_id ?? null,
-    action: 'PACKAGE_UPDATED',
-    target_type: 'PACKAGE',
-    target_id: packageId,
-    request_id: audit?.requestId ?? null,
-    source_ip: audit?.sourceIp ?? null,
-    before_data: mapPackageVersion(latestVersion),
-    after_data: mapPackageVersion(updatedVersion),
-  })
-  return { ok: true, value: mapPackageVersion(updatedVersion) }
-}
-
-export async function publishPackage({ supabase, packageId, audit }) {
-  if (!isValidUuid(packageId)) return toError(400, 'BAD_REQUEST', 'packageId must be a valid uuid.')
-  const latestVersion = await loadLatestPackageVersion(supabase, packageId)
-  if (!latestVersion) return toError(404, 'NOT_FOUND', 'Package version not found.')
-  if (latestVersion.status !== 'DRAFT') {
-    return toError(409, 'INVALID_STATUS', 'Only DRAFT package can be published.')
-  }
-  const pricePlanVersionRows = await supabase.select('price_plans', latestVersion.price_plan_id
-    ? `select=price_plan_id,payg_rates&price_plan_id=eq.${encodeURIComponent(latestVersion.price_plan_id)}&order=version.desc&limit=1`
-    : `select=price_plan_id,payg_rates&price_plan_id=eq.${encodeURIComponent(latestVersion.price_plan_id)}&limit=1`)
-  const pricePlanVersion = Array.isArray(pricePlanVersionRows) ? pricePlanVersionRows[0] : null
-  if (!pricePlanVersion) return toError(404, 'NOT_FOUND', 'Price plan version not found.')
-  const conflictCheck = detectPaygConflicts(pricePlanVersion.payg_rates)
-  if (!conflictCheck.ok) return toError(409, 'PAYG_CONFLICT', conflictCheck.message)
-  const apnProfileId = latestVersion.roaming_profile?.apnProfileId
-  if (apnProfileId) {
-    const apnProfiles = await supabase.select(
-      'apn_profiles',
-      `select=apn_profile_id,status&apn_profile_id=eq.${encodeURIComponent(String(apnProfileId))}&limit=1`
-    )
-    const apnProfile = Array.isArray(apnProfiles) ? apnProfiles[0] : null
-    if (!apnProfile || apnProfile.status !== 'PUBLISHED') {
-      return toError(409, 'PROFILE_VERSION_INVALID', 'APN profile must be PUBLISHED.')
+    const parseOptionalNonNegativeInteger = (raw, fieldName, opts) => {
+        if (raw === undefined)
+            return { ok: true, value: undefined };
+        if (raw === null) {
+            return toError(400, 'BAD_REQUEST', opts?.required ? `${fieldName} is required.` : `${fieldName} is invalid.`);
+        }
+        if (typeof raw === 'string' && raw.trim() === '') {
+            return toError(400, 'BAD_REQUEST', opts?.required ? `${fieldName} is required.` : `${fieldName} is invalid.`);
+        }
+        const num = Number(raw);
+        if (!Number.isFinite(num) || !Number.isInteger(num) || num < 0) {
+            return toError(400, 'BAD_REQUEST', `${fieldName} is invalid.`);
+        }
+        return { ok: true, value: num };
+    };
+    const src = input;
+    const testPeriodDaysParsed = parseOptionalNonNegativeInteger(src.testPeriodDays, 'commercialTerms.testPeriodDays');
+    if (!testPeriodDaysParsed.ok)
+        return testPeriodDaysParsed;
+    const testQuotaMbParsed = parseOptionalNonNegativeInteger(src.testQuotaMb, 'commercialTerms.testQuotaMb');
+    if (!testQuotaMbParsed.ok)
+        return testQuotaMbParsed;
+    const commitmentPeriodMonthsParsed = parseOptionalNonNegativeInteger(src.commitmentPeriodMonths, 'commercialTerms.commitmentPeriodMonths');
+    if (!commitmentPeriodMonthsParsed.ok)
+        return commitmentPeriodMonthsParsed;
+    const commitmentPeriodDaysParsed = parseOptionalNonNegativeInteger(src.commitmentPeriodDays, 'commercialTerms.commitmentPeriodDays');
+    if (!commitmentPeriodDaysParsed.ok)
+        return commitmentPeriodDaysParsed;
+    const testExpiryConditionRaw = src.testExpiryCondition;
+    const testExpiryActionRaw = src.testExpiryAction;
+    const testPeriodDays = testPeriodDaysParsed.value;
+    const testQuotaMb = testQuotaMbParsed.value;
+    const commitmentPeriodMonths = commitmentPeriodMonthsParsed.value;
+    const commitmentPeriodDays = commitmentPeriodDaysParsed.value;
+    const testExpiryCondition = testExpiryConditionRaw === undefined ? undefined : String(testExpiryConditionRaw).trim().toUpperCase();
+    const testExpiryAction = testExpiryActionRaw === undefined ? undefined : String(testExpiryActionRaw).trim().toUpperCase();
+    if (testExpiryConditionRaw === null || (typeof testExpiryConditionRaw === 'string' && testExpiryConditionRaw.trim() === '')) {
+        return toError(400, 'BAD_REQUEST', 'commercialTerms.testExpiryCondition is required.');
     }
-  }
-  const apnProfileVersionId = latestVersion.roaming_profile?.apnProfileVersionId ?? latestVersion.control_policy?.apnProfileVersionId
-  if (apnProfileVersionId) {
-    const apnVersions = await supabase.select(
-      'profile_versions',
-      `select=profile_version_id,status,profile_type&profile_version_id=eq.${encodeURIComponent(String(apnProfileVersionId))}&limit=1`
-    )
-    const apnVersion = Array.isArray(apnVersions) ? apnVersions[0] : null
-    if (!apnVersion || apnVersion.profile_type !== 'APN' || apnVersion.status !== 'PUBLISHED') {
-      return toError(409, 'PROFILE_VERSION_INVALID', 'APN profile version must be PUBLISHED.')
+    if (testExpiryActionRaw === null || (typeof testExpiryActionRaw === 'string' && testExpiryActionRaw.trim() === '')) {
+        return toError(400, 'BAD_REQUEST', 'commercialTerms.testExpiryAction is required.');
     }
-  }
-  const roamingProfileId = latestVersion.roaming_profile?.profileId
-  if (roamingProfileId) {
-    const roamingProfiles = await supabase.select(
-      'roaming_profiles',
-      `select=roaming_profile_id,status&roaming_profile_id=eq.${encodeURIComponent(String(roamingProfileId))}&limit=1`
-    )
-    const roamingProfile = Array.isArray(roamingProfiles) ? roamingProfiles[0] : null
-    if (!roamingProfile || roamingProfile.status !== 'PUBLISHED') {
-      return toError(409, 'PROFILE_VERSION_INVALID', 'Roaming profile must be PUBLISHED.')
+    const allowedTestExpiryConditions = ['PERIOD_ONLY', 'QUOTA_ONLY', 'PERIOD_OR_QUOTA'];
+    const allowedCondition = new Set(allowedTestExpiryConditions);
+    if (testExpiryCondition !== undefined && !allowedCondition.has(testExpiryCondition)) {
+        return toError(400, 'BAD_REQUEST', `commercialTerms.testExpiryCondition is invalid. Allowed values: ${allowedTestExpiryConditions.join(', ')}.`);
     }
-  }
-  const roamingProfileVersionId = latestVersion.roaming_profile?.profileVersionId
-  if (roamingProfileVersionId) {
-    const roamingVersions = await supabase.select(
-      'profile_versions',
-      `select=profile_version_id,status,profile_type&profile_version_id=eq.${encodeURIComponent(String(roamingProfileVersionId))}&limit=1`
-    )
-    const roamingVersion = Array.isArray(roamingVersions) ? roamingVersions[0] : null
-    if (!roamingVersion || roamingVersion.profile_type !== 'ROAMING' || roamingVersion.status !== 'PUBLISHED') {
-      return toError(409, 'PROFILE_VERSION_INVALID', 'Roaming profile version must be PUBLISHED.')
+    const allowedTestExpiryActions = ['ACTIVATED', 'DEACTIVATED'];
+    const allowedAction = new Set(allowedTestExpiryActions);
+    if (testExpiryAction !== undefined && !allowedAction.has(testExpiryAction)) {
+        return toError(400, 'BAD_REQUEST', `commercialTerms.testExpiryAction is invalid. Allowed values: ${allowedTestExpiryActions.join(', ')}.`);
     }
-  }
-  const effectiveFrom = firstDayNextMonthUtc().toISOString()
-  await supabase.update(
-    'package_versions',
-    `package_version_id=eq.${encodeURIComponent(latestVersion.package_version_id)}`,
-    { status: 'PUBLISHED', effective_from: effectiveFrom },
-    { returning: 'minimal' }
-  )
-  await writeAuditLog(supabase, {
-    actor_user_id: audit?.actorUserId ?? null,
-    actor_role: audit?.actorRole ?? null,
-    tenant_id: (await loadPackage(supabase, packageId))?.enterprise_id ?? null,
-    action: 'PACKAGE_PUBLISHED',
-    target_type: 'PACKAGE',
-    target_id: packageId,
-    request_id: audit?.requestId ?? null,
-    source_ip: audit?.sourceIp ?? null,
-    after_data: {
-      packageVersionId: latestVersion.package_version_id,
-      status: 'PUBLISHED',
-      effectiveFrom,
-    },
-  })
-  return {
-    ok: true,
-    value: {
-      packageId,
-      packageVersionId: latestVersion.package_version_id,
-      status: 'PUBLISHED',
-      publishedAt: new Date().toISOString(),
-    },
-  }
-}
-
-export async function listPackages({ supabase, enterpriseId, status, page, pageSize }) {
-  if (!isValidUuid(enterpriseId)) {
-    return toError(400, 'BAD_REQUEST', 'enterpriseId is required and must be a valid uuid.')
-  }
-  const rows = await supabase.select(
-    'packages',
-    `select=package_id,enterprise_id,name,created_at&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&order=created_at.desc`
-  )
-  const packages = Array.isArray(rows) ? rows : []
-  const ids = packages.map((p) => p.package_id).filter(Boolean)
-  let versions = []
-  if (ids.length) {
-    const idFilter = ids.map((id) => encodeURIComponent(id)).join(',')
-    const versionRows = await supabase.select(
-      'package_versions',
-      `select=package_version_id,package_id,version,status,effective_from,supplier_id,operator_id,service_type,apn,roaming_profile,carrier_service_id,carrier_service_config,control_policy_id,control_policy,commercial_terms_id,commercial_terms,price_plan_id,price_plan_id,created_at&package_id=in.(${idFilter})&order=version.desc`
-    )
-    versions = Array.isArray(versionRows) ? versionRows : []
-  }
-  const latestByPackage = new Map()
-  for (const v of versions) {
-    if (!v?.package_id) continue
-    if (!latestByPackage.has(v.package_id)) latestByPackage.set(v.package_id, v)
-  }
-  let items = packages.map((pkg) => {
-    const version = latestByPackage.get(pkg.package_id) || null
+    const requiredFields = [
+        { key: 'testPeriodDays', message: 'commercialTerms.testPeriodDays is required.' },
+        { key: 'testQuotaMb', message: 'commercialTerms.testQuotaMb is required.' },
+        { key: 'testExpiryCondition', message: 'commercialTerms.testExpiryCondition is required.' },
+        { key: 'testExpiryAction', message: 'commercialTerms.testExpiryAction is required.' },
+        { key: 'commitmentPeriodMonths', message: 'commercialTerms.commitmentPeriodMonths is required.' },
+        { key: 'commitmentPeriodDays', message: 'commercialTerms.commitmentPeriodDays is required.' },
+    ];
+    for (const { key, message } of requiredFields) {
+        if (!Object.prototype.hasOwnProperty.call(rawObj, key)) {
+            return toError(400, 'BAD_REQUEST', message);
+        }
+    }
     return {
-      packageId: pkg.package_id,
-      name: pkg.name,
-      status: version?.status ?? 'DRAFT',
-      latestVersion: mapPackageVersion(version),
-      createdAt: pkg.created_at,
+        ok: true,
+        value: {
+            ...(testPeriodDays !== undefined ? { testPeriodDays } : {}),
+            ...(testQuotaMb !== undefined ? { testQuotaMb } : {}),
+            ...(testExpiryCondition !== undefined ? { testExpiryCondition } : {}),
+            ...(testExpiryAction !== undefined ? { testExpiryAction } : {}),
+            ...(commitmentPeriodMonths !== undefined ? { commitmentPeriodMonths } : {}),
+            ...(commitmentPeriodDays !== undefined ? { commitmentPeriodDays } : {}),
+        },
+    };
+}
+function normalizeCarrierServiceConfig(input) {
+    if (!isPlainObject(input)) {
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig is invalid.');
     }
-  })
-  if (status) items = items.filter((it) => String(it.status) === String(status))
-  const p = Number(page) || 1
-  const ps = Number(pageSize) || 20
-  const start = (p - 1) * ps
-  const total = items.length
-  items = items.slice(start, start + ps)
-  return { ok: true, value: { items, total } }
+    const raw = input;
+    if (Object.prototype.hasOwnProperty.call(raw, 'apn')) {
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.apn is no longer supported. Use apnProfileId only.');
+    }
+    if (Object.prototype.hasOwnProperty.call(raw, 'roamingProfile')) {
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.roamingProfile is no longer supported. Use roamingProfileId only.');
+    }
+    const src = input;
+    const supplierId = String(src.supplierId ?? '').trim();
+    if (!isValidUuid(supplierId)) {
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.supplierId is invalid.');
+    }
+    const operatorIdRaw = String(src.operatorId ?? '').trim();
+    if (!isValidUuid(operatorIdRaw)) {
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.operatorId is invalid.');
+    }
+    const rat = String(src.rat ?? '4G').trim().toUpperCase();
+    const allowedRat = new Set(['3G', '4G', '5G', 'NB-IOT']);
+    if (!allowedRat.has(rat)) {
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.rat is invalid.');
+    }
+    const apnProfileVersionId = src.apnProfileVersionId ? String(src.apnProfileVersionId).trim() : null;
+    if (apnProfileVersionId) {
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.apnProfileVersionId is no longer supported. Use carrierServiceConfig.apnProfileId.');
+    }
+    const apnProfileId = src.apnProfileId ? String(src.apnProfileId).trim() : null;
+    if (!apnProfileId || !isValidUuid(apnProfileId)) {
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.apnProfileId is invalid.');
+    }
+    const roamingProfileId = src.roamingProfileId ? String(src.roamingProfileId).trim() : null;
+    if (!roamingProfileId || !isValidUuid(roamingProfileId)) {
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.roamingProfileId is invalid.');
+    }
+    return {
+        ok: true,
+        value: {
+            supplierId,
+            operatorId: operatorIdRaw,
+            rat,
+            apnProfileId,
+            roamingProfileId,
+        },
+    };
 }
-
-export async function listPackagesByModuleRefs({
-  supabase,
-  pricePlanId,
-  commercialTermsId,
-  controlPolicyId,
-  enterpriseId,
-  status,
-  page,
-  pageSize,
-}) {
-  const pricePlanIdValue = pricePlanId ? String(pricePlanId).trim() : null
-  const commercialTermsIdValue = commercialTermsId ? String(commercialTermsId).trim() : null
-  const controlPolicyIdValue = controlPolicyId ? String(controlPolicyId).trim() : null
-  if (!pricePlanIdValue && !commercialTermsIdValue && !controlPolicyIdValue) {
-    return toError(400, 'BAD_REQUEST', 'pricePlanId or commercialTermsId or controlPolicyId is required.')
-  }
-  if (pricePlanIdValue && !isValidUuid(pricePlanIdValue)) {
-    return toError(400, 'BAD_REQUEST', 'pricePlanId must be a valid uuid.')
-  }
-  if (commercialTermsIdValue && !isValidUuid(commercialTermsIdValue)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTermsId must be a valid uuid.')
-  }
-  if (controlPolicyIdValue && !isValidUuid(controlPolicyIdValue)) {
-    return toError(400, 'BAD_REQUEST', 'controlPolicyId must be a valid uuid.')
-  }
-  if (enterpriseId && !isValidUuid(enterpriseId)) {
-    return toError(400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
-  }
-  let allowedPricePlanVersionIds = null
-  if (pricePlanIdValue) {
-    const planVersionRows = await supabase.select(
-      'price_plans',
-      `select=price_plan_id&price_plan_id=eq.${encodeURIComponent(pricePlanIdValue)}`
-    )
-    const ids = (Array.isArray(planVersionRows) ? planVersionRows : [])
-      .map((row) => String(row?.price_plan_id ?? '').trim())
-      .filter(Boolean)
-    allowedPricePlanVersionIds = new Set(ids)
-  }
-  const packageFilters = ['select=package_id,enterprise_id,name,created_at']
-  if (enterpriseId) packageFilters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
-  packageFilters.push('order=created_at.desc')
-  const packageRows = await supabase.select('packages', packageFilters.join('&'))
-  const packages = Array.isArray(packageRows) ? packageRows : []
-  const packageIds = packages.map((pkg) => String(pkg?.package_id ?? '').trim()).filter(Boolean)
-  if (!packageIds.length) return { ok: true, value: { items: [], total: 0 } }
-  const idFilter = packageIds.map((id) => encodeURIComponent(id)).join(',')
-  const versionRows = await supabase.select(
-    'package_versions',
-    `select=package_version_id,package_id,version,status,effective_from,supplier_id,operator_id,service_type,apn,roaming_profile,carrier_service_id,carrier_service_config,control_policy_id,control_policy,commercial_terms_id,commercial_terms,price_plan_id,price_plan_id,created_at&package_id=in.(${idFilter})&order=version.desc`
-  )
-  const versions = Array.isArray(versionRows) ? versionRows : []
-  const latestByPackageId = new Map()
-  for (const version of versions) {
-    const packageIdKey = String(version?.package_id ?? '').trim()
-    if (!packageIdKey || latestByPackageId.has(packageIdKey)) continue
-    latestByPackageId.set(packageIdKey, version)
-  }
-  let items = packages
-    .map((pkg) => {
-      const version = latestByPackageId.get(String(pkg?.package_id ?? '').trim()) || null
-      if (!version) return null
-      return {
-        packageId: pkg.package_id,
-        enterpriseId: pkg.enterprise_id,
-        name: pkg.name,
-        status: version?.status ?? 'DRAFT',
-        latestVersion: mapPackageVersion(version),
-        createdAt: pkg.created_at,
-      }
-    })
-    .filter(Boolean)
-  if (allowedPricePlanVersionIds) {
-    items = items.filter((item) => {
-      const planId = String(item?.latestVersion?.pricePlanId ?? '').trim()
-      if (planId) return planId === pricePlanIdValue
-      const versionId = String(item?.latestVersion?.pricePlanId ?? '').trim()
-      return Boolean(versionId && allowedPricePlanVersionIds?.has(versionId))
-    })
-  }
-  if (commercialTermsIdValue) {
-    items = items.filter((item) => String(item?.latestVersion?.commercialTermsId ?? '').trim() === commercialTermsIdValue)
-  }
-  if (controlPolicyIdValue) {
-    items = items.filter((item) => String(item?.latestVersion?.controlPolicyId ?? '').trim() === controlPolicyIdValue)
-  }
-  if (status) items = items.filter((item) => String(item?.status ?? '') === String(status))
-  const p = Number(page) || 1
-  const ps = Number(pageSize) || 20
-  const start = (p - 1) * ps
-  const total = items.length
-  items = items.slice(start, start + ps)
-  return { ok: true, value: { items, total } }
+async function ensureProfileMatchesCarrierContext(supabase, profileId, profileType, supplierId, resolvedOperatorId) {
+    const table = profileType === 'APN' ? 'apn_profiles' : 'roaming_profiles';
+    const key = profileType === 'APN' ? 'apn_profile_id' : 'roaming_profile_id';
+    const field = profileType === 'APN' ? 'apnProfileId' : 'roamingProfileId';
+    const rows = await supabase.select(table, `select=${key},supplier_id,operator_id,status&${key}=eq.${encodeURIComponent(profileId)}&limit=1`);
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row || !row?.[key]) {
+        return toError(400, 'BAD_REQUEST', `carrierServiceConfig.${field} is not found.`);
+    }
+    if (String(row.status ?? '').toUpperCase() !== 'PUBLISHED') {
+        return toError(400, 'BAD_REQUEST', `carrierServiceConfig.${field} must reference a PUBLISHED profile snapshot.`);
+    }
+    if (String(row.supplier_id ?? '') !== supplierId) {
+        return toError(400, 'BAD_REQUEST', `carrierServiceConfig.${field} is not linked to supplierId.`);
+    }
+    if (String(row.operator_id ?? '') !== resolvedOperatorId) {
+        return toError(400, 'BAD_REQUEST', `carrierServiceConfig.${field} is not linked to operatorId.`);
+    }
+    return { ok: true, value: null };
 }
-
+async function loadResellerRowByRef(supabase, ref) {
+    const trimmed = String(ref ?? '').trim();
+    if (!trimmed)
+        return { ok: true, value: null };
+    if (!isValidUuid(trimmed))
+        return toError(400, 'BAD_REQUEST', 'resellerId is invalid.');
+    const byTenantRows = await supabase.select('resellers', `select=id,tenant_id&tenant_id=eq.${encodeURIComponent(trimmed)}&limit=1`);
+    const byTenant = Array.isArray(byTenantRows) ? byTenantRows[0] : null;
+    if (byTenant && byTenant.id && byTenant.tenant_id) {
+        return { ok: true, value: { id: String(byTenant.id), tenant_id: String(byTenant.tenant_id) } };
+    }
+    return toError(404, 'RESOURCE_NOT_FOUND', 'resellerId not found.');
+}
+/** API `resellerId` MUST be RESELLER `tenants.tenant_id`; not `resellers.id`. */
+async function canonicalResellerTenantIdFromRef(supabase, ref) {
+    const trimmed = String(ref || '').trim();
+    if (!trimmed || !isValidUuid(trimmed)) {
+        return toError(403, 'FORBIDDEN', 'Reseller scope is missing resellerId.');
+    }
+    const rrow = await loadResellerRowByRef(supabase, trimmed);
+    if (!rrow.ok)
+        return rrow;
+    if (!rrow.value?.tenant_id) {
+        return toError(404, 'RESOURCE_NOT_FOUND', 'resellerId not found.');
+    }
+    return { ok: true, value: String(rrow.value.tenant_id) };
+}
+/**
+ * Resolve API `enterpriseId` to ENTERPRISE `tenants.tenant_id` for module table FKs.
+ */
+async function resolveEnterpriseTenantIdForRef(supabase, enterpriseRef) {
+    const ref = String(enterpriseRef || '').trim();
+    if (!isValidUuid(ref))
+        return toError(400, 'BAD_REQUEST', 'enterpriseId is invalid.');
+    const tenantRows = await supabase.select('tenants', `select=tenant_id&tenant_id=eq.${encodeURIComponent(ref)}&tenant_type=eq.ENTERPRISE&limit=1`);
+    const t = Array.isArray(tenantRows) ? tenantRows[0] : null;
+    if (t && t.tenant_id) {
+        return { ok: true, value: { tenantId: String(t.tenant_id) } };
+    }
+    return toError(404, 'RESOURCE_NOT_FOUND', 'enterpriseId not found.');
+}
+/** `resellerId` and `enterpriseId` must form a real RESELLER–ENTERPRISE parent row in `tenants`. */
+export async function validateResellerOwnsEnterprise(supabase, resellerIdRef, enterpriseId) {
+    if (!isValidUuid(enterpriseId))
+        return toError(400, 'BAD_REQUEST', 'enterpriseId is invalid.');
+    const tRows = await supabase.select('tenants', `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(enterpriseId)}&tenant_type=eq.ENTERPRISE&limit=1`);
+    const t = Array.isArray(tRows) ? tRows[0] : null;
+    if (!t)
+        return toError(404, 'RESOURCE_NOT_FOUND', 'enterpriseId not found.');
+    const rCanon = await canonicalResellerTenantIdFromRef(supabase, resellerIdRef);
+    if (!rCanon.ok)
+        return rCanon;
+    if (String(t.parent_id || '') !== String(rCanon.value)) {
+        return toError(400, 'BAD_REQUEST', 'resellerId and enterpriseId do not match.');
+    }
+    return { ok: true, value: null };
+}
+/**
+ * `PUT /packages/{packageId}`: package exists, is DRAFT, and `resellerIdRef` owns the row's `enterpriseId`
+ * (same RESELLER–ENTERPRISE rule as `validateResellerOwnsEnterprise`).
+ */
+export async function validateResellerAccessToUpdatePackage(supabase, packageId, resellerIdRef) {
+    if (!isValidUuid(packageId)) {
+        return toError(400, 'BAD_REQUEST', 'packageId is invalid.');
+    }
+    const row = await loadPackageRow(supabase, packageId);
+    if (!row)
+        return toError(404, 'NOT_FOUND', 'Package not found.');
+    if (String(row.status ?? '').toUpperCase() !== 'DRAFT') {
+        return toError(409, 'INVALID_STATUS', 'Only DRAFT package can be updated.');
+    }
+    const packageEnterpriseId = String(row.enterprise_id || '').trim();
+    if (!isValidUuid(packageEnterpriseId)) {
+        return toError(400, 'BAD_REQUEST', 'package.enterpriseId is invalid.');
+    }
+    const own = await validateResellerOwnsEnterprise(supabase, resellerIdRef, packageEnterpriseId);
+    if (!own.ok)
+        return own;
+    return { ok: true, value: { packageEnterpriseId } };
+}
+/**
+ * `:publish` / `:deprecate`: package exists and `resellerIdRef` owns the package `enterpriseId`.
+ * No `status` check — callers enforce publish/deprecate state rules.
+ */
+export async function validateResellerAccessToPackage(supabase, packageId, resellerIdRef) {
+    if (!isValidUuid(packageId)) {
+        return toError(400, 'BAD_REQUEST', 'packageId is invalid.');
+    }
+    const row = await loadPackageRow(supabase, packageId);
+    if (!row)
+        return toError(404, 'NOT_FOUND', 'Package not found.');
+    const packageEnterpriseId = String(row.enterprise_id || '').trim();
+    if (!isValidUuid(packageEnterpriseId)) {
+        return toError(400, 'BAD_REQUEST', 'package.enterpriseId is invalid.');
+    }
+    const own = await validateResellerOwnsEnterprise(supabase, resellerIdRef, packageEnterpriseId);
+    if (!own.ok)
+        return own;
+    return { ok: true, value: { packageEnterpriseId } };
+}
+/** Module `enterprise_id` column stores `tenants.tenant_id` (ENTERPRISE). */
+function auditTenantIdFromModuleEnterpriseId(enterpriseFk) {
+    const tid = enterpriseFk != null ? String(enterpriseFk).trim() : '';
+    if (!tid || !isValidUuid(tid))
+        return null;
+    return tid;
+}
+/** Reseller catalog modules (commercial terms, control policy, carrier service) scope audit by `reseller_id` → RESELLER `tenants.tenant_id`. */
+function auditTenantIdFromResellerModuleRow(row) {
+    return auditTenantIdFromModuleEnterpriseId(row?.reseller_id);
+}
+async function assertResellerSupplierBinding(supabase, resellerTenantId, supplierId) {
+    const rows = await supabase.select('reseller_suppliers', `select=supplier_id&reseller_id=eq.${encodeURIComponent(resellerTenantId)}&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`);
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row || !row?.supplier_id) {
+        return toError(400, 'BAD_REQUEST', 'resellerId is not bound to carrierServiceConfig.supplierId.');
+    }
+    return { ok: true, value: null };
+}
+async function validateModuleReferences(supabase, carrierServiceConfig, controlPolicy, ctx) {
+    const operatorIdInput = String(carrierServiceConfig.operatorId);
+    const supplierId = String(carrierServiceConfig.supplierId);
+    const operator = await loadOperator(supabase, operatorIdInput, supplierId);
+    if (!operator)
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.operatorId is not found.');
+    if (String(operator?.supplier_id ?? '') !== supplierId) {
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.operatorId is not linked to supplierId.');
+    }
+    const resolvedOperatorId = String(operator.operator_id ?? '');
+    if (!resolvedOperatorId) {
+        return toError(400, 'BAD_REQUEST', 'carrierServiceConfig.operatorId is not found.');
+    }
+    const apnProfileId = String(carrierServiceConfig.apnProfileId ?? '').trim();
+    const apnCheck = await ensureProfileMatchesCarrierContext(supabase, apnProfileId, 'APN', supplierId, resolvedOperatorId);
+    if (!apnCheck.ok)
+        return apnCheck;
+    const roamingProfileId = String(carrierServiceConfig.roamingProfileId ?? '').trim();
+    const roamingCheck = await ensureProfileMatchesCarrierContext(supabase, roamingProfileId, 'ROAMING', supplierId, resolvedOperatorId);
+    if (!roamingCheck.ok)
+        return roamingCheck;
+    const resellerNorm = normalizeOptionalTenantId(ctx?.resellerRef, 'resellerId');
+    if (!resellerNorm.ok)
+        return resellerNorm;
+    if (resellerNorm.value) {
+        const resellerRow = await loadResellerRowByRef(supabase, resellerNorm.value);
+        if (!resellerRow.ok)
+            return resellerRow;
+        if (!resellerRow.value?.tenant_id) {
+            return toError(404, 'RESOURCE_NOT_FOUND', 'resellerId not found.');
+        }
+        const bind = await assertResellerSupplierBinding(supabase, resellerRow.value.tenant_id, supplierId);
+        if (!bind.ok)
+            return bind;
+    }
+    return { ok: true, value: { operatorId: resolvedOperatorId, supplierId } };
+}
+function normalizePackageModules(payload, pricePlanVersion) {
+    const meta = extractPricePlanMeta(pricePlanVersion);
+    const carrierSource = payload?.carrierServiceConfig ?? meta.carrierService;
+    const commercialSource = payload?.commercialTerms ?? meta.commercialTerms;
+    const controlSource = payload?.controlPolicy ?? meta.controlPolicy;
+    const carrierNormalized = normalizeCarrierServiceConfig(carrierSource);
+    if (!carrierNormalized.ok)
+        return carrierNormalized;
+    const commercialNormalized = normalizeCommercialTerms(commercialSource);
+    if (!commercialNormalized.ok)
+        return commercialNormalized;
+    if (!commercialNormalized.value) {
+        return toError(400, 'BAD_REQUEST', 'commercialTerms is required.');
+    }
+    const controlNormalized = normalizeControlPolicy(controlSource, 'full');
+    if (!controlNormalized.ok)
+        return controlNormalized;
+    if (!controlNormalized.value) {
+        return toError(400, 'BAD_REQUEST', 'controlPolicy is required.');
+    }
+    return {
+        ok: true,
+        value: {
+            carrierServiceConfig: carrierNormalized.value,
+            commercialTerms: commercialNormalized.value,
+            controlPolicy: controlNormalized.value,
+        },
+    };
+}
+export function validateCommercialTermsModule(payload) {
+    const commercialNormalized = normalizeCommercialTerms(payload?.commercialTerms ?? payload);
+    if (!commercialNormalized.ok)
+        return commercialNormalized;
+    if (!commercialNormalized.value || !Object.keys(commercialNormalized.value).length) {
+        return toError(400, 'BAD_REQUEST', 'commercialTerms is required.');
+    }
+    return { ok: true, value: { commercialTerms: commercialNormalized.value } };
+}
+export async function validateControlPolicyModule({ supabase: _supabase, payload, }) {
+    const raw = extractControlPolicyFromPayload(payload);
+    const controlNormalized = normalizeControlPolicy(raw, 'full');
+    if (!controlNormalized.ok)
+        return controlNormalized;
+    if (!controlNormalized.value || !Object.keys(controlNormalized.value).length) {
+        return toError(400, 'BAD_REQUEST', 'controlPolicy is required.');
+    }
+    return { ok: true, value: { controlPolicy: controlNormalized.value } };
+}
+export async function validateCarrierServiceModule({ supabase, payload, }) {
+    const carrierNormalized = normalizeCarrierServiceConfig(payload?.carrierServiceConfig ?? payload);
+    if (!carrierNormalized.ok)
+        return carrierNormalized;
+    const references = await validateModuleReferences(supabase, carrierNormalized.value, null, {
+        resellerRef: payload?.resellerId,
+    });
+    if (!references.ok)
+        return references;
+    return {
+        ok: true,
+        value: {
+            carrierServiceConfig: {
+                ...carrierNormalized.value,
+                operatorId: references.value.operatorId,
+            },
+        },
+    };
+}
+function normalizeOptionalTenantId(value, fieldName) {
+    if (value === undefined || value === null || String(value).trim() === '')
+        return { ok: true, value: null };
+    const id = String(value).trim();
+    if (!isValidUuid(id))
+        return toError(400, 'BAD_REQUEST', `${fieldName} is invalid.`);
+    return { ok: true, value: id };
+}
+/** Non-empty display name for module/package rows (trimmed). */
+function normalizeRequiredModuleName(value) {
+    if (value === undefined || value === null) {
+        return toError(400, 'BAD_REQUEST', 'name is required.');
+    }
+    const s = String(value).trim();
+    if (!s) {
+        return toError(400, 'BAD_REQUEST', 'name is invalid.');
+    }
+    return { ok: true, value: s };
+}
+const MAX_PACKAGE_DESCRIPTION_LENGTH = 20000;
+/** Optional user-facing package description (trimmed; empty → null). */
+function normalizeOptionalPackageDescription(value) {
+    if (value === undefined || value === null)
+        return null;
+    const s = String(value).trim();
+    if (!s)
+        return null;
+    return s.length > MAX_PACKAGE_DESCRIPTION_LENGTH ? s.slice(0, MAX_PACKAGE_DESCRIPTION_LENGTH) : s;
+}
+/** Module tables FK `reseller_id` → RESELLER `tenants.tenant_id`. API `resellerId` is that tenant id or legacy `resellers.id`. */
+async function resolveResellerModuleRowId(supabase, resellerRef) {
+    if (resellerRef === null || resellerRef === undefined)
+        return { ok: true, value: null };
+    const trimmed = String(resellerRef).trim();
+    if (trimmed === '')
+        return { ok: true, value: null };
+    return canonicalResellerTenantIdFromRef(supabase, trimmed);
+}
+function mapCommercialTermsModule(row) {
+    return {
+        commercialTermsId: row?.commercial_terms_id ?? null,
+        name: row?.name != null ? String(row.name) : '',
+        commercialTerms: row?.commercial_terms ?? {},
+        resellerId: row?.reseller_id ?? null,
+        status: row?.status ?? null,
+        effectiveFrom: row?.effective_from ?? null,
+        publishedAt: row?.published_at ?? null,
+        deprecatedAt: row?.deprecated_at ?? null,
+        createdAt: row?.created_at ?? null,
+        updatedAt: row?.updated_at ?? null,
+    };
+}
+/** API / OpenAPI: `resellerId` is `tenants.tenant_id` for the reseller (not `resellers.id`). */
+function mapCommercialTermsModuleForPublicResponse(row, publicResellerTenantId) {
+    const base = mapCommercialTermsModule(row);
+    const rs = publicResellerTenantId != null && String(publicResellerTenantId).trim() !== ''
+        ? String(publicResellerTenantId).trim()
+        : null;
+    return { ...base, resellerId: rs };
+}
+function mapControlPolicyModule(row) {
+    return {
+        controlPolicyId: row?.control_policy_id ?? null,
+        name: row?.name != null ? String(row.name) : '',
+        controlPolicy: row?.control_policy ?? {},
+        resellerId: row?.reseller_id ?? null,
+        status: row?.status ?? null,
+        effectiveFrom: row?.effective_from ?? null,
+        publishedAt: row?.published_at ?? null,
+        deprecatedAt: row?.deprecated_at ?? null,
+        createdAt: row?.created_at ?? null,
+        updatedAt: row?.updated_at ?? null,
+    };
+}
+/** API / OpenAPI: `resellerId` is `tenants.tenant_id` for the reseller (not `resellers.id`). */
+function mapControlPolicyModuleForPublicResponse(row, publicResellerTenantId) {
+    const base = mapControlPolicyModule(row);
+    const rs = publicResellerTenantId != null && String(publicResellerTenantId).trim() !== ''
+        ? String(publicResellerTenantId).trim()
+        : null;
+    return { ...base, resellerId: rs };
+}
+function scrubLegacyCarrierServiceConfigFields(config) {
+    if (!config || typeof config !== 'object' || Array.isArray(config))
+        return {};
+    const { carrierId: _omit, apn: _apn, roamingProfile: _roamingProfile, ...rest } = config;
+    return { ...rest };
+}
+/** PostgREST `select` for `carrier_service_modules` row reads (FK columns only; API `carrierServiceConfig` assembled in memory). */
+const CARRIER_SERVICE_MODULE_ROW_SELECT = 'carrier_service_id,name,reseller_id,supplier_id,operator_id,apn_profile_id,roaming_profile_id,rat,status,published_at,deprecated_at,effective_from,created_at,updated_at';
+function normalizeCarrierServiceRatFromParts(rowRat, jsonRat) {
+    const raw = rowRat != null && String(rowRat).trim() !== '' ? String(rowRat).trim() : String(jsonRat ?? '').trim();
+    let r = raw.toUpperCase().replace(/-/g, '');
+    if (r === 'NBIOT' || r === 'NB_IOT')
+        return 'NB-IOT';
+    if (r === '3G' || r === '4G' || r === '5G')
+        return r;
+    return '4G';
+}
+/** OpenAPI `CarrierServiceConfig` shape from persisted columns only. */
+function mergedCarrierServiceConfigShape(row) {
+    const supplierId = row?.supplier_id != null ? String(row.supplier_id).trim() : '';
+    const operatorId = row?.operator_id != null ? String(row.operator_id).trim() : '';
+    const apnProfileId = row?.apn_profile_id != null && String(row.apn_profile_id).trim() !== '' ? String(row.apn_profile_id).trim() : '';
+    const roamingProfileId = row?.roaming_profile_id != null && String(row.roaming_profile_id).trim() !== ''
+        ? String(row.roaming_profile_id).trim()
+        : '';
+    const rat = normalizeCarrierServiceRatFromParts(row?.rat, undefined);
+    return { supplierId, operatorId, apnProfileId, roamingProfileId, rat };
+}
+/** Payload fragment for {@link validateCarrierServiceModule} / merge with PATCH (`operatorId` = operators row PK). */
+function carrierServiceConfigInputFromDbRow(row) {
+    const m = mergedCarrierServiceConfigShape(row);
+    return {
+        supplierId: String(m.supplierId ?? '').trim(),
+        operatorId: String(m.operatorId ?? '').trim(),
+        rat: String(m.rat ?? '4G').trim(),
+        apnProfileId: String(m.apnProfileId ?? '').trim(),
+        roamingProfileId: String(m.roamingProfileId ?? '').trim(),
+    };
+}
+function mapCarrierServiceModule(row) {
+    return {
+        carrierServiceId: row?.carrier_service_id ?? null,
+        name: row?.name != null ? String(row.name) : '',
+        carrierServiceConfig: scrubLegacyCarrierServiceConfigFields(mergedCarrierServiceConfigShape(row)),
+        resellerId: row?.reseller_id ?? null,
+        status: row?.status ?? null,
+        effectiveFrom: row?.effective_from ?? null,
+        publishedAt: row?.published_at ?? null,
+        deprecatedAt: row?.deprecated_at ?? null,
+        createdAt: row?.created_at ?? null,
+        updatedAt: row?.updated_at ?? null,
+    };
+}
+/** `operators.operator_id` (row PK) → API/catalog id: `operators.business_operator_id` when set, else row PK (legacy / 1:1). */
+async function businessOperatorDisplayIdsByOperatorRowIds(supabase, rowIds) {
+    const out = new Map();
+    const uniq = [...new Set(rowIds.map((id) => String(id).trim()).filter(Boolean))];
+    if (!uniq.length)
+        return out;
+    const idList = uniq.map((id) => encodeURIComponent(id)).join(',');
+    const rows = await supabase.select('operators', `select=operator_id,business_operator_id&operator_id=in.(${idList})`);
+    for (const r of Array.isArray(rows) ? rows : []) {
+        const pk = r?.operator_id != null ? String(r.operator_id) : '';
+        if (!pk)
+            continue;
+        const rawBo = r?.business_operator_id;
+        const bo = rawBo != null && String(rawBo).trim() !== '' ? String(rawBo).trim() : '';
+        out.set(pk, bo || pk);
+    }
+    return out;
+}
+function mapCarrierServiceModuleForPublicResponse(row, publicOperatorId, publicResellerTenantId) {
+    const cfg = scrubLegacyCarrierServiceConfigFields(mergedCarrierServiceConfigShape(row));
+    const op = publicOperatorId != null && String(publicOperatorId).trim() !== ''
+        ? String(publicOperatorId).trim()
+        : null;
+    const carrierServiceConfig = op ? { ...cfg, operatorId: op } : { ...cfg };
+    const rs = publicResellerTenantId != null && String(publicResellerTenantId).trim() !== ''
+        ? String(publicResellerTenantId).trim()
+        : null;
+    return {
+        carrierServiceId: row?.carrier_service_id ?? null,
+        name: row?.name != null ? String(row.name) : '',
+        carrierServiceConfig,
+        resellerId: rs,
+        status: row?.status ?? null,
+        effectiveFrom: row?.effective_from ?? null,
+        publishedAt: row?.published_at ?? null,
+        deprecatedAt: row?.deprecated_at ?? null,
+        createdAt: row?.created_at ?? null,
+        updatedAt: row?.updated_at ?? null,
+    };
+}
+async function mapCarrierServiceModuleApiResponse(supabase, row) {
+    const opPk = row?.operator_id != null ? String(row.operator_id).trim() : '';
+    const resellerTid = row?.reseller_id != null ? String(row.reseller_id).trim() : '';
+    const opMap = opPk
+        ? await businessOperatorDisplayIdsByOperatorRowIds(supabase, [opPk])
+        : new Map();
+    const displayOp = opPk ? opMap.get(opPk) ?? opPk : null;
+    return mapCarrierServiceModuleForPublicResponse(row, displayOp, resellerTid || null);
+}
+async function mapCommercialTermsModuleApiResponse(supabase, row) {
+    const resellerTid = row?.reseller_id != null ? String(row.reseller_id).trim() : '';
+    return mapCommercialTermsModuleForPublicResponse(row, resellerTid || null);
+}
+async function mapControlPolicyModuleApiResponse(supabase, row) {
+    const resellerTid = row?.reseller_id != null ? String(row.reseller_id).trim() : '';
+    return mapControlPolicyModuleForPublicResponse(row, resellerTid || null);
+}
+/** Maps validated payload for HTTP responses (still use {@link validateCarrierServiceModule} output for writes). */
+export async function formatCarrierServiceValidationResponseForApi(supabase, validated) {
+    const internal = validated.carrierServiceConfig?.operatorId;
+    const pk = internal != null ? String(internal).trim() : '';
+    if (!pk)
+        return validated;
+    const m = await businessOperatorDisplayIdsByOperatorRowIds(supabase, [pk]);
+    const pub = m.get(pk) ?? pk;
+    return { carrierServiceConfig: { ...validated.carrierServiceConfig, operatorId: pub } };
+}
+export async function createCommercialTerms({ supabase, payload, audit, auth, }) {
+    const normalized = validateCommercialTermsModule(payload);
+    if (!normalized.ok)
+        return normalized;
+    const resellerIdResult = normalizeOptionalTenantId(payload?.resellerId, 'resellerId');
+    if (!resellerIdResult.ok)
+        return resellerIdResult;
+    let effectiveAuthTenantId = null;
+    if (auth?.scope === 'reseller') {
+        const authCanon = await canonicalResellerTenantIdFromRef(supabase, String(auth?.resellerTenantId ?? ''));
+        if (!authCanon.ok)
+            return authCanon;
+        effectiveAuthTenantId = authCanon.value;
+    }
+    let effectiveResellerRef = resellerIdResult.value;
+    const hasBodyReseller = effectiveResellerRef !== null &&
+        effectiveResellerRef !== undefined &&
+        String(effectiveResellerRef).trim() !== '';
+    if (auth?.scope === 'reseller') {
+        if (!hasBodyReseller) {
+            effectiveResellerRef = effectiveAuthTenantId;
+        }
+        else if (resellerIdResult.value) {
+            const rrow = await loadResellerRowByRef(supabase, resellerIdResult.value);
+            if (!rrow.ok)
+                return rrow;
+            if (!rrow.value || String(rrow.value.tenant_id) !== String(effectiveAuthTenantId)) {
+                return toError(403, 'FORBIDDEN', 'resellerId does not match authenticated reseller.');
+            }
+        }
+    }
+    else if (auth?.scope === 'platform' && !hasBodyReseller) {
+        return toError(400, 'BAD_REQUEST', 'resellerId is required.');
+    }
+    const resellerFk = await resolveResellerModuleRowId(supabase, effectiveResellerRef);
+    if (!resellerFk.ok)
+        return resellerFk;
+    if (auth?.scope === 'reseller' || auth?.scope === 'platform') {
+        const rrow = await loadResellerRowByRef(supabase, effectiveResellerRef);
+        if (!rrow.ok)
+            return rrow;
+        if (!rrow.value)
+            return toError(404, 'RESOURCE_NOT_FOUND', 'resellerId not found.');
+    }
+    const ctName = normalizeRequiredModuleName(payload?.name);
+    if (!ctName.ok)
+        return ctName;
+    const rows = await supabase.insert('commercial_terms_modules', {
+        name: ctName.value,
+        reseller_id: resellerFk.value,
+        commercial_terms: normalized.value.commercialTerms,
+        status: 'DRAFT',
+    }, { returning: 'representation' });
+    const created = Array.isArray(rows) ? rows[0] : null;
+    if (!created?.commercial_terms_id)
+        return toError(500, 'INTERNAL_ERROR', 'Failed to create commercial terms.');
+    const createdApi = await mapCommercialTermsModuleApiResponse(supabase, created);
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(created),
+        action: 'COMMERCIAL_TERMS_CREATED',
+        target_type: 'COMMERCIAL_TERMS',
+        target_id: created.commercial_terms_id,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        after_data: createdApi,
+    });
+    return { ok: true, value: createdApi };
+}
+export async function updateCommercialTerms({ supabase, commercialTermsId, payload, audit, authResellerTenantId, }) {
+    if (!isValidUuid(commercialTermsId))
+        return toError(400, 'BAD_REQUEST', 'commercialTermsId is invalid.');
+    const rows = await supabase.select('commercial_terms_modules', `select=commercial_terms_id,name,reseller_id,commercial_terms,status,published_at,deprecated_at,effective_from,created_at,updated_at&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`);
+    const existing = Array.isArray(rows) ? rows[0] : null;
+    if (!existing?.commercial_terms_id)
+        return toError(404, 'NOT_FOUND', 'Commercial terms not found.');
+    const scopeCt = await enforceCommercialTermsResellerScope(supabase, existing, authResellerTenantId);
+    if (!scopeCt.ok)
+        return scopeCt;
+    if (String(existing.status ?? '').toUpperCase() !== 'DRAFT') {
+        return toError(409, 'INVALID_STATUS', 'Only DRAFT commercial terms can be updated.');
+    }
+    let ctNameUpdate;
+    if (payload && typeof payload === 'object' && 'name' in payload) {
+        const nn = normalizeRequiredModuleName(payload.name);
+        if (!nn.ok)
+            return nn;
+        ctNameUpdate = nn.value;
+    }
+    const normalized = normalizeCommercialTerms(payload?.commercialTerms ?? payload);
+    if (!normalized.ok)
+        return normalized;
+    if (!normalized.value || !Object.keys(normalized.value).length) {
+        return toError(400, 'BAD_REQUEST', 'commercialTerms is required.');
+    }
+    const merged = { ...(existing.commercial_terms ?? {}), ...normalized.value };
+    const ctPatch = { commercial_terms: merged, updated_at: new Date().toISOString() };
+    if (ctNameUpdate !== undefined)
+        ctPatch.name = ctNameUpdate;
+    await supabase.update('commercial_terms_modules', `commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}`, ctPatch, { returning: 'minimal' });
+    const refreshedRows = await supabase.select('commercial_terms_modules', `select=commercial_terms_id,name,reseller_id,commercial_terms,status,published_at,deprecated_at,effective_from,created_at,updated_at&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`);
+    const refreshed = Array.isArray(refreshedRows) ? refreshedRows[0] : null;
+    const beforeApi = await mapCommercialTermsModuleApiResponse(supabase, existing);
+    const afterApi = refreshed ? await mapCommercialTermsModuleApiResponse(supabase, refreshed) : beforeApi;
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(existing),
+        action: 'COMMERCIAL_TERMS_UPDATED',
+        target_type: 'COMMERCIAL_TERMS',
+        target_id: commercialTermsId,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        before_data: beforeApi,
+        after_data: afterApi,
+    });
+    return { ok: true, value: afterApi };
+}
+export async function getCommercialTermsDetail({ supabase, commercialTermsId, authResellerTenantId, }) {
+    if (!isValidUuid(commercialTermsId))
+        return toError(400, 'BAD_REQUEST', 'commercialTermsId is invalid.');
+    const rows = await supabase.select('commercial_terms_modules', `select=commercial_terms_id,name,reseller_id,commercial_terms,status,published_at,deprecated_at,effective_from,created_at,updated_at&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`);
+    const item = Array.isArray(rows) ? rows[0] : null;
+    if (!item?.commercial_terms_id)
+        return toError(404, 'NOT_FOUND', 'Commercial terms not found.');
+    const scopeCt = await enforceCommercialTermsResellerScope(supabase, item, authResellerTenantId);
+    if (!scopeCt.ok)
+        return scopeCt;
+    return { ok: true, value: await mapCommercialTermsModuleApiResponse(supabase, item) };
+}
+export async function createControlPolicy({ supabase, payload, audit, auth, }) {
+    const normalized = await validateControlPolicyModule({ supabase, payload });
+    if (!normalized.ok)
+        return normalized;
+    const resellerIdResult = normalizeOptionalTenantId(payload?.resellerId, 'resellerId');
+    if (!resellerIdResult.ok)
+        return resellerIdResult;
+    let effectiveAuthTenantIdCp = null;
+    if (auth?.scope === 'reseller') {
+        const authCanonCpCreate = await canonicalResellerTenantIdFromRef(supabase, String(auth?.resellerTenantId ?? ''));
+        if (!authCanonCpCreate.ok)
+            return authCanonCpCreate;
+        effectiveAuthTenantIdCp = authCanonCpCreate.value;
+    }
+    let effectiveResellerRef = resellerIdResult.value;
+    const hasBodyReseller = effectiveResellerRef !== null &&
+        effectiveResellerRef !== undefined &&
+        String(effectiveResellerRef).trim() !== '';
+    if (auth?.scope === 'reseller') {
+        if (!hasBodyReseller) {
+            effectiveResellerRef = effectiveAuthTenantIdCp;
+        }
+        else if (resellerIdResult.value) {
+            const rrow = await loadResellerRowByRef(supabase, resellerIdResult.value);
+            if (!rrow.ok)
+                return rrow;
+            if (!rrow.value || String(rrow.value.tenant_id) !== String(effectiveAuthTenantIdCp)) {
+                return toError(403, 'FORBIDDEN', 'resellerId does not match authenticated reseller.');
+            }
+        }
+    }
+    else if (auth?.scope === 'platform' && !hasBodyReseller) {
+        return toError(400, 'BAD_REQUEST', 'resellerId is required.');
+    }
+    const resellerFk = await resolveResellerModuleRowId(supabase, effectiveResellerRef);
+    if (!resellerFk.ok)
+        return resellerFk;
+    if (auth?.scope === 'reseller' || auth?.scope === 'platform') {
+        const rrow = await loadResellerRowByRef(supabase, effectiveResellerRef);
+        if (!rrow.ok)
+            return rrow;
+        if (!rrow.value)
+            return toError(404, 'RESOURCE_NOT_FOUND', 'resellerId not found.');
+    }
+    const cpName = normalizeRequiredModuleName(payload?.name);
+    if (!cpName.ok)
+        return cpName;
+    const rows = await supabase.insert('control_policy_modules', {
+        name: cpName.value,
+        reseller_id: resellerFk.value,
+        control_policy: normalized.value.controlPolicy,
+        status: 'DRAFT',
+    }, { returning: 'representation' });
+    const created = Array.isArray(rows) ? rows[0] : null;
+    if (!created?.control_policy_id)
+        return toError(500, 'INTERNAL_ERROR', 'Failed to create control policy.');
+    const createdCpApi = await mapControlPolicyModuleApiResponse(supabase, created);
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(created),
+        action: 'CONTROL_POLICY_CREATED',
+        target_type: 'CONTROL_POLICY',
+        target_id: created.control_policy_id,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        after_data: createdCpApi,
+    });
+    return { ok: true, value: createdCpApi };
+}
+export async function updateControlPolicy({ supabase, controlPolicyId, payload, audit, authResellerTenantId, }) {
+    if (!isValidUuid(controlPolicyId))
+        return toError(400, 'BAD_REQUEST', 'controlPolicyId is invalid.');
+    const rows = await supabase.select('control_policy_modules', `select=control_policy_id,name,reseller_id,control_policy,status,published_at,deprecated_at,effective_from,created_at,updated_at&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`);
+    const existing = Array.isArray(rows) ? rows[0] : null;
+    if (!existing?.control_policy_id)
+        return toError(404, 'NOT_FOUND', 'Control policy not found.');
+    const scopeCp = await enforceControlPolicyResellerScope(supabase, existing, authResellerTenantId);
+    if (!scopeCp.ok)
+        return scopeCp;
+    if (String(existing.status ?? '').toUpperCase() !== 'DRAFT') {
+        return toError(409, 'INVALID_STATUS', 'Only DRAFT control policies can be updated.');
+    }
+    let cpNameUpdate;
+    if (payload && typeof payload === 'object' && 'name' in payload) {
+        const nn = normalizeRequiredModuleName(payload.name);
+        if (!nn.ok)
+            return nn;
+        cpNameUpdate = nn.value;
+    }
+    const cpPatch = { updated_at: new Date().toISOString() };
+    if (cpNameUpdate !== undefined)
+        cpPatch.name = cpNameUpdate;
+    if (payload?.controlPolicy !== undefined) {
+        const normalized = normalizeControlPolicy(payload.controlPolicy, 'partial');
+        if (!normalized.ok)
+            return normalized;
+        if (!normalized.value || !Object.keys(normalized.value).length) {
+            return toError(400, 'BAD_REQUEST', 'controlPolicy must include at least one valid field.');
+        }
+        const existingRaw = stripLegacyControlPolicyKeys((existing.control_policy ?? {}));
+        const merged = { ...existingRaw, ...normalized.value };
+        const finalized = finalizeControlPolicyMerged(merged);
+        if (!finalized.ok)
+            return finalized;
+        if (!finalized.value) {
+            return toError(400, 'BAD_REQUEST', 'controlPolicy is required.');
+        }
+        cpPatch.control_policy = finalized.value;
+    }
+    await supabase.update('control_policy_modules', `control_policy_id=eq.${encodeURIComponent(controlPolicyId)}`, cpPatch, { returning: 'minimal' });
+    const refreshedRows = await supabase.select('control_policy_modules', `select=control_policy_id,name,reseller_id,control_policy,status,published_at,deprecated_at,effective_from,created_at,updated_at&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`);
+    const refreshed = Array.isArray(refreshedRows) ? refreshedRows[0] : null;
+    const beforeCpApi = await mapControlPolicyModuleApiResponse(supabase, existing);
+    const afterCpApi = refreshed ? await mapControlPolicyModuleApiResponse(supabase, refreshed) : beforeCpApi;
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(existing),
+        action: 'CONTROL_POLICY_UPDATED',
+        target_type: 'CONTROL_POLICY',
+        target_id: controlPolicyId,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        before_data: beforeCpApi,
+        after_data: afterCpApi,
+    });
+    return { ok: true, value: afterCpApi };
+}
+export async function getControlPolicyDetail({ supabase, controlPolicyId, authResellerTenantId, }) {
+    if (!isValidUuid(controlPolicyId))
+        return toError(400, 'BAD_REQUEST', 'controlPolicyId is invalid.');
+    const rows = await supabase.select('control_policy_modules', `select=control_policy_id,name,reseller_id,control_policy,status,published_at,deprecated_at,effective_from,created_at,updated_at&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`);
+    const item = Array.isArray(rows) ? rows[0] : null;
+    if (!item?.control_policy_id)
+        return toError(404, 'NOT_FOUND', 'Control policy not found.');
+    const scopeCp = await enforceControlPolicyResellerScope(supabase, item, authResellerTenantId);
+    if (!scopeCp.ok)
+        return scopeCp;
+    return { ok: true, value: await mapControlPolicyModuleApiResponse(supabase, item) };
+}
+export async function listCommercialTerms({ supabase, status, page, pageSize, resellerId, }) {
+    if (resellerId && !isValidUuid(resellerId)) {
+        return toError(400, 'BAD_REQUEST', 'resellerId is invalid.');
+    }
+    let resellerRowId = null;
+    if (resellerId) {
+        const resolved = await resolveResellerModuleRowId(supabase, String(resellerId).trim());
+        if (!resolved.ok)
+            return resolved;
+        resellerRowId = resolved.value;
+    }
+    const filters = [
+        'select=commercial_terms_id,name,reseller_id,commercial_terms,status,effective_from,published_at,deprecated_at,created_at,updated_at',
+    ];
+    if (resellerRowId)
+        filters.push(`reseller_id=eq.${encodeURIComponent(resellerRowId)}`);
+    if (status && String(status).trim()) {
+        filters.push(`status=eq.${encodeURIComponent(String(status).trim())}`);
+    }
+    filters.push('order=created_at.desc');
+    const rows = await supabase.select('commercial_terms_modules', filters.join('&'));
+    const rowList = Array.isArray(rows) ? rows : [];
+    let items = await Promise.all(rowList.map((r) => mapCommercialTermsModuleApiResponse(supabase, r)));
+    const pagination = parsePagination({ page, pageSize }, { defaultPageSize: 20, maxPageSize: 500 });
+    const total = items.length;
+    const pagedItems = items.slice(pagination.offset, pagination.offset + pagination.pageSize);
+    return { ok: true, value: buildPaginationResponse(pagedItems, total, pagination.page, pagination.pageSize) };
+}
+export async function listControlPolicies({ supabase, status, page, pageSize, resellerId, }) {
+    if (resellerId && !isValidUuid(resellerId)) {
+        return toError(400, 'BAD_REQUEST', 'resellerId is invalid.');
+    }
+    let resellerRowId = null;
+    if (resellerId) {
+        const resolved = await resolveResellerModuleRowId(supabase, String(resellerId).trim());
+        if (!resolved.ok)
+            return resolved;
+        resellerRowId = resolved.value;
+    }
+    const filters = [
+        'select=control_policy_id,name,reseller_id,control_policy,status,effective_from,published_at,deprecated_at,created_at,updated_at',
+    ];
+    if (resellerRowId)
+        filters.push(`reseller_id=eq.${encodeURIComponent(resellerRowId)}`);
+    if (status && String(status).trim()) {
+        filters.push(`status=eq.${encodeURIComponent(String(status).trim())}`);
+    }
+    filters.push('order=created_at.desc');
+    const rows = await supabase.select('control_policy_modules', filters.join('&'));
+    const cpRowList = Array.isArray(rows) ? rows : [];
+    let items = await Promise.all(cpRowList.map((r) => mapControlPolicyModuleApiResponse(supabase, r)));
+    const pagination = parsePagination({ page, pageSize }, { defaultPageSize: 20, maxPageSize: 500 });
+    const total = items.length;
+    const pagedItems = items.slice(pagination.offset, pagination.offset + pagination.pageSize);
+    return { ok: true, value: buildPaginationResponse(pagedItems, total, pagination.page, pagination.pageSize) };
+}
+export async function cloneCommercialTerms({ supabase, commercialTermsId, payload, audit, authResellerTenantId, }) {
+    if (!isValidUuid(commercialTermsId)) {
+        return toError(400, 'BAD_REQUEST', 'commercialTermsId is invalid.');
+    }
+    const sourceRows = await supabase.select('commercial_terms_modules', `select=commercial_terms_id,name,reseller_id,commercial_terms,created_at,updated_at&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`);
+    const source = Array.isArray(sourceRows) ? sourceRows[0] : null;
+    if (!source?.commercial_terms_id)
+        return toError(404, 'NOT_FOUND', 'Source commercial terms not found.');
+    const scopeSource = await enforceCommercialTermsResellerScope(supabase, source, authResellerTenantId);
+    if (!scopeSource.ok)
+        return scopeSource;
+    let resellerFk = source.reseller_id ?? null;
+    if (payload && Object.prototype.hasOwnProperty.call(payload, 'resellerId')) {
+        const n = normalizeOptionalTenantId(payload.resellerId, 'resellerId');
+        if (!n.ok)
+            return n;
+        if (n.value === null)
+            resellerFk = null;
+        else {
+            const r = await resolveResellerModuleRowId(supabase, n.value);
+            if (!r.ok)
+                return r;
+            resellerFk = r.value;
+            if (authResellerTenantId) {
+                const rrow = await loadResellerRowByRef(supabase, n.value);
+                if (!rrow.ok)
+                    return rrow;
+                const authCanonCloneCt = await canonicalResellerTenantIdFromRef(supabase, String(authResellerTenantId));
+                if (!authCanonCloneCt.ok)
+                    return authCanonCloneCt;
+                if (!rrow.value || String(rrow.value.tenant_id) !== authCanonCloneCt.value) {
+                    return toError(403, 'FORBIDDEN', 'resellerId does not match authenticated reseller.');
+                }
+            }
+        }
+    }
+    let cloneCtName;
+    if (payload && typeof payload === 'object' && 'name' in payload) {
+        const nn = normalizeRequiredModuleName(payload.name);
+        if (!nn.ok)
+            return nn;
+        cloneCtName = nn.value;
+    }
+    else {
+        const base = String(source.name ?? '').trim();
+        cloneCtName = base ? `${base} (copy)` : 'Commercial terms (copy)';
+    }
+    const rows = await supabase.insert('commercial_terms_modules', {
+        name: cloneCtName,
+        reseller_id: resellerFk,
+        commercial_terms: payload?.commercialTerms ?? source.commercial_terms,
+        status: 'DRAFT',
+    }, { returning: 'representation' });
+    const cloned = Array.isArray(rows) ? rows[0] : null;
+    if (!cloned?.commercial_terms_id) {
+        return toError(500, 'INTERNAL_ERROR', 'Failed to clone commercial terms.');
+    }
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(cloned),
+        action: 'COMMERCIAL_TERMS_CLONED',
+        target_type: 'COMMERCIAL_TERMS',
+        target_id: cloned.commercial_terms_id,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        after_data: {
+            commercialTermsId: cloned.commercial_terms_id,
+            sourceCommercialTermsId: commercialTermsId,
+        },
+    });
+    const clonedApi = await mapCommercialTermsModuleApiResponse(supabase, cloned);
+    return {
+        ok: true,
+        value: {
+            ...clonedApi,
+            sourceCommercialTermsId: commercialTermsId,
+        },
+    };
+}
+export async function cloneControlPolicy({ supabase, controlPolicyId, payload, audit, authResellerTenantId, }) {
+    if (!isValidUuid(controlPolicyId)) {
+        return toError(400, 'BAD_REQUEST', 'controlPolicyId is invalid.');
+    }
+    const sourceRows = await supabase.select('control_policy_modules', `select=control_policy_id,name,reseller_id,control_policy,created_at,updated_at&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`);
+    const source = Array.isArray(sourceRows) ? sourceRows[0] : null;
+    if (!source?.control_policy_id)
+        return toError(404, 'NOT_FOUND', 'Source control policy not found.');
+    const scopeSource = await enforceControlPolicyResellerScope(supabase, source, authResellerTenantId);
+    if (!scopeSource.ok)
+        return scopeSource;
+    let resellerFk = source.reseller_id ?? null;
+    if (payload && Object.prototype.hasOwnProperty.call(payload, 'resellerId')) {
+        const n = normalizeOptionalTenantId(payload.resellerId, 'resellerId');
+        if (!n.ok)
+            return n;
+        if (n.value === null)
+            resellerFk = null;
+        else {
+            const r = await resolveResellerModuleRowId(supabase, n.value);
+            if (!r.ok)
+                return r;
+            resellerFk = r.value;
+            if (authResellerTenantId) {
+                const rrow = await loadResellerRowByRef(supabase, n.value);
+                if (!rrow.ok)
+                    return rrow;
+                const authCanonCloneCp = await canonicalResellerTenantIdFromRef(supabase, String(authResellerTenantId));
+                if (!authCanonCloneCp.ok)
+                    return authCanonCloneCp;
+                if (!rrow.value || String(rrow.value.tenant_id) !== authCanonCloneCp.value) {
+                    return toError(403, 'FORBIDDEN', 'resellerId does not match authenticated reseller.');
+                }
+            }
+        }
+    }
+    let cloneCpName;
+    if (payload && typeof payload === 'object' && 'name' in payload) {
+        const nn = normalizeRequiredModuleName(payload.name);
+        if (!nn.ok)
+            return nn;
+        cloneCpName = nn.value;
+    }
+    else {
+        const base = String(source.name ?? '').trim();
+        cloneCpName = base ? `${base} (copy)` : 'Control policy (copy)';
+    }
+    const basePolicy = stripLegacyControlPolicyKeys((source.control_policy ?? {}));
+    let controlPolicyToStore;
+    if (payload?.controlPolicy !== undefined) {
+        const partial = normalizeControlPolicy(payload.controlPolicy, 'partial');
+        if (!partial.ok)
+            return partial;
+        if (!partial.value || !Object.keys(partial.value).length) {
+            return toError(400, 'BAD_REQUEST', 'controlPolicy must include at least one valid field.');
+        }
+        const mergedClone = { ...basePolicy, ...partial.value };
+        const fin = finalizeControlPolicyMerged(mergedClone);
+        if (!fin.ok)
+            return fin;
+        if (!fin.value) {
+            return toError(400, 'BAD_REQUEST', 'controlPolicy is required.');
+        }
+        controlPolicyToStore = fin.value;
+    }
+    else {
+        const fin = normalizeControlPolicy(basePolicy, 'full');
+        if (!fin.ok)
+            return fin;
+        if (!fin.value) {
+            return toError(400, 'BAD_REQUEST', 'controlPolicy is required.');
+        }
+        controlPolicyToStore = fin.value;
+    }
+    const rows = await supabase.insert('control_policy_modules', {
+        name: cloneCpName,
+        reseller_id: resellerFk,
+        control_policy: controlPolicyToStore,
+        status: 'DRAFT',
+    }, { returning: 'representation' });
+    const cloned = Array.isArray(rows) ? rows[0] : null;
+    if (!cloned?.control_policy_id) {
+        return toError(500, 'INTERNAL_ERROR', 'Failed to clone control policy.');
+    }
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(cloned),
+        action: 'CONTROL_POLICY_CLONED',
+        target_type: 'CONTROL_POLICY',
+        target_id: cloned.control_policy_id,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        after_data: {
+            controlPolicyId: cloned.control_policy_id,
+            sourceControlPolicyId: controlPolicyId,
+        },
+    });
+    const clonedCpApi = await mapControlPolicyModuleApiResponse(supabase, cloned);
+    return {
+        ok: true,
+        value: {
+            ...clonedCpApi,
+            sourceControlPolicyId: controlPolicyId,
+        },
+    };
+}
+async function collectPackageIdsReferencingCommercialTerms(supabase, commercialTermsId) {
+    const rows = await supabase.select('packages', `select=package_id&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}`);
+    const ids = new Set();
+    for (const r of Array.isArray(rows) ? rows : []) {
+        const pid = String(r?.package_id ?? '').trim();
+        if (pid)
+            ids.add(pid);
+    }
+    return [...ids];
+}
+async function collectPackageIdsReferencingControlPolicy(supabase, controlPolicyId) {
+    const rows = await supabase.select('packages', `select=package_id&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}`);
+    const ids = new Set();
+    for (const r of Array.isArray(rows) ? rows : []) {
+        const pid = String(r?.package_id ?? '').trim();
+        if (pid)
+            ids.add(pid);
+    }
+    return [...ids];
+}
+export async function publishCommercialTerms({ supabase, commercialTermsId, audit, authResellerTenantId, }) {
+    if (!isValidUuid(commercialTermsId))
+        return toError(400, 'BAD_REQUEST', 'commercialTermsId is invalid.');
+    const rows = await supabase.select('commercial_terms_modules', `select=commercial_terms_id,name,reseller_id,commercial_terms,status,published_at,deprecated_at,effective_from,created_at,updated_at&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`);
+    const existing = Array.isArray(rows) ? rows[0] : null;
+    if (!existing?.commercial_terms_id)
+        return toError(404, 'NOT_FOUND', 'Commercial terms not found.');
+    const scopePub = await enforceCommercialTermsResellerScope(supabase, existing, authResellerTenantId);
+    if (!scopePub.ok)
+        return scopePub;
+    if (String(existing.status ?? '').toUpperCase() !== 'DRAFT') {
+        return toError(409, 'INVALID_STATUS', 'Only DRAFT commercial terms can be published.');
+    }
+    const validated = validateCommercialTermsModule({ commercialTerms: existing.commercial_terms });
+    if (!validated.ok)
+        return validated;
+    const effectiveFrom = firstDayNextMonthUtc().toISOString();
+    const publishedAt = new Date().toISOString();
+    await supabase.update('commercial_terms_modules', `commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}`, {
+        status: 'PUBLISHED',
+        effective_from: effectiveFrom,
+        published_at: publishedAt,
+        deprecated_at: null,
+        updated_at: publishedAt,
+    }, { returning: 'minimal' });
+    const refreshedRows = await supabase.select('commercial_terms_modules', `select=commercial_terms_id,name,reseller_id,commercial_terms,status,published_at,deprecated_at,effective_from,created_at,updated_at&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`);
+    const refreshed = Array.isArray(refreshedRows) ? refreshedRows[0] : null;
+    const value = refreshed ? await mapCommercialTermsModuleApiResponse(supabase, refreshed) : {};
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(existing),
+        action: 'COMMERCIAL_TERMS_PUBLISHED',
+        target_type: 'COMMERCIAL_TERMS',
+        target_id: commercialTermsId,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        after_data: value,
+    });
+    return { ok: true, value };
+}
+export async function deprecateCommercialTerms({ supabase, commercialTermsId, audit, authResellerTenantId, }) {
+    if (!isValidUuid(commercialTermsId))
+        return toError(400, 'BAD_REQUEST', 'commercialTermsId is invalid.');
+    const rows = await supabase.select('commercial_terms_modules', `select=commercial_terms_id,name,reseller_id,commercial_terms,status,published_at,deprecated_at,effective_from,created_at,updated_at&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`);
+    const existing = Array.isArray(rows) ? rows[0] : null;
+    if (!existing?.commercial_terms_id)
+        return toError(404, 'NOT_FOUND', 'Commercial terms not found.');
+    const scopeDep = await enforceCommercialTermsResellerScope(supabase, existing, authResellerTenantId);
+    if (!scopeDep.ok)
+        return scopeDep;
+    if (String(existing.status ?? '').toUpperCase() !== 'PUBLISHED') {
+        return toError(409, 'INVALID_STATUS', 'Only PUBLISHED commercial terms can be deprecated.');
+    }
+    const pkgIds = await collectPackageIdsReferencingCommercialTerms(supabase, commercialTermsId);
+    if (pkgIds.length) {
+        return toError(409, 'RESOURCE_IN_USE', `Commercial terms are still referenced by subscription packages. packageIds=${pkgIds.join(',')}`);
+    }
+    const nowIso = new Date().toISOString();
+    await supabase.update('commercial_terms_modules', `commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}`, {
+        status: 'DEPRECATED',
+        deprecated_at: nowIso,
+        updated_at: nowIso,
+    }, { returning: 'minimal' });
+    const refreshedRows = await supabase.select('commercial_terms_modules', `select=commercial_terms_id,name,reseller_id,commercial_terms,status,published_at,deprecated_at,effective_from,created_at,updated_at&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`);
+    const refreshed = Array.isArray(refreshedRows) ? refreshedRows[0] : null;
+    const value = refreshed ? await mapCommercialTermsModuleApiResponse(supabase, refreshed) : {};
+    const beforeApi = await mapCommercialTermsModuleApiResponse(supabase, existing);
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(existing),
+        action: 'COMMERCIAL_TERMS_DEPRECATED',
+        target_type: 'COMMERCIAL_TERMS',
+        target_id: commercialTermsId,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        before_data: beforeApi,
+        after_data: value,
+    });
+    return { ok: true, value };
+}
+export async function publishControlPolicy({ supabase, controlPolicyId, audit, authResellerTenantId, }) {
+    if (!isValidUuid(controlPolicyId))
+        return toError(400, 'BAD_REQUEST', 'controlPolicyId is invalid.');
+    const rows = await supabase.select('control_policy_modules', `select=control_policy_id,name,reseller_id,control_policy,status,published_at,deprecated_at,effective_from,created_at,updated_at&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`);
+    const existing = Array.isArray(rows) ? rows[0] : null;
+    if (!existing?.control_policy_id)
+        return toError(404, 'NOT_FOUND', 'Control policy not found.');
+    const scopePub = await enforceControlPolicyResellerScope(supabase, existing, authResellerTenantId);
+    if (!scopePub.ok)
+        return scopePub;
+    if (String(existing.status ?? '').toUpperCase() !== 'DRAFT') {
+        return toError(409, 'INVALID_STATUS', 'Only DRAFT control policies can be published.');
+    }
+    const stripped = stripLegacyControlPolicyKeys((existing.control_policy ?? {}) ?? {});
+    const validated = normalizeControlPolicy(stripped, 'full');
+    if (!validated.ok)
+        return validated;
+    if (!validated.value) {
+        return toError(400, 'BAD_REQUEST', 'controlPolicy is required.');
+    }
+    const effectiveFrom = firstDayNextMonthUtc().toISOString();
+    const publishedAt = new Date().toISOString();
+    await supabase.update('control_policy_modules', `control_policy_id=eq.${encodeURIComponent(controlPolicyId)}`, {
+        status: 'PUBLISHED',
+        effective_from: effectiveFrom,
+        published_at: publishedAt,
+        deprecated_at: null,
+        updated_at: publishedAt,
+    }, { returning: 'minimal' });
+    const refreshedRows = await supabase.select('control_policy_modules', `select=control_policy_id,name,reseller_id,control_policy,status,published_at,deprecated_at,effective_from,created_at,updated_at&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`);
+    const refreshed = Array.isArray(refreshedRows) ? refreshedRows[0] : null;
+    const value = refreshed ? await mapControlPolicyModuleApiResponse(supabase, refreshed) : {};
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(existing),
+        action: 'CONTROL_POLICY_PUBLISHED',
+        target_type: 'CONTROL_POLICY',
+        target_id: controlPolicyId,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        after_data: value,
+    });
+    return { ok: true, value };
+}
+export async function deprecateControlPolicy({ supabase, controlPolicyId, audit, authResellerTenantId, }) {
+    if (!isValidUuid(controlPolicyId))
+        return toError(400, 'BAD_REQUEST', 'controlPolicyId is invalid.');
+    const rows = await supabase.select('control_policy_modules', `select=control_policy_id,name,reseller_id,control_policy,status,published_at,deprecated_at,effective_from,created_at,updated_at&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`);
+    const existing = Array.isArray(rows) ? rows[0] : null;
+    if (!existing?.control_policy_id)
+        return toError(404, 'NOT_FOUND', 'Control policy not found.');
+    const scopeDep = await enforceControlPolicyResellerScope(supabase, existing, authResellerTenantId);
+    if (!scopeDep.ok)
+        return scopeDep;
+    if (String(existing.status ?? '').toUpperCase() !== 'PUBLISHED') {
+        return toError(409, 'INVALID_STATUS', 'Only PUBLISHED control policies can be deprecated.');
+    }
+    const pkgIds = await collectPackageIdsReferencingControlPolicy(supabase, controlPolicyId);
+    if (pkgIds.length) {
+        return toError(409, 'RESOURCE_IN_USE', `Control policy is still referenced by subscription packages. packageIds=${pkgIds.join(',')}`);
+    }
+    const nowIso = new Date().toISOString();
+    await supabase.update('control_policy_modules', `control_policy_id=eq.${encodeURIComponent(controlPolicyId)}`, {
+        status: 'DEPRECATED',
+        deprecated_at: nowIso,
+        updated_at: nowIso,
+    }, { returning: 'minimal' });
+    const refreshedRows = await supabase.select('control_policy_modules', `select=control_policy_id,name,reseller_id,control_policy,status,published_at,deprecated_at,effective_from,created_at,updated_at&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`);
+    const refreshed = Array.isArray(refreshedRows) ? refreshedRows[0] : null;
+    const value = refreshed ? await mapControlPolicyModuleApiResponse(supabase, refreshed) : {};
+    const beforeCpDepApi = await mapControlPolicyModuleApiResponse(supabase, existing);
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(existing),
+        action: 'CONTROL_POLICY_DEPRECATED',
+        target_type: 'CONTROL_POLICY',
+        target_id: controlPolicyId,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        before_data: beforeCpDepApi,
+        after_data: value,
+    });
+    return { ok: true, value };
+}
+export async function createCarrierService({ supabase, payload, audit, auth, }) {
+    const resellerIdResult = normalizeOptionalTenantId(payload?.resellerId, 'resellerId');
+    if (!resellerIdResult.ok)
+        return resellerIdResult;
+    let effectiveResellerRef = resellerIdResult.value;
+    const hasBodyReseller = effectiveResellerRef !== null &&
+        effectiveResellerRef !== undefined &&
+        String(effectiveResellerRef).trim() !== '';
+    if (!hasBodyReseller) {
+        if (auth?.scope === 'reseller') {
+            const authCanonCs = await canonicalResellerTenantIdFromRef(supabase, String(auth?.resellerTenantId ?? ''));
+            if (!authCanonCs.ok)
+                return authCanonCs;
+            effectiveResellerRef = authCanonCs.value;
+        }
+        else if (auth?.scope === 'platform') {
+            return toError(400, 'BAD_REQUEST', 'resellerId is required.');
+        }
+    }
+    const payloadForValidate = {
+        ...payload,
+        resellerId: hasBodyReseller ? payload?.resellerId : effectiveResellerRef ?? payload?.resellerId,
+    };
+    const normalized = await validateCarrierServiceModule({ supabase, payload: payloadForValidate });
+    if (!normalized.ok)
+        return normalized;
+    const nameResult = normalizeRequiredModuleName(payload?.name);
+    if (!nameResult.ok)
+        return nameResult;
+    const resellerFk = await resolveResellerModuleRowId(supabase, effectiveResellerRef);
+    if (!resellerFk.ok)
+        return resellerFk;
+    const carrierServiceConfig = normalized.value.carrierServiceConfig;
+    const rows = await supabase.insert('carrier_service_modules', {
+        name: nameResult.value,
+        reseller_id: resellerFk.value,
+        supplier_id: carrierServiceConfig.supplierId,
+        operator_id: carrierServiceConfig.operatorId,
+        apn_profile_id: carrierServiceConfig.apnProfileId,
+        roaming_profile_id: carrierServiceConfig.roamingProfileId,
+        rat: String(carrierServiceConfig.rat ?? '4G'),
+        status: 'DRAFT',
+    }, { returning: 'representation' });
+    const created = Array.isArray(rows) ? rows[0] : null;
+    if (!created?.carrier_service_id)
+        return toError(500, 'INTERNAL_ERROR', 'Failed to create carrier service.');
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(created),
+        action: 'CARRIER_SERVICE_CREATED',
+        target_type: 'CARRIER_SERVICE',
+        target_id: created.carrier_service_id,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        after_data: await mapCarrierServiceModuleApiResponse(supabase, created),
+    });
+    return { ok: true, value: await mapCarrierServiceModuleApiResponse(supabase, created) };
+}
+/** When `authResellerTenantId` is set, the row must belong to that reseller (`resellers.tenant_id`). */
+async function enforceCarrierServiceResellerScope(supabase, item, authResellerTenantId) {
+    const tenantFilter = authResellerTenantId ? String(authResellerTenantId).trim() : '';
+    if (!tenantFilter)
+        return { ok: true, value: null };
+    if (!isValidUuid(tenantFilter)) {
+        return toError(403, 'FORBIDDEN', 'Reseller scope is missing resellerId.');
+    }
+    const moduleResellerTid = item?.reseller_id != null ? String(item.reseller_id).trim() : '';
+    if (!moduleResellerTid) {
+        return toError(403, 'FORBIDDEN', 'Carrier service is not in scope for this reseller.');
+    }
+    const authCanon = await canonicalResellerTenantIdFromRef(supabase, tenantFilter);
+    if (!authCanon.ok)
+        return authCanon;
+    if (moduleResellerTid !== authCanon.value) {
+        return toError(403, 'FORBIDDEN', 'Carrier service is not in scope for this reseller.');
+    }
+    return { ok: true, value: null };
+}
+/** When `authResellerTenantId` is set, the row must belong to that reseller (`resellers.tenant_id`). */
+async function enforceCommercialTermsResellerScope(supabase, item, authResellerTenantId) {
+    const tenantFilter = authResellerTenantId ? String(authResellerTenantId).trim() : '';
+    if (!tenantFilter)
+        return { ok: true, value: null };
+    if (!isValidUuid(tenantFilter)) {
+        return toError(403, 'FORBIDDEN', 'Reseller scope is missing resellerId.');
+    }
+    const moduleResellerTid = item?.reseller_id != null ? String(item.reseller_id).trim() : '';
+    if (!moduleResellerTid) {
+        return toError(403, 'FORBIDDEN', 'Commercial terms are not in scope for this reseller.');
+    }
+    const authCanonCt = await canonicalResellerTenantIdFromRef(supabase, tenantFilter);
+    if (!authCanonCt.ok)
+        return authCanonCt;
+    if (moduleResellerTid !== authCanonCt.value) {
+        return toError(403, 'FORBIDDEN', 'Commercial terms are not in scope for this reseller.');
+    }
+    return { ok: true, value: null };
+}
+/** When `authResellerTenantId` is set, the row must belong to that reseller (`resellers.tenant_id`). */
+async function enforceControlPolicyResellerScope(supabase, item, authResellerTenantId) {
+    const tenantFilter = authResellerTenantId ? String(authResellerTenantId).trim() : '';
+    if (!tenantFilter)
+        return { ok: true, value: null };
+    if (!isValidUuid(tenantFilter)) {
+        return toError(403, 'FORBIDDEN', 'Reseller scope is missing resellerId.');
+    }
+    const moduleResellerTid = item?.reseller_id != null ? String(item.reseller_id).trim() : '';
+    if (!moduleResellerTid) {
+        return toError(403, 'FORBIDDEN', 'Control policy is not in scope for this reseller.');
+    }
+    const authCanonCp = await canonicalResellerTenantIdFromRef(supabase, tenantFilter);
+    if (!authCanonCp.ok)
+        return authCanonCp;
+    if (moduleResellerTid !== authCanonCp.value) {
+        return toError(403, 'FORBIDDEN', 'Control policy is not in scope for this reseller.');
+    }
+    return { ok: true, value: null };
+}
+export async function updateCarrierService({ supabase, carrierServiceId, payload, audit, authResellerTenantId, }) {
+    if (!isValidUuid(carrierServiceId))
+        return toError(400, 'BAD_REQUEST', 'carrierServiceId is invalid.');
+    const rows = await supabase.select('carrier_service_modules', `select=${CARRIER_SERVICE_MODULE_ROW_SELECT}&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}&limit=1`);
+    const existing = Array.isArray(rows) ? rows[0] : null;
+    if (!existing?.carrier_service_id)
+        return toError(404, 'NOT_FOUND', 'Carrier service not found.');
+    const scope = await enforceCarrierServiceResellerScope(supabase, existing, authResellerTenantId);
+    if (!scope.ok)
+        return scope;
+    if (String(existing.status ?? '').toUpperCase() !== 'DRAFT') {
+        return toError(409, 'INVALID_STATUS', 'Only DRAFT carrier services can be updated.');
+    }
+    let nameUpdate;
+    if (payload && typeof payload === 'object' && 'name' in payload) {
+        const nn = normalizeRequiredModuleName(payload.name);
+        if (!nn.ok)
+            return nn;
+        nameUpdate = nn.value;
+    }
+    const mergedInput = scrubLegacyCarrierServiceConfigFields({
+        ...carrierServiceConfigInputFromDbRow(existing),
+        ...(payload?.carrierServiceConfig ?? payload ?? {}),
+    });
+    const resellerTidExisting = existing.reseller_id != null ? String(existing.reseller_id).trim() : '';
+    const resellerRef = resellerTidExisting || null;
+    const normalized = await validateCarrierServiceModule({
+        supabase,
+        payload: { carrierServiceConfig: mergedInput, resellerId: resellerRef },
+    });
+    if (!normalized.ok)
+        return normalized;
+    const carrierServiceConfig = normalized.value.carrierServiceConfig;
+    const updatePatch = {
+        supplier_id: carrierServiceConfig.supplierId,
+        operator_id: carrierServiceConfig.operatorId,
+        apn_profile_id: carrierServiceConfig.apnProfileId,
+        roaming_profile_id: carrierServiceConfig.roamingProfileId,
+        rat: String(carrierServiceConfig.rat ?? '4G'),
+        updated_at: new Date().toISOString(),
+    };
+    if (nameUpdate !== undefined)
+        updatePatch.name = nameUpdate;
+    await supabase.update('carrier_service_modules', `carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}`, updatePatch, { returning: 'minimal' });
+    const refreshedRows = await supabase.select('carrier_service_modules', `select=${CARRIER_SERVICE_MODULE_ROW_SELECT}&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}&limit=1`);
+    const refreshed = Array.isArray(refreshedRows) ? refreshedRows[0] : null;
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(existing),
+        action: 'CARRIER_SERVICE_UPDATED',
+        target_type: 'CARRIER_SERVICE',
+        target_id: carrierServiceId,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        before_data: await mapCarrierServiceModuleApiResponse(supabase, existing),
+        after_data: await mapCarrierServiceModuleApiResponse(supabase, refreshed),
+    });
+    return { ok: true, value: await mapCarrierServiceModuleApiResponse(supabase, refreshed) };
+}
+export async function getCarrierServiceDetail({ supabase, carrierServiceId, authResellerTenantId, }) {
+    if (!isValidUuid(carrierServiceId))
+        return toError(400, 'BAD_REQUEST', 'carrierServiceId is invalid.');
+    const rows = await supabase.select('carrier_service_modules', `select=${CARRIER_SERVICE_MODULE_ROW_SELECT}&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}&limit=1`);
+    const item = Array.isArray(rows) ? rows[0] : null;
+    if (!item?.carrier_service_id)
+        return toError(404, 'NOT_FOUND', 'Carrier service not found.');
+    const scope = await enforceCarrierServiceResellerScope(supabase, item, authResellerTenantId);
+    if (!scope.ok)
+        return scope;
+    return { ok: true, value: await mapCarrierServiceModuleApiResponse(supabase, item) };
+}
+async function collectSubscriptionPackageIdsReferencingCarrierService(supabase, carrierServiceId) {
+    const rows = await supabase.select('packages', `select=package_id&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}`);
+    const ids = new Set();
+    for (const r of Array.isArray(rows) ? rows : []) {
+        const pid = String(r?.package_id ?? '').trim();
+        if (pid)
+            ids.add(pid);
+    }
+    return [...ids];
+}
+export async function publishCarrierService({ supabase, carrierServiceId, audit, authResellerTenantId, }) {
+    if (!isValidUuid(carrierServiceId))
+        return toError(400, 'BAD_REQUEST', 'carrierServiceId is invalid.');
+    const rows = await supabase.select('carrier_service_modules', `select=${CARRIER_SERVICE_MODULE_ROW_SELECT}&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}&limit=1`);
+    const existing = Array.isArray(rows) ? rows[0] : null;
+    if (!existing?.carrier_service_id)
+        return toError(404, 'NOT_FOUND', 'Carrier service not found.');
+    const scopePub = await enforceCarrierServiceResellerScope(supabase, existing, authResellerTenantId);
+    if (!scopePub.ok)
+        return scopePub;
+    if (String(existing.status ?? '').toUpperCase() !== 'DRAFT') {
+        return toError(409, 'INVALID_STATUS', 'Only DRAFT carrier services can be published.');
+    }
+    const mergedInput = carrierServiceConfigInputFromDbRow(existing);
+    const resellerTidExistingPub = existing.reseller_id != null ? String(existing.reseller_id).trim() : '';
+    const resellerRef = resellerTidExistingPub || null;
+    const normalized = await validateCarrierServiceModule({
+        supabase,
+        payload: { carrierServiceConfig: mergedInput, resellerId: resellerRef },
+    });
+    if (!normalized.ok)
+        return normalized;
+    const effectiveFrom = firstDayNextMonthUtc().toISOString();
+    const publishedAt = new Date().toISOString();
+    await supabase.update('carrier_service_modules', `carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}`, {
+        status: 'PUBLISHED',
+        effective_from: effectiveFrom,
+        published_at: publishedAt,
+        deprecated_at: null,
+        updated_at: publishedAt,
+    }, { returning: 'minimal' });
+    const refreshedRows = await supabase.select('carrier_service_modules', `select=${CARRIER_SERVICE_MODULE_ROW_SELECT}&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}&limit=1`);
+    const refreshed = Array.isArray(refreshedRows) ? refreshedRows[0] : null;
+    const value = await mapCarrierServiceModuleApiResponse(supabase, refreshed);
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(existing),
+        action: 'CARRIER_SERVICE_PUBLISHED',
+        target_type: 'CARRIER_SERVICE',
+        target_id: carrierServiceId,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        after_data: value,
+    });
+    return { ok: true, value };
+}
+export async function deprecateCarrierService({ supabase, carrierServiceId, audit, authResellerTenantId, }) {
+    if (!isValidUuid(carrierServiceId))
+        return toError(400, 'BAD_REQUEST', 'carrierServiceId is invalid.');
+    const rows = await supabase.select('carrier_service_modules', `select=${CARRIER_SERVICE_MODULE_ROW_SELECT}&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}&limit=1`);
+    const existing = Array.isArray(rows) ? rows[0] : null;
+    if (!existing?.carrier_service_id)
+        return toError(404, 'NOT_FOUND', 'Carrier service not found.');
+    const scopeDep = await enforceCarrierServiceResellerScope(supabase, existing, authResellerTenantId);
+    if (!scopeDep.ok)
+        return scopeDep;
+    if (String(existing.status ?? '').toUpperCase() !== 'PUBLISHED') {
+        return toError(409, 'INVALID_STATUS', 'Only PUBLISHED carrier services can be deprecated.');
+    }
+    const pkgIds = await collectSubscriptionPackageIdsReferencingCarrierService(supabase, carrierServiceId);
+    if (pkgIds.length) {
+        return toError(409, 'RESOURCE_IN_USE', `Carrier service is still referenced by subscription packages. packageIds=${pkgIds.join(',')}`);
+    }
+    const nowIso = new Date().toISOString();
+    await supabase.update('carrier_service_modules', `carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}`, {
+        status: 'DEPRECATED',
+        deprecated_at: nowIso,
+        updated_at: nowIso,
+    }, { returning: 'minimal' });
+    const refreshedRows = await supabase.select('carrier_service_modules', `select=${CARRIER_SERVICE_MODULE_ROW_SELECT}&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}&limit=1`);
+    const refreshed = Array.isArray(refreshedRows) ? refreshedRows[0] : null;
+    const value = await mapCarrierServiceModuleApiResponse(supabase, refreshed);
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: auditTenantIdFromResellerModuleRow(existing),
+        action: 'CARRIER_SERVICE_DEPRECATED',
+        target_type: 'CARRIER_SERVICE',
+        target_id: carrierServiceId,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        before_data: await mapCarrierServiceModuleApiResponse(supabase, existing),
+        after_data: value,
+    });
+    return { ok: true, value };
+}
+function collectCarrierServiceConfigProfileRefs(config, key) {
+    const refs = new Set();
+    if (!config || typeof config !== 'object')
+        return refs;
+    if (key === 'apnProfileId') {
+        const profileId = String(config.apnProfileId ?? config.apn_profile_id ?? '').trim();
+        if (profileId)
+            refs.add(profileId);
+        return refs;
+    }
+    const profileId = String(config.roamingProfileId ?? config.roaming_profile_id ?? '').trim();
+    if (profileId)
+        refs.add(profileId);
+    return refs;
+}
+async function resolveCompatibleProfileRefs(_supabase, profileRef, _profileType) {
+    const refs = new Set();
+    const normalized = String(profileRef ?? '').trim();
+    if (!normalized)
+        return refs;
+    refs.add(normalized);
+    return refs;
+}
+export async function listCarrierServices({ supabase, apnProfileId, roamingProfileId, status, page, pageSize, resellerId, supplierId, operatorId, }) {
+    const pagination = parsePagination({ page, pageSize }, { defaultPageSize: 20, maxPageSize: 500 });
+    const apnProfileIdValue = apnProfileId ? String(apnProfileId).trim() : null;
+    const roamingProfileIdValue = roamingProfileId ? String(roamingProfileId).trim() : null;
+    const supplierIdValue = supplierId ? String(supplierId).trim() : null;
+    const operatorIdValue = operatorId ? String(operatorId).trim() : null;
+    if (apnProfileIdValue && !isValidUuid(apnProfileIdValue)) {
+        return toError(400, 'BAD_REQUEST', 'apnProfileId is invalid.');
+    }
+    if (roamingProfileIdValue && !isValidUuid(roamingProfileIdValue)) {
+        return toError(400, 'BAD_REQUEST', 'roamingProfileId is invalid.');
+    }
+    if (resellerId && !isValidUuid(resellerId)) {
+        return toError(400, 'BAD_REQUEST', 'resellerId is invalid.');
+    }
+    if (supplierIdValue && !isValidUuid(supplierIdValue)) {
+        return toError(400, 'BAD_REQUEST', 'supplierId is invalid.');
+    }
+    if (operatorIdValue && !isValidUuid(operatorIdValue)) {
+        return toError(400, 'BAD_REQUEST', 'operatorId is invalid.');
+    }
+    let resellerRowId = null;
+    if (resellerId) {
+        const resolved = await resolveResellerModuleRowId(supabase, String(resellerId).trim());
+        if (!resolved.ok)
+            return resolved;
+        resellerRowId = resolved.value;
+    }
+    const filters = [`select=${CARRIER_SERVICE_MODULE_ROW_SELECT}`];
+    if (resellerRowId)
+        filters.push(`reseller_id=eq.${encodeURIComponent(resellerRowId)}`);
+    if (supplierIdValue) {
+        filters.push(`supplier_id=eq.${encodeURIComponent(supplierIdValue)}`);
+    }
+    if (operatorIdValue) {
+        const operatorIds = await resolveBoundOperatorIds(supabase, operatorIdValue, supplierIdValue);
+        if (!operatorIds.length) {
+            return { ok: true, value: buildPaginationResponse([], 0, pagination.page, pagination.pageSize) };
+        }
+        if (operatorIds.length === 1) {
+            filters.push(`operator_id=eq.${encodeURIComponent(String(operatorIds[0]))}`);
+        }
+        else {
+            const values = operatorIds.map((id) => encodeURIComponent(id)).join(',');
+            filters.push(`operator_id=in.(${values})`);
+        }
+    }
+    if (status && String(status).trim()) {
+        filters.push(`status=eq.${encodeURIComponent(String(status).trim())}`);
+    }
+    filters.push('order=created_at.desc');
+    const [apnAcceptableRefs, roamingAcceptableRefs] = await Promise.all([
+        apnProfileIdValue ? resolveCompatibleProfileRefs(supabase, apnProfileIdValue, 'APN') : Promise.resolve(new Set()),
+        roamingProfileIdValue
+            ? resolveCompatibleProfileRefs(supabase, roamingProfileIdValue, 'ROAMING')
+            : Promise.resolve(new Set()),
+    ]);
+    const rows = await supabase.select('carrier_service_modules', filters.join('&'));
+    const services = Array.isArray(rows) ? rows : [];
+    const filteredServices = services.filter((row) => {
+        const shape = mergedCarrierServiceConfigShape(row);
+        const apnRefs = collectCarrierServiceConfigProfileRefs(shape, 'apnProfileId');
+        const roamingRefs = collectCarrierServiceConfigProfileRefs(shape, 'roamingProfileId');
+        if (apnProfileIdValue && !Array.from(apnRefs).some((ref) => apnAcceptableRefs.has(ref)))
+            return false;
+        if (roamingProfileIdValue && !Array.from(roamingRefs).some((ref) => roamingAcceptableRefs.has(ref)))
+            return false;
+        return true;
+    });
+    const operatorRowPks = [
+        ...new Set(filteredServices
+            .map((r) => String(r?.operator_id ?? '').trim())
+            .filter(Boolean)),
+    ];
+    const operatorDisplayByPk = await businessOperatorDisplayIdsByOperatorRowIds(supabase, operatorRowPks);
+    let items = filteredServices.map((row) => {
+        const pk = String(row?.operator_id ?? '').trim();
+        const display = pk ? operatorDisplayByPk.get(pk) ?? pk : null;
+        const rp = String(row?.reseller_id ?? '').trim();
+        const displayReseller = rp || null;
+        return mapCarrierServiceModuleForPublicResponse(row, display, displayReseller);
+    });
+    const total = items.length;
+    const pagedItems = items.slice(pagination.offset, pagination.offset + pagination.pageSize);
+    return { ok: true, value: buildPaginationResponse(pagedItems, total, pagination.page, pagination.pageSize) };
+}
+/** Phase 34: module bodies on snapshot tables only; packages keep module FKs (no denormalized carrier/plan text). */
+const PACKAGE_ROW_SELECT = 'package_id,enterprise_id,name,description,status,effective_from,published_at,deprecated_at,updated_at,carrier_service_id,control_policy_id,commercial_terms_id,price_plan_id,created_at';
+async function loadPackage(supabase, packageId) {
+    const rows = await supabase.select('packages', `select=package_id,enterprise_id,name,created_at&package_id=eq.${encodeURIComponent(packageId)}&limit=1`);
+    return Array.isArray(rows) ? rows[0] : null;
+}
+async function loadPackageRow(supabase, packageId) {
+    const rows = await supabase.select('packages', `select=${PACKAGE_ROW_SELECT}&package_id=eq.${encodeURIComponent(packageId)}&limit=1`);
+    return Array.isArray(rows) ? rows[0] : null;
+}
+function packageRoamingSnapshotFromCarrierConfig(carrierServiceConfig, roamingRow) {
+    if (!roamingRow)
+        return null;
+    const rid = String(carrierServiceConfig.roamingProfileId ?? '').trim();
+    if (!rid)
+        return null;
+    const mccmnc = mccmncAllowlistStringsFromRoamingProfileList(roamingRow.mccmnc_list);
+    const rat = String(carrierServiceConfig.rat ?? '4G').trim();
+    const apnPid = String(carrierServiceConfig.apnProfileId ?? '').trim();
+    const payload = {
+        type: 'MCCMNC_ALLOWLIST',
+        mccmnc,
+        rat,
+        profileId: rid,
+    };
+    if (apnPid)
+        payload.apnProfileId = apnPid;
+    return payload;
+}
+async function mapPackageRowsForApiBatch(supabase, packageRows) {
+    if (!packageRows.length)
+        return [];
+    const carrierIds = [
+        ...new Set(packageRows.map((r) => r?.carrier_service_id).filter(Boolean).map((x) => String(x).trim())),
+    ];
+    const ctIds = [
+        ...new Set(packageRows.map((r) => r?.commercial_terms_id).filter(Boolean).map((x) => String(x).trim())),
+    ];
+    const cpIds = [
+        ...new Set(packageRows.map((r) => r?.control_policy_id).filter(Boolean).map((x) => String(x).trim())),
+    ];
+    const carrierById = new Map();
+    if (carrierIds.length) {
+        const list = carrierIds.map((x) => encodeURIComponent(x)).join(',');
+        const rows = await supabase.select('carrier_service_modules', `select=${CARRIER_SERVICE_MODULE_ROW_SELECT}&carrier_service_id=in.(${list})`);
+        for (const r of Array.isArray(rows) ? rows : []) {
+            const id = r?.carrier_service_id != null ? String(r.carrier_service_id).trim() : '';
+            if (id)
+                carrierById.set(id, r);
+        }
+    }
+    const opPks = [
+        ...new Set([...carrierById.values()]
+            .map((r) => (r?.operator_id != null ? String(r.operator_id).trim() : ''))
+            .filter(Boolean)),
+    ];
+    const opDisplayByPk = await businessOperatorDisplayIdsByOperatorRowIds(supabase, opPks);
+    const ctById = new Map();
+    if (ctIds.length) {
+        const list = ctIds.map((x) => encodeURIComponent(x)).join(',');
+        const rows = await supabase.select('commercial_terms_modules', `select=commercial_terms_id,commercial_terms&commercial_terms_id=in.(${list})`);
+        for (const r of Array.isArray(rows) ? rows : []) {
+            const id = r?.commercial_terms_id != null ? String(r.commercial_terms_id).trim() : '';
+            if (id)
+                ctById.set(id, r);
+        }
+    }
+    const cpById = new Map();
+    if (cpIds.length) {
+        const list = cpIds.map((x) => encodeURIComponent(x)).join(',');
+        const rows = await supabase.select('control_policy_modules', `select=control_policy_id,control_policy&control_policy_id=in.(${list})`);
+        for (const r of Array.isArray(rows) ? rows : []) {
+            const id = r?.control_policy_id != null ? String(r.control_policy_id).trim() : '';
+            if (id)
+                cpById.set(id, r);
+        }
+    }
+    const roamingIdsNeeded = new Set();
+    for (const row of packageRows) {
+        const cid = row?.carrier_service_id ? String(row.carrier_service_id).trim() : '';
+        const cs = cid ? carrierById.get(cid) : null;
+        if (cs) {
+            const cfg = mergedCarrierServiceConfigShape(cs);
+            const rid = String(cfg.roamingProfileId ?? '').trim();
+            if (rid)
+                roamingIdsNeeded.add(rid);
+        }
+    }
+    const roamingById = new Map();
+    if (roamingIdsNeeded.size) {
+        const list = [...roamingIdsNeeded].map((x) => encodeURIComponent(x)).join(',');
+        const rows = await supabase.select('roaming_profiles', `select=roaming_profile_id,mccmnc_list&roaming_profile_id=in.(${list})`);
+        for (const r of Array.isArray(rows) ? rows : []) {
+            const id = r?.roaming_profile_id != null ? String(r.roaming_profile_id).trim() : '';
+            if (id)
+                roamingById.set(id, r);
+        }
+    }
+    const planIds = [
+        ...new Set(packageRows.map((r) => r?.price_plan_id).filter(Boolean).map((x) => String(x).trim())),
+    ];
+    const serviceTypeByPlanId = new Map();
+    if (planIds.length) {
+        const list = planIds.map((x) => encodeURIComponent(x)).join(',');
+        const prow = await supabase.select('price_plans', `select=price_plan_id,service_type&price_plan_id=in.(${list})`);
+        for (const r of Array.isArray(prow) ? prow : []) {
+            const pid = r?.price_plan_id != null ? String(r.price_plan_id).trim() : '';
+            if (!pid)
+                continue;
+            const st = r?.service_type != null ? String(r.service_type).trim() : '';
+            serviceTypeByPlanId.set(pid, st || 'DATA');
+        }
+    }
+    const apnProfileIdsForBatch = [];
+    for (const row of packageRows) {
+        const cid = row?.carrier_service_id ? String(row.carrier_service_id).trim() : '';
+        const cs = cid ? carrierById.get(cid) : null;
+        if (cs) {
+            const pid = String(mergedCarrierServiceConfigShape(cs).apnProfileId ?? '').trim();
+            if (pid)
+                apnProfileIdsForBatch.push(pid);
+        }
+    }
+    const apnByProfileId = await batchApnStringsByProfileIds(supabase, apnProfileIdsForBatch);
+    return packageRows.map((row) => {
+        const id = row?.package_id;
+        if (!id)
+            return null;
+        let carrierServiceConfig = scrubLegacyCarrierServiceConfigFields({
+            supplierId: null,
+            operatorId: null,
+            rat: '4G',
+            apnProfileId: null,
+            roamingProfileId: null,
+        });
+        let roamingProfile = null;
+        const planId = row?.price_plan_id ? String(row.price_plan_id).trim() : '';
+        const serviceType = planId ? serviceTypeByPlanId.get(planId) ?? 'DATA' : 'DATA';
+        let supplierId = null;
+        let operatorId = null;
+        let apn = '';
+        const cid = row?.carrier_service_id ? String(row.carrier_service_id).trim() : '';
+        if (cid) {
+            const cs = carrierById.get(cid);
+            if (cs) {
+                const opPk = cs?.operator_id != null ? String(cs.operator_id).trim() : '';
+                const displayOp = opPk ? opDisplayByPk.get(opPk) ?? opPk : null;
+                const resellerTid = cs?.reseller_id != null ? String(cs.reseller_id).trim() : '';
+                const mapped = mapCarrierServiceModuleForPublicResponse(cs, displayOp, resellerTid || null);
+                carrierServiceConfig = scrubLegacyCarrierServiceConfigFields((mapped.carrierServiceConfig ?? {}));
+                const apnPid = String(carrierServiceConfig.apnProfileId ?? '').trim();
+                apn = apnPid ? apnByProfileId.get(apnPid) ?? '' : '';
+                supplierId = carrierServiceConfig.supplierId ?? null;
+                operatorId = carrierServiceConfig.operatorId ?? null;
+                const rid = String(carrierServiceConfig.roamingProfileId ?? '').trim();
+                const rpRow = rid ? roamingById.get(rid) : null;
+                roamingProfile = packageRoamingSnapshotFromCarrierConfig(carrierServiceConfig, rpRow);
+            }
+        }
+        const ctid = row?.commercial_terms_id ? String(row.commercial_terms_id).trim() : '';
+        const commercialTerms = ctid ? (ctById.get(ctid)?.commercial_terms ?? {}) : {};
+        const cpid = row?.control_policy_id ? String(row.control_policy_id).trim() : '';
+        const controlPolicy = cpid ? (cpById.get(cpid)?.control_policy ?? {}) : {};
+        return {
+            packageId: id,
+            description: row.description != null ? String(row.description) : null,
+            status: row.status,
+            effectiveFrom: row.effective_from,
+            publishedAt: row.published_at ?? null,
+            deprecatedAt: row.deprecated_at ?? null,
+            supplierId,
+            operatorId,
+            serviceType,
+            apn,
+            roamingProfile,
+            carrierServiceConfig,
+            carrierServiceId: row.carrier_service_id ?? null,
+            controlPolicyId: row.control_policy_id ?? null,
+            commercialTermsId: row.commercial_terms_id ?? null,
+            controlPolicy,
+            commercialTerms,
+            pricePlanId: row.price_plan_id ?? null,
+            createdAt: row.created_at,
+        };
+    });
+}
+async function mapPackageRowForApi(supabase, row) {
+    if (!row)
+        return null;
+    const [out] = await mapPackageRowsForApiBatch(supabase, [row]);
+    return out;
+}
+/** Reseller scope for package module FKs: ENTERPRISE `tenants.parent_id`, optional `payload.resellerId` cross-check. */
+async function resolveResellerTenantIdForPackageModules(supabase, enterpriseId, payloadResellerRef) {
+    const tRows = await supabase.select('tenants', `select=parent_id&tenant_id=eq.${encodeURIComponent(enterpriseId)}&tenant_type=eq.ENTERPRISE&limit=1`);
+    const t = Array.isArray(tRows) ? tRows[0] : null;
+    if (!t)
+        return toError(404, 'RESOURCE_NOT_FOUND', 'enterpriseId not found.');
+    const parentTid = t.parent_id != null ? String(t.parent_id).trim() : '';
+    if (!parentTid) {
+        return toError(400, 'BAD_REQUEST', 'Enterprise has no reseller parent; cannot validate module scope.');
+    }
+    const rawRef = payloadResellerRef !== undefined && payloadResellerRef !== null && String(payloadResellerRef).trim() !== ''
+        ? String(payloadResellerRef).trim()
+        : null;
+    if (rawRef) {
+        const canon = await canonicalResellerTenantIdFromRef(supabase, rawRef);
+        if (!canon.ok)
+            return canon;
+        if (String(canon.value) !== String(parentTid)) {
+            return toError(400, 'BAD_REQUEST', 'resellerId does not match package enterprise.');
+        }
+    }
+    return { ok: true, value: parentTid };
+}
+function assertModuleResellerRow(rowResellerId, expectedTenantId, fieldLabel) {
+    const r = rowResellerId != null ? String(rowResellerId).trim() : '';
+    if (!r) {
+        return toError(400, 'BAD_REQUEST', `${fieldLabel} is not associated with a reseller.`);
+    }
+    if (r !== String(expectedTenantId).trim()) {
+        return toError(400, 'BAD_REQUEST', `${fieldLabel} does not belong to the package reseller.`);
+    }
+    return { ok: true, value: null };
+}
+function validatePricePlanRowForPackage(row, enterpriseId, resellerTenantId) {
+    if (!row || !row.price_plan_id) {
+        return toError(404, 'NOT_FOUND', 'Price plan not found.');
+    }
+    if (String(row.status ?? '').toUpperCase() !== 'PUBLISHED') {
+        return toError(400, 'BAD_REQUEST', 'pricePlanId must reference a PUBLISHED price plan.');
+    }
+    if (String(row.enterprise_id ?? '') !== String(enterpriseId)) {
+        return toError(400, 'BAD_REQUEST', 'pricePlanId does not belong to this enterprise.');
+    }
+    if (String(row.reseller_id ?? '') !== String(resellerTenantId)) {
+        return toError(400, 'BAD_REQUEST', 'pricePlanId does not belong to the package reseller.');
+    }
+    return { ok: true, value: null };
+}
+async function resolveModulePayloadByIds({ supabase, carrierServiceId, controlPolicyId, commercialTermsId, resellerTenantId, }) {
+    let carrierServiceConfig = null;
+    let controlPolicy = null;
+    let commercialTerms = null;
+    if (carrierServiceId) {
+        if (!isValidUuid(carrierServiceId))
+            return toError(400, 'BAD_REQUEST', 'carrierServiceId is invalid.');
+        const rows = await supabase.select('carrier_service_modules', `select=${CARRIER_SERVICE_MODULE_ROW_SELECT}&carrier_service_id=eq.${encodeURIComponent(carrierServiceId)}&limit=1`);
+        const row = Array.isArray(rows) ? rows[0] : null;
+        if (!row?.carrier_service_id)
+            return toError(404, 'NOT_FOUND', 'Carrier service not found.');
+        if (String(row.status ?? '').toUpperCase() !== 'PUBLISHED') {
+            return toError(400, 'BAD_REQUEST', 'carrierServiceId must reference a PUBLISHED carrier service.');
+        }
+        const rs = assertModuleResellerRow(row.reseller_id, resellerTenantId, 'carrierServiceId');
+        if (!rs.ok)
+            return rs;
+        carrierServiceConfig = scrubLegacyCarrierServiceConfigFields(mergedCarrierServiceConfigShape(row));
+    }
+    if (controlPolicyId) {
+        if (!isValidUuid(controlPolicyId))
+            return toError(400, 'BAD_REQUEST', 'controlPolicyId is invalid.');
+        const rows = await supabase.select('control_policy_modules', `select=control_policy_id,reseller_id,control_policy,status&control_policy_id=eq.${encodeURIComponent(controlPolicyId)}&limit=1`);
+        const row = Array.isArray(rows) ? rows[0] : null;
+        if (!row?.control_policy_id)
+            return toError(404, 'NOT_FOUND', 'Control policy not found.');
+        if (String(row.status ?? '').toUpperCase() !== 'PUBLISHED') {
+            return toError(400, 'BAD_REQUEST', 'controlPolicyId must reference a PUBLISHED control policy.');
+        }
+        const rs = assertModuleResellerRow(row.reseller_id, resellerTenantId, 'controlPolicyId');
+        if (!rs.ok)
+            return rs;
+        controlPolicy = (row.control_policy ?? null);
+    }
+    if (commercialTermsId) {
+        if (!isValidUuid(commercialTermsId))
+            return toError(400, 'BAD_REQUEST', 'commercialTermsId is invalid.');
+        const rows = await supabase.select('commercial_terms_modules', `select=commercial_terms_id,reseller_id,commercial_terms,status&commercial_terms_id=eq.${encodeURIComponent(commercialTermsId)}&limit=1`);
+        const row = Array.isArray(rows) ? rows[0] : null;
+        if (!row?.commercial_terms_id)
+            return toError(404, 'NOT_FOUND', 'Commercial terms not found.');
+        if (String(row.status ?? '').toUpperCase() !== 'PUBLISHED') {
+            return toError(400, 'BAD_REQUEST', 'commercialTermsId must reference PUBLISHED commercial terms.');
+        }
+        const rs = assertModuleResellerRow(row.reseller_id, resellerTenantId, 'commercialTermsId');
+        if (!rs.ok)
+            return rs;
+        commercialTerms = (row.commercial_terms ?? null);
+    }
+    return { ok: true, value: { carrierServiceConfig, controlPolicy, commercialTerms } };
+}
+export async function createPackage({ supabase, enterpriseId, payload, audit, }) {
+    if (!isValidUuid(enterpriseId)) {
+        return toError(400, 'BAD_REQUEST', 'enterpriseId is invalid.');
+    }
+    const nameResult = normalizeRequiredModuleName(payload?.name);
+    if (!nameResult.ok)
+        return nameResult;
+    const name = nameResult.value;
+    const pricePlanId = String(payload?.pricePlanId || '').trim();
+    if (!pricePlanId) {
+        return toError(400, 'BAD_REQUEST', 'pricePlanId is required.');
+    }
+    if (pricePlanId && !isValidUuid(pricePlanId)) {
+        return toError(400, 'BAD_REQUEST', 'pricePlanId is invalid.');
+    }
+    const scopeForModules = await resolveResellerTenantIdForPackageModules(supabase, enterpriseId, payload?.resellerId);
+    if (!scopeForModules.ok)
+        return scopeForModules;
+    const resellerTenantId = scopeForModules.value;
+    const pricePlanVersionRows = await supabase.select('price_plans', `select=price_plan_id,status,enterprise_id,reseller_id&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`);
+    const pricePlanVersion = Array.isArray(pricePlanVersionRows) ? pricePlanVersionRows[0] : null;
+    const planOk = validatePricePlanRowForPackage(pricePlanVersion, enterpriseId, resellerTenantId);
+    if (!planOk.ok)
+        return planOk;
+    const carrierServiceId = payload?.carrierServiceId ? String(payload.carrierServiceId).trim() : null;
+    const controlPolicyId = payload?.controlPolicyId ? String(payload.controlPolicyId).trim() : null;
+    const commercialTermsId = payload?.commercialTermsId ? String(payload.commercialTermsId).trim() : null;
+    const moduleById = await resolveModulePayloadByIds({
+        supabase,
+        carrierServiceId,
+        controlPolicyId,
+        commercialTermsId,
+        resellerTenantId,
+    });
+    if (!moduleById.ok)
+        return moduleById;
+    const normalizeInput = {
+        ...payload,
+        ...(moduleById.value.carrierServiceConfig ? { carrierServiceConfig: moduleById.value.carrierServiceConfig } : {}),
+        ...(moduleById.value.controlPolicy ? { controlPolicy: moduleById.value.controlPolicy } : {}),
+        ...(moduleById.value.commercialTerms ? { commercialTerms: moduleById.value.commercialTerms } : {}),
+    };
+    const normalizedModules = normalizePackageModules(normalizeInput, pricePlanVersion);
+    if (!normalizedModules.ok)
+        return normalizedModules;
+    const modulesValidate = await validateModuleReferences(supabase, normalizedModules.value.carrierServiceConfig, normalizedModules.value.controlPolicy, { resellerRef: payload?.resellerId });
+    if (!modulesValidate.ok)
+        return modulesValidate;
+    const carrierServiceConfig = {
+        ...normalizedModules.value.carrierServiceConfig,
+        operatorId: modulesValidate.value.operatorId,
+    };
+    const apnRes = await loadApnFromApnProfile(supabase, String(carrierServiceConfig.apnProfileId));
+    if (!apnRes.ok)
+        return apnRes;
+    const description = normalizeOptionalPackageDescription(payload?.description);
+    const packageRows = await supabase.insert('packages', {
+        enterprise_id: enterpriseId,
+        name,
+        description,
+        status: 'DRAFT',
+        effective_from: null,
+        carrier_service_id: carrierServiceId,
+        control_policy_id: controlPolicyId,
+        commercial_terms_id: commercialTermsId,
+        price_plan_id: pricePlanVersion.price_plan_id,
+    }, { returning: 'representation' });
+    const row = Array.isArray(packageRows) ? packageRows[0] : null;
+    if (!row?.package_id)
+        return toError(500, 'INTERNAL_ERROR', 'Failed to create package.');
+    const pid = row.package_id;
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: enterpriseId ?? null,
+        action: 'PACKAGE_CREATED',
+        target_type: 'PACKAGE',
+        target_id: pid,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        after_data: {
+            packageId: pid,
+            status: row?.status ?? 'DRAFT',
+        },
+    });
+    return {
+        ok: true,
+        value: {
+            packageId: pid,
+            status: row?.status ?? 'DRAFT',
+            createdAt: row?.created_at,
+        },
+    };
+}
+export async function updatePackage({ supabase, packageId, payload, audit, }) {
+    if (!isValidUuid(packageId))
+        return toError(400, 'BAD_REQUEST', 'packageId is invalid.');
+    const pkg = await loadPackage(supabase, packageId);
+    if (!pkg)
+        return toError(404, 'NOT_FOUND', 'Package not found.');
+    const latestVersion = await loadPackageRow(supabase, packageId);
+    if (!latestVersion)
+        return toError(404, 'NOT_FOUND', 'Package not found.');
+    if (latestVersion.status !== 'DRAFT') {
+        return toError(409, 'INVALID_STATUS', 'Only DRAFT package can be updated.');
+    }
+    const packageEnterpriseId = String(latestVersion.enterprise_id || '').trim();
+    if (!isValidUuid(packageEnterpriseId)) {
+        return toError(400, 'BAD_REQUEST', 'package.enterpriseId is invalid.');
+    }
+    const scopeForUpdate = await resolveResellerTenantIdForPackageModules(supabase, packageEnterpriseId, payload?.resellerId);
+    if (!scopeForUpdate.ok)
+        return scopeForUpdate;
+    const resellerTenantId = scopeForUpdate.value;
+    let effectivePricePlanId;
+    if (payload?.pricePlanId !== undefined) {
+        const newPlanId = String(payload.pricePlanId || '').trim();
+        if (!newPlanId) {
+            return toError(400, 'BAD_REQUEST', 'pricePlanId must be a non-empty uuid when provided.');
+        }
+        if (!isValidUuid(newPlanId)) {
+            return toError(400, 'BAD_REQUEST', 'pricePlanId is invalid.');
+        }
+        effectivePricePlanId = newPlanId;
+    }
+    else {
+        const cur = latestVersion.price_plan_id != null ? String(latestVersion.price_plan_id).trim() : '';
+        if (!cur) {
+            return toError(400, 'BAD_REQUEST', 'Package has no price plan; set pricePlanId in the request body.');
+        }
+        if (!isValidUuid(cur)) {
+            return toError(400, 'BAD_REQUEST', 'Package price plan id is invalid; set a valid pricePlanId in the request body.');
+        }
+        effectivePricePlanId = cur;
+    }
+    const prRows = await supabase.select('price_plans', `select=price_plan_id,status,enterprise_id,reseller_id&price_plan_id=eq.${encodeURIComponent(effectivePricePlanId)}&limit=1`);
+    const pr = Array.isArray(prRows) ? prRows[0] : null;
+    const pOk = validatePricePlanRowForPackage(pr, packageEnterpriseId, resellerTenantId);
+    if (!pOk.ok)
+        return pOk;
+    const metaPatch = {};
+    if (Object.prototype.hasOwnProperty.call(payload ?? {}, 'name')) {
+        const nameResult = normalizeRequiredModuleName(payload.name);
+        if (!nameResult.ok)
+            return nameResult;
+        metaPatch.name = nameResult.value;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload ?? {}, 'description')) {
+        metaPatch.description = normalizeOptionalPackageDescription(payload.description);
+    }
+    if (Object.keys(metaPatch).length) {
+        await supabase.update('packages', `package_id=eq.${encodeURIComponent(packageId)}`, { ...metaPatch, updated_at: new Date().toISOString() }, { returning: 'minimal' });
+    }
+    const carrierServiceIdEff = payload?.carrierServiceId !== undefined
+        ? String(payload.carrierServiceId || '').trim() || null
+        : latestVersion.carrier_service_id
+            ? String(latestVersion.carrier_service_id).trim()
+            : null;
+    const controlPolicyIdEff = payload?.controlPolicyId !== undefined
+        ? String(payload.controlPolicyId || '').trim() || null
+        : latestVersion.control_policy_id
+            ? String(latestVersion.control_policy_id).trim()
+            : null;
+    const commercialTermsIdEff = payload?.commercialTermsId !== undefined
+        ? String(payload.commercialTermsId || '').trim() || null
+        : latestVersion.commercial_terms_id
+            ? String(latestVersion.commercial_terms_id).trim()
+            : null;
+    const moduleById = await resolveModulePayloadByIds({
+        supabase,
+        carrierServiceId: carrierServiceIdEff,
+        controlPolicyId: controlPolicyIdEff,
+        commercialTermsId: commercialTermsIdEff,
+        resellerTenantId,
+    });
+    if (!moduleById.ok)
+        return moduleById;
+    const mergedCarrierServiceConfig = {
+        supplierId: payload?.carrierServiceConfig?.supplierId ?? moduleById.value.carrierServiceConfig?.supplierId,
+        operatorId: payload?.carrierServiceConfig?.operatorId ?? moduleById.value.carrierServiceConfig?.operatorId,
+        rat: payload?.carrierServiceConfig?.rat ?? moduleById.value.carrierServiceConfig?.rat ?? '4G',
+        apnProfileId: payload?.carrierServiceConfig?.apnProfileId ?? moduleById.value.carrierServiceConfig?.apnProfileId ?? null,
+        roamingProfileId: payload?.carrierServiceConfig?.roamingProfileId ?? moduleById.value.carrierServiceConfig?.roamingProfileId ?? null,
+    };
+    const carrierNormalized = normalizeCarrierServiceConfig(mergedCarrierServiceConfig);
+    if (!carrierNormalized.ok)
+        return carrierNormalized;
+    const commercialNormalized = normalizeCommercialTerms(payload?.commercialTerms !== undefined
+        ? payload.commercialTerms
+        : moduleById.value.commercialTerms ?? {});
+    if (!commercialNormalized.ok)
+        return commercialNormalized;
+    const controlNormalized = normalizeControlPolicy(payload?.controlPolicy !== undefined
+        ? payload.controlPolicy
+        : moduleById.value.controlPolicy ?? {}, 'full');
+    if (!controlNormalized.ok)
+        return controlNormalized;
+    const modulesValidate = await validateModuleReferences(supabase, carrierNormalized.value, controlNormalized.value, {
+        resellerRef: payload?.resellerId,
+    });
+    if (!modulesValidate.ok)
+        return modulesValidate;
+    const carrierServiceConfigResolved = {
+        ...carrierNormalized.value,
+        operatorId: modulesValidate.value.operatorId,
+    };
+    const apnResolved = await loadApnFromApnProfile(supabase, String(carrierServiceConfigResolved.apnProfileId));
+    if (!apnResolved.ok)
+        return apnResolved;
+    const patch = {};
+    patch.carrier_service_id = carrierServiceIdEff;
+    patch.control_policy_id = controlPolicyIdEff;
+    patch.commercial_terms_id = commercialTermsIdEff;
+    if (payload?.pricePlanId !== undefined) {
+        const pricePlanId = String(payload.pricePlanId || '').trim();
+        if (!pricePlanId || !isValidUuid(pricePlanId)) {
+            return toError(400, 'BAD_REQUEST', 'pricePlanId is invalid.');
+        }
+        patch.price_plan_id = pricePlanId;
+    }
+    if (Object.keys(patch).length) {
+        await supabase.update('packages', `package_id=eq.${encodeURIComponent(packageId)}`, { ...patch, updated_at: new Date().toISOString() }, { returning: 'minimal' });
+    }
+    const updatedVersion = await loadPackageRow(supabase, packageId);
+    const beforeApi = await mapPackageRowForApi(supabase, latestVersion);
+    const afterApi = await mapPackageRowForApi(supabase, updatedVersion);
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: pkg?.enterprise_id ?? null,
+        action: 'PACKAGE_UPDATED',
+        target_type: 'PACKAGE',
+        target_id: packageId,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        before_data: beforeApi,
+        after_data: afterApi,
+    });
+    return { ok: true, value: afterApi };
+}
+export async function publishPackage({ supabase, packageId, audit, publishInput, }) {
+    if (!isValidUuid(packageId))
+        return toError(400, 'BAD_REQUEST', 'packageId is invalid.');
+    const latestVersion = await loadPackageRow(supabase, packageId);
+    if (!latestVersion)
+        return toError(404, 'NOT_FOUND', 'Package not found.');
+    if (latestVersion.status !== 'DRAFT') {
+        return toError(409, 'INVALID_STATUS', 'Only DRAFT package can be published.');
+    }
+    const pricePlanVersionRows = await supabase.select('price_plans', `select=price_plan_id,type,status,covered_network_profile_id&price_plan_id=eq.${encodeURIComponent(String(latestVersion.price_plan_id))}&limit=1`);
+    const pricePlanVersion = Array.isArray(pricePlanVersionRows) ? pricePlanVersionRows[0] : null;
+    if (!pricePlanVersion)
+        return toError(404, 'NOT_FOUND', 'Price plan version not found.');
+    const carrierModuleId = latestVersion.carrier_service_id ? String(latestVersion.carrier_service_id).trim() : '';
+    if (!carrierModuleId) {
+        return toError(409, 'INVALID_STATUS', 'Package must reference a carrier service module before publish.');
+    }
+    let apnProfileId = null;
+    let roamingProfileId = null;
+    const csRows = await supabase.select('carrier_service_modules', `select=${CARRIER_SERVICE_MODULE_ROW_SELECT}&carrier_service_id=eq.${encodeURIComponent(carrierModuleId)}&limit=1`);
+    const csRow = Array.isArray(csRows) ? csRows[0] : null;
+    if (!csRow || String(csRow.status ?? '').toUpperCase() !== 'PUBLISHED') {
+        return toError(409, 'INVALID_STATUS', 'Carrier service module must be PUBLISHED.');
+    }
+    const merged = mergedCarrierServiceConfigShape(csRow);
+    const apnRaw = String(merged.apnProfileId ?? '').trim();
+    const roamRaw = String(merged.roamingProfileId ?? '').trim();
+    apnProfileId = apnRaw || null;
+    roamingProfileId = roamRaw || null;
+    if (!apnProfileId) {
+        return toError(409, 'INVALID_STATUS', 'Carrier service module must include apnProfileId before publish.');
+    }
+    if (apnProfileId) {
+        const apnProfiles = await supabase.select('apn_profiles', `select=apn_profile_id,status&apn_profile_id=eq.${encodeURIComponent(String(apnProfileId))}&limit=1`);
+        const apnProfile = Array.isArray(apnProfiles) ? apnProfiles[0] : null;
+        if (!apnProfile || apnProfile.status !== 'PUBLISHED') {
+            return toError(409, 'PROFILE_VERSION_INVALID', 'APN profile must be PUBLISHED.');
+        }
+    }
+    if (roamingProfileId) {
+        const roamingProfiles = await supabase.select('roaming_profiles', `select=roaming_profile_id,status&roaming_profile_id=eq.${encodeURIComponent(String(roamingProfileId))}&limit=1`);
+        const roamingProfile = Array.isArray(roamingProfiles) ? roamingProfiles[0] : null;
+        if (!roamingProfile || roamingProfile.status !== 'PUBLISHED') {
+            return toError(409, 'PROFILE_VERSION_INVALID', 'Roaming profile must be PUBLISHED.');
+        }
+    }
+    const commercialModuleId = latestVersion.commercial_terms_id
+        ? String(latestVersion.commercial_terms_id).trim()
+        : '';
+    if (commercialModuleId) {
+        const ctRows = await supabase.select('commercial_terms_modules', `select=commercial_terms_id,status&commercial_terms_id=eq.${encodeURIComponent(commercialModuleId)}&limit=1`);
+        const ctRow = Array.isArray(ctRows) ? ctRows[0] : null;
+        if (!ctRow || String(ctRow.status ?? '').toUpperCase() !== 'PUBLISHED') {
+            return toError(409, 'INVALID_STATUS', 'Commercial terms module must be PUBLISHED.');
+        }
+    }
+    const controlModuleId = latestVersion.control_policy_id
+        ? String(latestVersion.control_policy_id).trim()
+        : '';
+    if (controlModuleId) {
+        const cpRows = await supabase.select('control_policy_modules', `select=control_policy_id,status&control_policy_id=eq.${encodeURIComponent(controlModuleId)}&limit=1`);
+        const cpRow = Array.isArray(cpRows) ? cpRows[0] : null;
+        if (!cpRow || String(cpRow.status ?? '').toUpperCase() !== 'PUBLISHED') {
+            return toError(409, 'INVALID_STATUS', 'Control policy module must be PUBLISHED.');
+        }
+    }
+    if (String(pricePlanVersion.status ?? '').trim().toUpperCase() !== 'PUBLISHED') {
+        return toError(409, 'INVALID_STATUS', 'Price plan must be PUBLISHED.');
+    }
+    const planType = String(pricePlanVersion.type ?? '').trim();
+    if (pricePlanTypeUsesCoveredNetwork(planType)) {
+        const coveredId = String(pricePlanVersion.covered_network_profile_id ?? '').trim();
+        if (!coveredId) {
+            return toError(409, 'INVALID_STATUS', 'Price plan requires coveredNetworkProfileId before the package can be published.');
+        }
+        const covRows = await supabase.select('covered_network_profiles', `select=covered_network_profile_id,status&covered_network_profile_id=eq.${encodeURIComponent(coveredId)}&limit=1`);
+        const cov = Array.isArray(covRows) ? covRows[0] : null;
+        if (!cov || String(cov.status ?? '').trim().toUpperCase() !== 'PUBLISHED') {
+            return toError(409, 'INVALID_STATUS', 'CoveredNetworkProfile must be PUBLISHED for this price plan.');
+        }
+    }
+    const externalProductId = String(publishInput?.externalProductId ?? '').trim();
+    if (!externalProductId) {
+        return toError(400, 'BAD_REQUEST', 'externalProductId is required.');
+    }
+    const carrierSupplierId = csRow?.supplier_id != null ? String(csRow.supplier_id).trim() : '';
+    if (!carrierSupplierId || !isValidUuid(carrierSupplierId)) {
+        return toError(409, 'INVALID_STATUS', 'Carrier service module must include supplier_id before publish.');
+    }
+    const existingMappingRows = await supabase.select('vendor_product_mappings', `select=mapping_id,external_product_id&package_id=eq.${encodeURIComponent(packageId)}&limit=1`);
+    const existingMapping = Array.isArray(existingMappingRows) ? existingMappingRows[0] : null;
+    if (existingMapping?.mapping_id && latestVersion.status === 'PUBLISHED') {
+        return toError(409, 'MAPPING_ALREADY_EXISTS', 'Vendor product mapping already exists for this package.');
+    }
+    let mappingId = existingMapping?.mapping_id ? String(existingMapping.mapping_id) : null;
+    if (!mappingId) {
+        const mappingRows = await supabase.insert('vendor_product_mappings', {
+            package_id: packageId,
+            supplier_id: carrierSupplierId,
+            external_product_id: externalProductId,
+            provisioning_parameters: publishInput?.provisioningParameters ?? null,
+        }, { returning: 'representation' });
+        const mapping = Array.isArray(mappingRows) ? mappingRows[0] : null;
+        if (!mapping?.mapping_id) {
+            return toError(500, 'INTERNAL_ERROR', 'Failed to create vendor product mapping.');
+        }
+        mappingId = String(mapping.mapping_id);
+    }
+    else {
+        await supabase.update('vendor_product_mappings', `mapping_id=eq.${encodeURIComponent(mappingId)}`, {
+            supplier_id: carrierSupplierId,
+            external_product_id: externalProductId,
+            provisioning_parameters: publishInput?.provisioningParameters ?? null,
+        }, { returning: 'minimal' });
+    }
+    const effectiveFrom = firstDayNextMonthUtc().toISOString();
+    const publishedAt = new Date().toISOString();
+    await supabase.update('packages', `package_id=eq.${encodeURIComponent(packageId)}`, {
+        status: 'PUBLISHED',
+        effective_from: effectiveFrom,
+        published_at: publishedAt,
+        updated_at: publishedAt,
+    }, { returning: 'minimal' });
+    const pkg = await loadPackage(supabase, packageId);
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: pkg?.enterprise_id ?? null,
+        action: 'PACKAGE_PUBLISHED',
+        target_type: 'PACKAGE',
+        target_id: packageId,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        after_data: {
+            packageId,
+            status: 'PUBLISHED',
+            effectiveFrom,
+            publishedAt,
+            mappingId,
+            externalProductId,
+            supplierId: carrierSupplierId,
+        },
+    });
+    return {
+        ok: true,
+        value: {
+            packageId,
+            status: 'PUBLISHED',
+            publishedAt,
+            effectiveFrom,
+            mappingId,
+            externalProductId,
+        },
+    };
+}
+export async function deprecatePackage({ supabase, packageId, audit, }) {
+    if (!isValidUuid(packageId))
+        return toError(400, 'BAD_REQUEST', 'packageId is invalid.');
+    const row = await loadPackageRow(supabase, packageId);
+    if (!row)
+        return toError(404, 'NOT_FOUND', 'Package not found.');
+    if (String(row.status ?? '').toUpperCase() !== 'PUBLISHED') {
+        return toError(409, 'INVALID_STATUS', 'Only PUBLISHED package can be deprecated.');
+    }
+    const inUse = await supabase.select('subscriptions', `select=subscription_id&package_id=eq.${encodeURIComponent(packageId)}&state=in.(ACTIVE,PENDING)&limit=1`);
+    if (Array.isArray(inUse) && inUse.length) {
+        return toError(409, 'RESOURCE_IN_USE', 'Package is still associated with an ACTIVE or PENDING subscription.');
+    }
+    const nowIso = new Date().toISOString();
+    await supabase.update('packages', `package_id=eq.${encodeURIComponent(packageId)}`, { status: 'DEPRECATED', deprecated_at: nowIso, updated_at: nowIso }, { returning: 'minimal' });
+    const entId = row.enterprise_id ?? null;
+    await writeAuditLog(supabase, {
+        actor_user_id: audit?.actorUserId ?? null,
+        actor_role: audit?.actorRole ?? null,
+        tenant_id: entId,
+        action: 'PACKAGE_DEPRECATED',
+        target_type: 'PACKAGE',
+        target_id: packageId,
+        request_id: audit?.requestId ?? null,
+        source_ip: audit?.sourceIp ?? null,
+        after_data: { packageId, status: 'DEPRECATED', deprecatedAt: nowIso },
+    });
+    return {
+        ok: true,
+        value: {
+            packageId,
+            status: 'DEPRECATED',
+            deprecatedAt: nowIso,
+        },
+    };
+}
+const COMMERCIAL_TERMS_MODULE_LIST_SELECT = 'commercial_terms_id,name,commercial_terms,reseller_id,status,effective_from,published_at,deprecated_at,created_at,updated_at';
+const CONTROL_POLICY_MODULE_LIST_SELECT = 'control_policy_id,name,control_policy,reseller_id,status,effective_from,published_at,deprecated_at,created_at,updated_at';
+const APN_PROFILE_LIST_SELECT = 'apn_profile_id,name,apn,auth_type,supplier_id,operator_id,status,published_at,effective_from,source_apn_profile_id,created_at,updated_at';
+/** `GET /v1/roaming-profiles` list rows; includes `mccmncList`. */
+const ROAMING_PROFILE_LIST_SELECT = 'roaming_profile_id,name,mccmnc_list,supplier_id,operator_id,status,published_at,effective_from,source_roaming_profile_id,created_at,updated_at';
+/** Package list `items[].roamingProfile` only — no MCC/MNC array (use roaming profile detail for full allowlist). */
+const ROAMING_PROFILE_PACKAGE_LIST_SELECT = 'roaming_profile_id,name,status,published_at,effective_from,created_at,updated_at';
+const COVERED_PROFILE_LIST_SELECT = 'covered_network_profile_id,name,reseller_id,supplier_id,operator_id,status,published_at,effective_from,source_covered_network_profile_id,created_at,updated_at';
+async function batchFetchCoveredEntriesMap(supabase, profileIds) {
+    const map = new Map();
+    const uniq = [...new Set(profileIds.map((x) => String(x).trim()).filter(Boolean))];
+    if (!uniq.length)
+        return map;
+    const values = uniq.map((id) => encodeURIComponent(id)).join(',');
+    const rows = await supabase.select('covered_network_profile_entries', `select=covered_network_profile_id,mcc,mnc&covered_network_profile_id=in.(${values})&order=mcc.asc,mnc.asc`);
+    for (const row of Array.isArray(rows) ? rows : []) {
+        const pid = String(row.covered_network_profile_id ?? '').trim();
+        if (!pid)
+            continue;
+        if (!map.has(pid))
+            map.set(pid, []);
+        map.get(pid).push({
+            mcc: String(row.mcc ?? '').trim(),
+            mnc: String(row.mnc ?? '').trim(),
+        });
+    }
+    return map;
+}
+function mapApnProfileListItem(p, publicOperatorId) {
+    return {
+        apnProfileId: p.apn_profile_id,
+        name: p.name,
+        apn: p.apn,
+        authType: p.auth_type,
+        supplierId: p.supplier_id,
+        operatorId: publicOperatorId ?? p.operator_id ?? null,
+        status: p.status,
+        publishedAt: p.published_at ?? null,
+        effectiveFrom: p.effective_from ?? null,
+        sourceApnProfileId: p.source_apn_profile_id ?? null,
+        createdAt: p.created_at,
+        updatedAt: p.updated_at,
+    };
+}
+function mapRoamingProfilePackageListSummary(p) {
+    return {
+        roamingProfileId: p.roaming_profile_id,
+        name: p.name,
+        status: p.status,
+        publishedAt: p.published_at ?? null,
+        effectiveFrom: p.effective_from ?? null,
+        createdAt: p.created_at,
+        updatedAt: p.updated_at,
+    };
+}
+function mapCoveredNetworkProfileListItem(p, coverage, publicOperatorId) {
+    return {
+        coveredNetworkProfileId: p.covered_network_profile_id,
+        name: p.name,
+        coverage,
+        resellerId: p.reseller_id ?? null,
+        supplierId: p.supplier_id,
+        operatorId: publicOperatorId ?? p.operator_id ?? null,
+        status: p.status,
+        publishedAt: p.published_at ?? null,
+        effectiveFrom: p.effective_from ?? null,
+        sourceCoveredNetworkProfileId: p.source_covered_network_profile_id ?? null,
+        createdAt: p.created_at,
+        updatedAt: p.updated_at,
+    };
+}
+/** List response: expanded module snapshots + `moduleRef` (per pricing-api §6.3.1 / OpenAPI names); no nested legacy `package` object. */
+async function mapPackageListRowsToItems(supabase, packageRows) {
+    if (!packageRows.length)
+        return [];
+    const eids = [...new Set(packageRows.map((p) => String(p?.enterprise_id || '')).filter((x) => x && isValidUuid(x)))];
+    const parentMap = new Map();
+    if (eids.length) {
+        const inList = eids.map((e) => encodeURIComponent(e)).join(',');
+        const trows = await supabase.select('tenants', `select=tenant_id,parent_id&tenant_id=in.(${inList})&tenant_type=eq.ENTERPRISE`);
+        for (const t of Array.isArray(trows) ? trows : []) {
+            const tid = t.tenant_id != null ? String(t.tenant_id) : '';
+            if (!tid)
+                continue;
+            const pid = t.parent_id != null ? String(t.parent_id) : null;
+            parentMap.set(tid, pid);
+        }
+    }
+    const carrierIds = [
+        ...new Set(packageRows.map((r) => r?.carrier_service_id).filter(Boolean).map((x) => String(x).trim())),
+    ];
+    const ctIds = [
+        ...new Set(packageRows.map((r) => r?.commercial_terms_id).filter(Boolean).map((x) => String(x).trim())),
+    ];
+    const cpIds = [
+        ...new Set(packageRows.map((r) => r?.control_policy_id).filter(Boolean).map((x) => String(x).trim())),
+    ];
+    const planIds = [
+        ...new Set(packageRows.map((r) => r?.price_plan_id).filter(Boolean).map((x) => String(x).trim())),
+    ];
+    const carrierById = new Map();
+    if (carrierIds.length) {
+        const list = carrierIds.map((x) => encodeURIComponent(x)).join(',');
+        const rows = await supabase.select('carrier_service_modules', `select=${CARRIER_SERVICE_MODULE_ROW_SELECT}&carrier_service_id=in.(${list})`);
+        for (const r of Array.isArray(rows) ? rows : []) {
+            const id = r?.carrier_service_id != null ? String(r.carrier_service_id).trim() : '';
+            if (id)
+                carrierById.set(id, r);
+        }
+    }
+    const opPksCarrier = [
+        ...new Set([...carrierById.values()]
+            .map((r) => (r?.operator_id != null ? String(r.operator_id).trim() : ''))
+            .filter(Boolean)),
+    ];
+    const ctById = new Map();
+    if (ctIds.length) {
+        const list = ctIds.map((x) => encodeURIComponent(x)).join(',');
+        const rows = await supabase.select('commercial_terms_modules', `select=${COMMERCIAL_TERMS_MODULE_LIST_SELECT}&commercial_terms_id=in.(${list})`);
+        for (const r of Array.isArray(rows) ? rows : []) {
+            const id = r?.commercial_terms_id != null ? String(r.commercial_terms_id).trim() : '';
+            if (id)
+                ctById.set(id, r);
+        }
+    }
+    const cpById = new Map();
+    if (cpIds.length) {
+        const list = cpIds.map((x) => encodeURIComponent(x)).join(',');
+        const rows = await supabase.select('control_policy_modules', `select=${CONTROL_POLICY_MODULE_LIST_SELECT}&control_policy_id=in.(${list})`);
+        for (const r of Array.isArray(rows) ? rows : []) {
+            const id = r?.control_policy_id != null ? String(r.control_policy_id).trim() : '';
+            if (id)
+                cpById.set(id, r);
+        }
+    }
+    const apnProfileIds = [];
+    const roamingProfileIds = [];
+    for (const row of packageRows) {
+        const cid = row?.carrier_service_id ? String(row.carrier_service_id).trim() : '';
+        const cs = cid ? carrierById.get(cid) : null;
+        if (cs) {
+            const cfg = mergedCarrierServiceConfigShape(cs);
+            const ap = String(cfg.apnProfileId ?? '').trim();
+            const rp = String(cfg.roamingProfileId ?? '').trim();
+            if (ap)
+                apnProfileIds.push(ap);
+            if (rp)
+                roamingProfileIds.push(rp);
+        }
+    }
+    const apnById = new Map();
+    if (apnProfileIds.length) {
+        const list = [...new Set(apnProfileIds)].map((x) => encodeURIComponent(x)).join(',');
+        const rows = await supabase.select('apn_profiles', `select=${APN_PROFILE_LIST_SELECT}&apn_profile_id=in.(${list})`);
+        for (const r of Array.isArray(rows) ? rows : []) {
+            const id = r?.apn_profile_id != null ? String(r.apn_profile_id).trim() : '';
+            if (id)
+                apnById.set(id, r);
+        }
+    }
+    const roamingById = new Map();
+    if (roamingProfileIds.length) {
+        const list = [...new Set(roamingProfileIds)].map((x) => encodeURIComponent(x)).join(',');
+        const rows = await supabase.select('roaming_profiles', `select=${ROAMING_PROFILE_PACKAGE_LIST_SELECT}&roaming_profile_id=in.(${list})`);
+        for (const r of Array.isArray(rows) ? rows : []) {
+            const id = r?.roaming_profile_id != null ? String(r.roaming_profile_id).trim() : '';
+            if (id)
+                roamingById.set(id, r);
+        }
+    }
+    const pricePlanById = await batchMapPricePlanSnapshotsByIds(supabase, planIds);
+    const coveredNetworkIds = new Set();
+    for (const pid of planIds) {
+        const snap = pricePlanById.get(pid);
+        const c = snap && snap.coveredNetworkProfileId != null ? String(snap.coveredNetworkProfileId).trim() : '';
+        if (c)
+            coveredNetworkIds.add(c);
+    }
+    const coveredById = new Map();
+    if (coveredNetworkIds.size) {
+        const list = [...coveredNetworkIds].map((x) => encodeURIComponent(x)).join(',');
+        const rows = await supabase.select('covered_network_profiles', `select=${COVERED_PROFILE_LIST_SELECT}&covered_network_profile_id=in.(${list})`);
+        for (const r of Array.isArray(rows) ? rows : []) {
+            const id = r?.covered_network_profile_id != null ? String(r.covered_network_profile_id).trim() : '';
+            if (id)
+                coveredById.set(id, r);
+        }
+    }
+    const opPksApn = [...new Set([...apnById.values()].map((r) => String(r?.operator_id ?? '').trim()).filter(Boolean))];
+    const opPksCv = [...new Set([...coveredById.values()].map((r) => String(r?.operator_id ?? '').trim()).filter(Boolean))];
+    const opAll = [...new Set([...opPksCarrier, ...opPksApn, ...opPksCv])];
+    const opDisplayByPk = opAll.length
+        ? await businessOperatorDisplayIdsByOperatorRowIds(supabase, opAll)
+        : new Map();
+    const entryMap = await batchFetchCoveredEntriesMap(supabase, [...coveredNetworkIds]);
+    return packageRows.map((pkg) => {
+        const eid = String(pkg.enterprise_id || '');
+        const carrierServiceId = pkg.carrier_service_id != null ? String(pkg.carrier_service_id).trim() : null;
+        const pricePlanId = pkg.price_plan_id != null ? String(pkg.price_plan_id).trim() : null;
+        const controlPolicyId = pkg.control_policy_id != null ? String(pkg.control_policy_id).trim() : null;
+        const commercialTermsId = pkg.commercial_terms_id != null ? String(pkg.commercial_terms_id).trim() : null;
+        const cs = carrierServiceId ? carrierById.get(carrierServiceId) : null;
+        const opPk = cs?.operator_id != null ? String(cs.operator_id).trim() : '';
+        const displayOp = opPk ? opDisplayByPk.get(opPk) ?? opPk : null;
+        const resellerTid = cs?.reseller_id != null ? String(cs.reseller_id).trim() : '';
+        const carrierService = cs
+            ? mapCarrierServiceModuleForPublicResponse(cs, displayOp, resellerTid || null)
+            : null;
+        const cfg = cs ? mergedCarrierServiceConfigShape(cs) : null;
+        const apnProfileId = cfg && String(cfg.apnProfileId ?? '').trim() ? String(cfg.apnProfileId).trim() : null;
+        const roamingProfileId = cfg && String(cfg.roamingProfileId ?? '').trim() ? String(cfg.roamingProfileId).trim() : null;
+        const apnRow = apnProfileId ? apnById.get(apnProfileId) : null;
+        const apnOpPk = apnRow?.operator_id != null ? String(apnRow.operator_id).trim() : '';
+        const apnPub = apnOpPk ? opDisplayByPk.get(apnOpPk) ?? apnOpPk : null;
+        const apnProfile = apnRow ? mapApnProfileListItem(apnRow, apnPub) : null;
+        const rmRow = roamingProfileId ? roamingById.get(roamingProfileId) : null;
+        const roamingProfile = rmRow ? mapRoamingProfilePackageListSummary(rmRow) : null;
+        const ctRow = commercialTermsId ? ctById.get(commercialTermsId) : null;
+        const ctResellerTid = ctRow?.reseller_id != null ? String(ctRow.reseller_id).trim() : '';
+        const commercialTerms = ctRow
+            ? mapCommercialTermsModuleForPublicResponse(ctRow, ctResellerTid || null)
+            : null;
+        const cpRow = controlPolicyId ? cpById.get(controlPolicyId) : null;
+        const cpResellerTid = cpRow?.reseller_id != null ? String(cpRow.reseller_id).trim() : '';
+        const controlPolicy = cpRow
+            ? mapControlPolicyModuleForPublicResponse(cpRow, cpResellerTid || null)
+            : null;
+        const pricePlan = (pricePlanId && pricePlanById.get(pricePlanId)) || null;
+        const coveredId = pricePlan && pricePlan.coveredNetworkProfileId != null
+            ? String(pricePlan.coveredNetworkProfileId).trim()
+            : '';
+        const cRow = coveredId ? coveredById.get(coveredId) : null;
+        const cOpPk = cRow?.operator_id != null ? String(cRow.operator_id).trim() : '';
+        const cPub = cOpPk ? opDisplayByPk.get(cOpPk) ?? cOpPk : null;
+        const coveredNetworkProfile = cRow
+            ? mapCoveredNetworkProfileListItem(cRow, entryMap.get(coveredId) ?? [], cPub)
+            : null;
+        // Key order is stable (JSON object insertion order) for client readability.
+        const moduleRef = {
+            carrierServiceId,
+            apnProfileId,
+            roamingProfileId,
+            controlPolicyId,
+            commercialTermsId,
+            pricePlanId,
+            coveredNetworkProfileId: coveredId || null,
+        };
+        return {
+            packageId: pkg.package_id,
+            enterpriseId: eid || null,
+            resellerId: eid ? parentMap.get(eid) ?? null : null,
+            name: pkg.name,
+            description: pkg.description != null ? String(pkg.description) : null,
+            status: pkg.status ?? 'DRAFT',
+            effectiveFrom: pkg.effective_from ?? null,
+            publishedAt: pkg.published_at ?? null,
+            deprecatedAt: pkg.deprecated_at ?? null,
+            createdAt: pkg.created_at,
+            updatedAt: pkg.updated_at ?? null,
+            moduleRef,
+            carrierService,
+            apnProfile,
+            roamingProfile,
+            commercialTerms,
+            controlPolicy,
+            pricePlan,
+            coveredNetworkProfile,
+        };
+    });
+}
+/**
+ * @param mode.all — all rows (platform only)
+ * @param mode.enterpriseId — filter by one enterprise
+ * @param mode.resellerTenantId — packages for enterprises with tenants.parent_id = reseller RESELLER id
+ */
+export async function listPackagesByScope({ supabase, mode, status, page, pageSize, }) {
+    const pagination = parsePagination({ page, pageSize }, { defaultPageSize: 20, maxPageSize: 200 });
+    const filters = [];
+    if (status) {
+        const st = String(status).toUpperCase();
+        if (!['DRAFT', 'PUBLISHED', 'DEPRECATED'].includes(st)) {
+            return toError(400, 'BAD_REQUEST', 'status must be DRAFT, PUBLISHED, or DEPRECATED.');
+        }
+        filters.push(`status=eq.${encodeURIComponent(st)}`);
+    }
+    if (mode.type === 'enterprise') {
+        if (!isValidUuid(mode.enterpriseId)) {
+            return toError(400, 'BAD_REQUEST', 'enterpriseId is invalid.');
+        }
+        filters.push(`enterprise_id=eq.${encodeURIComponent(mode.enterpriseId)}`);
+    }
+    else if (mode.type === 'resellerTree') {
+        const r = String(mode.resellerTenantId || '').trim();
+        if (!isValidUuid(r))
+            return toError(400, 'BAD_REQUEST', 'resellerId is invalid.');
+        const children = await supabase.select('tenants', `select=tenant_id&parent_id=eq.${encodeURIComponent(r)}&tenant_type=eq.ENTERPRISE`);
+        const eids = (Array.isArray(children) ? children : [])
+            .map((x) => (x.tenant_id ? String(x.tenant_id) : ''))
+            .filter((x) => isValidUuid(x));
+        if (!eids.length) {
+            return { ok: true, value: buildPaginationResponse([], 0, pagination.page, pagination.pageSize) };
+        }
+        const inE = eids.map((e) => encodeURIComponent(e)).join(',');
+        filters.push(`enterprise_id=in.(${inE})`);
+    }
+    else {
+        // all
+    }
+    const filterQs = filters.length ? `&${filters.join('&')}` : '';
+    if (!supabase.selectWithCount) {
+        return toError(500, 'INTERNAL_ERROR', 'selectWithCount is not available on Supabase client.');
+    }
+    const { data, total: t } = await supabase.selectWithCount('packages', `select=${PACKAGE_ROW_SELECT}&order=created_at.desc&limit=${encodeURIComponent(String(pagination.pageSize))}&offset=${encodeURIComponent(String(pagination.offset))}${filterQs}`);
+    const rows = Array.isArray(data) ? data : [];
+    const total = typeof t === 'number' ? t : rows.length;
+    const items = await mapPackageListRowsToItems(supabase, rows);
+    return { ok: true, value: buildPaginationResponse(items, total, pagination.page, pagination.pageSize) };
+}
+export async function listPackages({ supabase, enterpriseId, status, page, pageSize, }) {
+    if (!isValidUuid(enterpriseId)) {
+        return toError(400, 'BAD_REQUEST', 'enterpriseId is invalid.');
+    }
+    return listPackagesByScope({
+        supabase,
+        mode: { type: 'enterprise', enterpriseId },
+        status,
+        page,
+        pageSize,
+    });
+}
+/**
+ * For `GET /packages`: each provided id must exist and match `enterpriseId` and its reseller parent (status may be DRAFT
+ * so reverse lookup can resolve packages that still point at unpublished module rows).
+ */
+async function validatePackageListModuleRefQuery(supabase, enterpriseId, refs) {
+    const scope = await resolveResellerTenantIdForPackageModules(supabase, enterpriseId, null);
+    if (!scope.ok)
+        return scope;
+    const resellerTenantId = scope.value;
+    if (refs.pricePlanId) {
+        const prRows = await supabase.select('price_plans', `select=price_plan_id,enterprise_id,reseller_id&price_plan_id=eq.${encodeURIComponent(refs.pricePlanId)}&limit=1`);
+        const pr = Array.isArray(prRows) ? prRows[0] : null;
+        if (!pr || !pr.price_plan_id) {
+            return toError(404, 'NOT_FOUND', 'Price plan not found.');
+        }
+        if (String(pr.enterprise_id ?? '') !== String(enterpriseId)) {
+            return toError(400, 'BAD_REQUEST', 'pricePlanId does not belong to this enterprise.');
+        }
+        if (String(pr.reseller_id ?? '') !== String(resellerTenantId)) {
+            return toError(400, 'BAD_REQUEST', 'pricePlanId does not belong to the package reseller.');
+        }
+    }
+    if (refs.carrierServiceId) {
+        const rows = await supabase.select('carrier_service_modules', `select=${CARRIER_SERVICE_MODULE_ROW_SELECT}&carrier_service_id=eq.${encodeURIComponent(refs.carrierServiceId)}&limit=1`);
+        const row = Array.isArray(rows) ? rows[0] : null;
+        if (!row?.carrier_service_id)
+            return toError(404, 'NOT_FOUND', 'Carrier service not found.');
+        const rs = assertModuleResellerRow(row.reseller_id, resellerTenantId, 'carrierServiceId');
+        if (!rs.ok)
+            return rs;
+    }
+    if (refs.controlPolicyId) {
+        const rows = await supabase.select('control_policy_modules', `select=control_policy_id,reseller_id,control_policy,status&control_policy_id=eq.${encodeURIComponent(refs.controlPolicyId)}&limit=1`);
+        const row = Array.isArray(rows) ? rows[0] : null;
+        if (!row?.control_policy_id)
+            return toError(404, 'NOT_FOUND', 'Control policy not found.');
+        const rs = assertModuleResellerRow(row.reseller_id, resellerTenantId, 'controlPolicyId');
+        if (!rs.ok)
+            return rs;
+    }
+    if (refs.commercialTermsId) {
+        const rows = await supabase.select('commercial_terms_modules', `select=commercial_terms_id,reseller_id,commercial_terms,status&commercial_terms_id=eq.${encodeURIComponent(refs.commercialTermsId)}&limit=1`);
+        const row = Array.isArray(rows) ? rows[0] : null;
+        if (!row?.commercial_terms_id)
+            return toError(404, 'NOT_FOUND', 'Commercial terms not found.');
+        const rs = assertModuleResellerRow(row.reseller_id, resellerTenantId, 'commercialTermsId');
+        if (!rs.ok)
+            return rs;
+    }
+    return { ok: true, value: null };
+}
+export async function listPackagesByModuleRefs({ supabase, pricePlanId, carrierServiceId, commercialTermsId, controlPolicyId, enterpriseId, status, page, pageSize, }) {
+    const pricePlanIdValue = pricePlanId ? String(pricePlanId).trim() : null;
+    const carrierServiceIdValue = carrierServiceId ? String(carrierServiceId).trim() : null;
+    const commercialTermsIdValue = commercialTermsId ? String(commercialTermsId).trim() : null;
+    const controlPolicyIdValue = controlPolicyId ? String(controlPolicyId).trim() : null;
+    if (!pricePlanIdValue && !carrierServiceIdValue && !commercialTermsIdValue && !controlPolicyIdValue) {
+        return toError(400, 'BAD_REQUEST', 'pricePlanId, carrierServiceId, commercialTermsId, or controlPolicyId is required.');
+    }
+    if (pricePlanIdValue && !isValidUuid(pricePlanIdValue)) {
+        return toError(400, 'BAD_REQUEST', 'pricePlanId is invalid.');
+    }
+    if (carrierServiceIdValue && !isValidUuid(carrierServiceIdValue)) {
+        return toError(400, 'BAD_REQUEST', 'carrierServiceId is invalid.');
+    }
+    if (commercialTermsIdValue && !isValidUuid(commercialTermsIdValue)) {
+        return toError(400, 'BAD_REQUEST', 'commercialTermsId is invalid.');
+    }
+    if (controlPolicyIdValue && !isValidUuid(controlPolicyIdValue)) {
+        return toError(400, 'BAD_REQUEST', 'controlPolicyId is invalid.');
+    }
+    if (enterpriseId && !isValidUuid(String(enterpriseId).trim())) {
+        return toError(400, 'BAD_REQUEST', 'enterpriseId is invalid.');
+    }
+    const hasAnyRef = !!(pricePlanIdValue ||
+        carrierServiceIdValue ||
+        commercialTermsIdValue ||
+        controlPolicyIdValue);
+    const enterpriseIdNorm = enterpriseId && String(enterpriseId).trim() ? String(enterpriseId).trim() : null;
+    if (hasAnyRef && !enterpriseIdNorm) {
+        return toError(400, 'BAD_REQUEST', 'enterpriseId is required when filtering by pricePlanId, carrierServiceId, commercialTermsId, or controlPolicyId.');
+    }
+    if (hasAnyRef && enterpriseIdNorm) {
+        const v = await validatePackageListModuleRefQuery(supabase, enterpriseIdNorm, {
+            pricePlanId: pricePlanIdValue,
+            carrierServiceId: carrierServiceIdValue,
+            commercialTermsId: commercialTermsIdValue,
+            controlPolicyId: controlPolicyIdValue,
+        });
+        if (!v.ok)
+            return v;
+    }
+    const packageFilters = [`select=${PACKAGE_ROW_SELECT}`];
+    if (enterpriseIdNorm)
+        packageFilters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseIdNorm)}`);
+    if (pricePlanIdValue)
+        packageFilters.push(`price_plan_id=eq.${encodeURIComponent(pricePlanIdValue)}`);
+    if (carrierServiceIdValue)
+        packageFilters.push(`carrier_service_id=eq.${encodeURIComponent(carrierServiceIdValue)}`);
+    if (commercialTermsIdValue)
+        packageFilters.push(`commercial_terms_id=eq.${encodeURIComponent(commercialTermsIdValue)}`);
+    if (controlPolicyIdValue)
+        packageFilters.push(`control_policy_id=eq.${encodeURIComponent(controlPolicyIdValue)}`);
+    packageFilters.push('order=created_at.desc');
+    const packageRows = await supabase.select('packages', packageFilters.join('&'));
+    const packages = Array.isArray(packageRows) ? packageRows : [];
+    const mapped = await mapPackageListRowsToItems(supabase, packages);
+    let items = mapped;
+    if (status)
+        items = items.filter((item) => String(item?.status ?? '') === String(status));
+    const p = Number(page) || 1;
+    const ps = Number(pageSize) || 20;
+    const start = (p - 1) * ps;
+    const total = items.length;
+    items = items.slice(start, start + ps);
+    return { ok: true, value: { items, total } };
+}
 export async function getPackageDetail({ supabase, packageId }) {
-  if (!isValidUuid(packageId)) {
-    return toError(400, 'BAD_REQUEST', 'packageId must be a valid uuid.')
-  }
-  const pkg = await loadPackage(supabase, packageId)
-  if (!pkg) return toError(404, 'NOT_FOUND', 'Package not found.')
-  const versions = await supabase.select(
-    'package_versions',
-    `select=package_version_id,package_id,version,status,effective_from,supplier_id,operator_id,service_type,apn,roaming_profile,carrier_service_id,carrier_service_config,control_policy_id,control_policy,commercial_terms_id,commercial_terms,price_plan_id,price_plan_id,created_at&package_id=eq.${encodeURIComponent(packageId)}&order=version.desc`
-  )
-  const list = Array.isArray(versions) ? versions : []
-  return {
-    ok: true,
-    value: {
-      packageId: pkg.package_id,
-      enterpriseId: pkg.enterprise_id,
-      name: pkg.name,
-      createdAt: pkg.created_at,
-      currentVersion: mapPackageVersion(list[0] ?? null),
-      versions: list.map(mapPackageVersion),
-    },
-  }
+    if (!isValidUuid(packageId)) {
+        return toError(400, 'BAD_REQUEST', 'packageId is invalid.');
+    }
+    const pkg = await loadPackageRow(supabase, packageId);
+    if (!pkg)
+        return toError(404, 'NOT_FOUND', 'Package not found.');
+    const [value] = await mapPackageListRowsToItems(supabase, [pkg]);
+    if (!value)
+        return toError(404, 'NOT_FOUND', 'Package not found.');
+    return { ok: true, value };
 }

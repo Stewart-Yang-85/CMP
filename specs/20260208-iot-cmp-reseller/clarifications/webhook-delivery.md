@@ -2,11 +2,11 @@
 
 ## 业务语义
 
-**向下游推送**：当本系统产生事件（如 `SIM_STATUS_CHANGED`、`BILL_PUBLISHED` 等）且客户配置了 **`webhook_subscriptions`** 时，系统会创建 **`webhook_deliveries`** 记录，并通过异步任务向客户提供的 **HTTPS URL** 投递 JSON 负载，请求头含 **`X-Webhook-Signature`**（HMAC-SHA256）等。
+**向下游推送**：当本系统产生事件（如 `SIM_STATUS_CHANGED`、`JOB_FINISHED`、`BILL_PUBLISHED` 等）且客户配置了 **`webhook_subscriptions`** 时，系统会创建 **`webhook_deliveries`** 记录，并通过异步任务向客户提供的 **HTTPS URL** 投递 JSON 负载，请求头含 **`X-Webhook-Signature`**（HMAC-SHA256）等。
 
 **与上游同步的区别**：
 
-- **`SIM_STATUS_CHANGE`（job）**：本系统改状态后，**调用上游供应商**对齐卡状态（见 [jobs-sim-status-change.md](./jobs-sim-status-change.md)）。
+- **`SIM_STATUS_CHANGE`（job）**：受理后写 `*ing`，Worker **调用上游供应商**；**稳态改库后**发 `SIM_STATUS_CHANGED`，Job 终态发 **`JOB_FINISHED`**（见 [jobs-sim-status-change.md](./jobs-sim-status-change.md)、[integration-api.md](../contracts/integration-api.md)）。
 - **Webhook 投递**：本系统事件发生后，**通知下游客户系统**（客户自己的接收端）。
 
 ## 实现位置

@@ -6,12 +6,19 @@ import { createWxzhonggengClient } from './vendors/wxzhonggeng.js'
 import { checkOperationSupported } from './vendors/registry.js'
 import { runBillingTask } from './billing.js'
 import { runBillingGenerate } from './services/billingGenerate.js'
+import { runUsageRatingRollup } from './services/usageRatingRollup.js'
+import { runUsageMonthlyRollup, previousUtcYearMonth } from './services/usageMonthlyRollup.js'
 import { handleLateCdr } from './services/lateCdr.js'
 import { runDunningCheck } from './services/dunning.js'
 import { runReconciliation } from './services/reconciliation.js'
 import { runAlertEvaluation } from './services/alerting.js'
+import { runUpstreamIntegrationHealthProbe } from './services/readyProbe.js'
 import { retryWebhookDelivery } from './services/webhook.js'
-import { executeScheduledCancels } from './services/subscription.js'
+import { processSimStatusChangeJob } from './services/simStatusChangeJob.js'
+import { finalizeSimStatusChange } from './services/simLifecycleFinalize.js'
+import { resolveEventScopeColumns, sanitizeEventPayload } from './services/eventEmitter.js'
+import { processSubscriptionProvisionJob } from './services/subscriptionProvisionJob.js'
+import { executeScheduledCancels } from './services/subscriptionScheduledCancel.js'
 import { resolveBillingSchedule } from './services/billingSchedule.js'
 
 const supabase = createSupabaseRestClient({ useServiceRole: true })
@@ -81,6 +88,8 @@ const JOB_POLL_INTERVAL_MS = resolveNumber(process.env.JOB_POLL_INTERVAL_MS, 500
 const DUNNING_CHECK_CRON = process.env.DUNNING_CHECK_CRON || '30 2 * * *'
 const ALERT_EVAL_CRON = process.env.ALERT_EVAL_CRON || '*/15 * * * *'
 const WEBHOOK_DELIVERY_CRON = process.env.WEBHOOK_DELIVERY_CRON || '*/1 * * * *'
+const USAGE_RATING_ROLLUP_CRON = process.env.USAGE_RATING_ROLLUP_CRON || '*/30 * * * *'
+const USAGE_MONTHLY_ROLLUP_CRON = process.env.USAGE_MONTHLY_ROLLUP_CRON || '15 1 * * *'
 const TEST_EXPIRY_CHECK_CRON = process.env.TEST_EXPIRY_CHECK_CRON || '0 3 * * *'
 const SUBSCRIPTION_CANCEL_CRON = process.env.SUBSCRIPTION_CANCEL_CRON || '*/5 * * * *'
 const AUTO_BILLING_CRON = process.env.AUTO_BILLING_CRON || '15 3 * * *'
@@ -94,19 +103,33 @@ const ALERT_SUPPRESS_BY_RESELLER = parseNumberMap(process.env.ALERT_SUPPRESS_BY_
 const ALERT_SUPPRESS_BY_ENTERPRISE = parseNumberMap(process.env.ALERT_SUPPRESS_BY_ENTERPRISE)
 const ALERT_POOL_USAGE_HIGH_THRESHOLD_KB_BY_RESELLER = parseNumberMap(process.env.ALERT_POOL_USAGE_HIGH_THRESHOLD_KB_BY_RESELLER)
 const ALERT_POOL_USAGE_HIGH_THRESHOLD_KB_BY_ENTERPRISE = parseNumberMap(process.env.ALERT_POOL_USAGE_HIGH_THRESHOLD_KB_BY_ENTERPRISE)
-const ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB_BY_RESELLER = parseNumberMap(process.env.ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB_BY_RESELLER)
-const ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB_BY_ENTERPRISE = parseNumberMap(process.env.ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB_BY_ENTERPRISE)
+const ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_PERCENT_BY_RESELLER = parseNumberMap(
+  process.env.ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_PERCENT_BY_RESELLER || process.env.ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB_BY_RESELLER
+)
+const ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_PERCENT_BY_ENTERPRISE = parseNumberMap(
+  process.env.ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_PERCENT_BY_ENTERPRISE || process.env.ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB_BY_ENTERPRISE
+)
 const ALERT_SILENT_SIM_THRESHOLD_HOURS_BY_RESELLER = parseNumberMap(process.env.ALERT_SILENT_SIM_THRESHOLD_HOURS_BY_RESELLER)
 const ALERT_SILENT_SIM_THRESHOLD_HOURS_BY_ENTERPRISE = parseNumberMap(process.env.ALERT_SILENT_SIM_THRESHOLD_HOURS_BY_ENTERPRISE)
 const ALERT_CDR_DELAY_THRESHOLD_HOURS_BY_RESELLER = parseNumberMap(process.env.ALERT_CDR_DELAY_THRESHOLD_HOURS_BY_RESELLER)
 const ALERT_CDR_DELAY_THRESHOLD_HOURS_BY_ENTERPRISE = parseNumberMap(process.env.ALERT_CDR_DELAY_THRESHOLD_HOURS_BY_ENTERPRISE)
-const ALERT_UPSTREAM_DISCONNECT_THRESHOLD_HOURS_BY_RESELLER = parseNumberMap(process.env.ALERT_UPSTREAM_DISCONNECT_THRESHOLD_HOURS_BY_RESELLER)
-const ALERT_UPSTREAM_DISCONNECT_THRESHOLD_HOURS_BY_ENTERPRISE = parseNumberMap(process.env.ALERT_UPSTREAM_DISCONNECT_THRESHOLD_HOURS_BY_ENTERPRISE)
+const ALERT_UPSTREAM_DISCONNECT_THRESHOLD_ATTEMPTS_BY_RESELLER = parseNumberMap(
+  process.env.ALERT_UPSTREAM_DISCONNECT_THRESHOLD_ATTEMPTS_BY_RESELLER || process.env.ALERT_UPSTREAM_DISCONNECT_THRESHOLD_HOURS_BY_RESELLER
+)
+const ALERT_UPSTREAM_DISCONNECT_THRESHOLD_ATTEMPTS_BY_ENTERPRISE = parseNumberMap(
+  process.env.ALERT_UPSTREAM_DISCONNECT_THRESHOLD_ATTEMPTS_BY_ENTERPRISE || process.env.ALERT_UPSTREAM_DISCONNECT_THRESHOLD_HOURS_BY_ENTERPRISE
+)
 const ALERT_POOL_USAGE_HIGH_THRESHOLD_KB = resolveNumber(process.env.ALERT_POOL_USAGE_HIGH_THRESHOLD_KB, 500000)
-const ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB = resolveNumber(process.env.ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB, 100000)
+const ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_PERCENT = resolveNumber(
+  process.env.ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_PERCENT,
+  Number(process.env.ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB) <= 100 ? Number(process.env.ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB) : 20
+)
 const ALERT_SILENT_SIM_THRESHOLD_HOURS = resolveNumber(process.env.ALERT_SILENT_SIM_THRESHOLD_HOURS, 24)
 const ALERT_CDR_DELAY_THRESHOLD_HOURS = resolveNumber(process.env.ALERT_CDR_DELAY_THRESHOLD_HOURS, 48)
-const ALERT_UPSTREAM_DISCONNECT_THRESHOLD_HOURS = resolveNumber(process.env.ALERT_UPSTREAM_DISCONNECT_THRESHOLD_HOURS, 1)
+const ALERT_UPSTREAM_DISCONNECT_THRESHOLD_ATTEMPTS = resolveNumber(
+  process.env.ALERT_UPSTREAM_DISCONNECT_THRESHOLD_ATTEMPTS || process.env.ALERT_UPSTREAM_DISCONNECT_THRESHOLD_HOURS,
+  3
+)
 const ALERT_CONFIG_CACHE_SECONDS = resolveNumber(process.env.ALERT_CONFIG_CACHE_SECONDS, 60)
 
 console.log('Worker starting...')
@@ -115,6 +138,8 @@ console.log(`Job Poll Interval: ${JOB_POLL_INTERVAL_MS}ms`)
 console.log(`Dunning Check Schedule: ${DUNNING_CHECK_CRON}`)
 console.log(`Alert Evaluation Schedule: ${ALERT_EVAL_CRON}`)
 console.log(`Webhook Delivery Schedule: ${WEBHOOK_DELIVERY_CRON}`)
+console.log(`Usage Rating Rollup Schedule: ${USAGE_RATING_ROLLUP_CRON}`)
+console.log(`Usage Monthly Rollup Schedule: ${USAGE_MONTHLY_ROLLUP_CRON}`)
 console.log(`Test Expiry Check Schedule: ${TEST_EXPIRY_CHECK_CRON}`)
 console.log(`Subscription Cancel Schedule: ${SUBSCRIPTION_CANCEL_CRON}`)
 console.log(`Auto Billing Schedule: ${AUTO_BILLING_CRON}`)
@@ -261,6 +286,12 @@ async function alertEvaluationTask() {
   const traceId = `worker-alert-${Date.now()}`
   console.log(`[${traceId}] Starting alert evaluation...`)
   try {
+    try {
+      const probe = await runUpstreamIntegrationHealthProbe(supabase)
+      console.log(`[${traceId}] Upstream health probe completed. probed=${probe.probed} failed=${probe.failed}`)
+    } catch (err) {
+      console.warn(`[${traceId}] Upstream health probe skipped or failed:`, err)
+    }
     const result = await runAlertEvaluation({
       supabase,
       now: new Date(),
@@ -273,20 +304,20 @@ async function alertEvaluationTask() {
         suppressMinutesByEnterprise: ALERT_SUPPRESS_BY_ENTERPRISE,
         poolUsageHighThresholdKbByReseller: ALERT_POOL_USAGE_HIGH_THRESHOLD_KB_BY_RESELLER,
         poolUsageHighThresholdKbByEnterprise: ALERT_POOL_USAGE_HIGH_THRESHOLD_KB_BY_ENTERPRISE,
-        outOfProfileSurgeThresholdKbByReseller: ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB_BY_RESELLER,
-        outOfProfileSurgeThresholdKbByEnterprise: ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB_BY_ENTERPRISE,
+        outOfProfileSurgeThresholdPercentByReseller: ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_PERCENT_BY_RESELLER,
+        outOfProfileSurgeThresholdPercentByEnterprise: ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_PERCENT_BY_ENTERPRISE,
         silentSimThresholdHoursByReseller: ALERT_SILENT_SIM_THRESHOLD_HOURS_BY_RESELLER,
         silentSimThresholdHoursByEnterprise: ALERT_SILENT_SIM_THRESHOLD_HOURS_BY_ENTERPRISE,
         cdrDelayThresholdHoursByReseller: ALERT_CDR_DELAY_THRESHOLD_HOURS_BY_RESELLER,
         cdrDelayThresholdHoursByEnterprise: ALERT_CDR_DELAY_THRESHOLD_HOURS_BY_ENTERPRISE,
-        upstreamDisconnectThresholdHoursByReseller: ALERT_UPSTREAM_DISCONNECT_THRESHOLD_HOURS_BY_RESELLER,
-        upstreamDisconnectThresholdHoursByEnterprise: ALERT_UPSTREAM_DISCONNECT_THRESHOLD_HOURS_BY_ENTERPRISE,
+        upstreamDisconnectThresholdAttemptsByReseller: ALERT_UPSTREAM_DISCONNECT_THRESHOLD_ATTEMPTS_BY_RESELLER,
+        upstreamDisconnectThresholdAttemptsByEnterprise: ALERT_UPSTREAM_DISCONNECT_THRESHOLD_ATTEMPTS_BY_ENTERPRISE,
         configCacheSeconds: ALERT_CONFIG_CACHE_SECONDS,
         poolUsageHighThresholdKb: ALERT_POOL_USAGE_HIGH_THRESHOLD_KB,
-        outOfProfileSurgeThresholdKb: ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_KB,
+        outOfProfileSurgeThresholdPercent: ALERT_OUT_OF_PROFILE_SURGE_THRESHOLD_PERCENT,
         silentSimThresholdHours: ALERT_SILENT_SIM_THRESHOLD_HOURS,
         cdrDelayThresholdHours: ALERT_CDR_DELAY_THRESHOLD_HOURS,
-        upstreamDisconnectThresholdHours: ALERT_UPSTREAM_DISCONNECT_THRESHOLD_HOURS,
+        upstreamDisconnectThresholdAttempts: ALERT_UPSTREAM_DISCONNECT_THRESHOLD_ATTEMPTS,
       },
     })
     if (!result?.ok) {
@@ -342,7 +373,7 @@ async function testExpiryCheckTask() {
     const nowIso = new Date().toISOString()
     const rows = await supabase.select(
       'sims',
-      `select=sim_id,iccid,status,enterprise_id,supplier_id,activation_date&status=eq.TEST_READY&limit=500`
+      `select=sim_id,iccid,status,enterprise_id,reseller_id,supplier_id,activation_date&status=eq.TEST_READY&limit=500`
     )
     const sims = Array.isArray(rows) ? rows : []
     if (sims.length === 0) {
@@ -407,18 +438,23 @@ async function testExpiryCheckTask() {
           source: 'TEST_EXPIRY_AUTO',
           request_id: traceId,
         }, { returning: 'minimal' })
+        const testExpiryEventScope = await resolveEventScopeColumns(supabase, {
+          enterpriseId: sim.enterprise_id ?? null,
+          resellerId: sim.reseller_id ?? null,
+        })
         await supabase.insert('events', {
           event_type: 'SIM_STATUS_CHANGED',
           occurred_at: nowIso,
-          tenant_id: sim.enterprise_id ?? null,
+          enterprise_id: testExpiryEventScope.enterpriseId,
+          reseller_id: testExpiryEventScope.resellerId,
           request_id: traceId,
-          payload: {
+          payload: sanitizeEventPayload({
             iccid: sim.iccid,
             beforeStatus: 'TEST_READY',
             afterStatus: newStatus,
             reason: `Test period expired (${testPeriodDays} days)`,
             autoTriggered: true,
-          },
+          }),
         }, { returning: 'minimal' })
         await supabase.insert('audit_logs', {
           actor_role: 'SYSTEM',
@@ -599,6 +635,69 @@ async function reconciliationTask() {
   }
 }
 
+// --- Usage Rating Rollup Cron Task ---
+async function usageRatingRollupTask() {
+  const traceId = `worker-usage-rollup-${Date.now()}`
+  const now = new Date()
+  const period = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`
+  const slot = now.toISOString().slice(0, 16)
+  const idempotencyKey = `USAGE_RATING_ROLLUP:GLOBAL:${period}:${slot}`
+  try {
+    const existing = await findIdempotentJobByKey('USAGE_RATING_ROLLUP', idempotencyKey)
+    if (existing && existing.status !== 'FAILED') {
+      console.log(`[${traceId}] Usage rollup already queued=${existing.job_id ?? 'unknown'}`)
+      return
+    }
+    const jobRows = await insertJobWithFallback({
+      job_type: 'USAGE_RATING_ROLLUP',
+      status: 'QUEUED',
+      progress_processed: 0,
+      progress_total: 0,
+      request_id: traceId,
+      idempotency_key: idempotencyKey,
+      payload: {
+        period,
+        requestId: traceId,
+      },
+    })
+    const job = Array.isArray(jobRows) ? jobRows[0] : null
+    console.log(`[${traceId}] Usage rollup job queued=${job?.job_id ?? 'unknown'}`)
+  } catch (err) {
+    console.error(`[${traceId}] Usage rollup job enqueue failed:`, err)
+  }
+}
+
+// --- Usage Monthly Rollup Cron Task (previous calendar month; idempotent daily) ---
+async function usageMonthlyRollupTask() {
+  const traceId = `worker-usage-monthly-${Date.now()}`
+  const period = previousUtcYearMonth()
+  const dayKey = new Date().toISOString().slice(0, 10)
+  const idempotencyKey = `USAGE_MONTHLY_ROLLUP:GLOBAL:${period}:${dayKey}`
+  try {
+    const existing = await findIdempotentJobByKey('USAGE_MONTHLY_ROLLUP', idempotencyKey)
+    if (existing && existing.status !== 'FAILED') {
+      console.log(`[${traceId}] Usage monthly rollup already queued=${existing.job_id ?? 'unknown'}`)
+      return
+    }
+    const jobRows = await insertJobWithFallback({
+      job_type: 'USAGE_MONTHLY_ROLLUP',
+      status: 'QUEUED',
+      progress_processed: 0,
+      progress_total: 0,
+      request_id: traceId,
+      idempotency_key: idempotencyKey,
+      payload: {
+        period,
+        requestId: traceId,
+      },
+    })
+    const job = Array.isArray(jobRows) ? jobRows[0] : null
+    console.log(`[${traceId}] Usage monthly rollup job queued=${job?.job_id ?? 'unknown'} period=${period}`)
+  } catch (err) {
+    console.error(`[${traceId}] Usage monthly rollup job enqueue failed:`, err)
+  }
+}
+
 // --- Job Processor ---
 async function processJobs() {
   try {
@@ -607,12 +706,22 @@ async function processJobs() {
     // We pick one 'QUEUED' job.
     // Note: 'payload' column might be missing in some schemas, so we rely on request_id workaround if needed.
     // console.log('Checking for jobs...')
-    const jobs = await supabase.select(
+    let jobs = await supabase.select(
       'jobs',
-      'select=job_id,job_type,request_id,payload&status=eq.QUEUED&order=created_at.asc&limit=1',
+      'select=job_id,job_type,request_id,payload,status&status=eq.QUEUED&order=created_at.asc&limit=1',
       { suppressMissingColumns: true }
     )
-    const job = Array.isArray(jobs) && jobs.length > 0 ? jobs[0] : null
+    let job = Array.isArray(jobs) && jobs.length > 0 ? jobs[0] : null
+    let resumeRunning = false
+    if (!job) {
+      jobs = await supabase.select(
+        'jobs',
+        'select=job_id,job_type,request_id,payload,status&job_type=in.(SIM_STATUS_CHANGE,SUBSCRIPTION_PROVISION)&status=eq.RUNNING&order=started_at.asc&limit=1',
+        { suppressMissingColumns: true }
+      )
+      job = Array.isArray(jobs) && jobs.length > 0 ? jobs[0] : null
+      resumeRunning = !!job
+    }
     if (!job) return // No jobs
 
     // Workaround: Parse payload from request_id if available and looks like JSON
@@ -624,14 +733,18 @@ async function processJobs() {
         }
     }
 
-    console.log(`Processing job ${job.job_id} (${job.job_type})...`)
+    console.log(`Processing job ${job.job_id} (${job.job_type})${resumeRunning ? ' (resume RUNNING)' : ''}...`)
 
-    // 2. Mark as RUNNING
-    await supabase.update('jobs', `job_id=eq.${encodeURIComponent(job.job_id)}`, {
-      status: 'RUNNING',
-      started_at: new Date().toISOString()
-    }, { returning: 'minimal' })
+    // 2. Mark as RUNNING (skip if already RUNNING — pending upstream retry)
+    if (!resumeRunning) {
+      await supabase.update('jobs', `job_id=eq.${encodeURIComponent(job.job_id)}`, {
+        status: 'RUNNING',
+        started_at: new Date().toISOString()
+      }, { returning: 'minimal' })
+    }
 
+    let markSucceeded = true
+    let markFailedSummary = null
     try {
       // 3. Execute logic based on type
       switch (job.job_type) {
@@ -647,6 +760,22 @@ async function processJobs() {
         case 'BILLING_GENERATE':
           await handleBillingGenerateJob(job)
           break;
+        case 'USAGE_RATING_ROLLUP': {
+          const ratingResult = await handleUsageRatingRollupJob(job)
+          if (ratingResult?.failed) {
+            markSucceeded = false
+            markFailedSummary = ratingResult.errorSummary || 'Usage rating rollup failed.'
+          }
+          break
+        }
+        case 'USAGE_MONTHLY_ROLLUP': {
+          const monthlyResult = await handleUsageMonthlyRollupJob(job)
+          if (monthlyResult?.failed) {
+            markSucceeded = false
+            markFailedSummary = monthlyResult.errorSummary || 'Usage monthly rollup failed.'
+          }
+          break
+        }
         case 'DUNNING_CHECK':
           await handleDunningCheckJob(job)
           break;
@@ -656,9 +785,23 @@ async function processJobs() {
         case 'SIM_RESET_CONNECTION':
           await handleSimResetConnectionJob(job)
           break;
-        case 'SIM_STATUS_CHANGE':
-          await handleSimStatusChangeJob(job)
-          break;
+        case 'SIM_STATUS_CHANGE': {
+          const simJobResult = await handleSimStatusChangeJob(job)
+          if (simJobResult?.pending) {
+            markSucceeded = false
+          }
+          break
+        }
+        case 'SUBSCRIPTION_PROVISION': {
+          const subJobResult = await processSubscriptionProvisionJob({ supabase, job })
+          if (subJobResult?.pending) {
+            markSucceeded = false
+          } else if (subJobResult?.failed) {
+            markSucceeded = false
+            markFailedSummary = subJobResult.errorSummary || 'Subscription provision failed.'
+          }
+          break
+        }
         case 'WEBHOOK_DELIVERY':
           await handleWebhookDeliveryJob(job)
           break;
@@ -666,14 +809,27 @@ async function processJobs() {
           throw new Error(`Unknown job type: ${job.job_type}`)
       }
 
-      // 4. Mark as SUCCEEDED
-      await supabase.update('jobs', `job_id=eq.${encodeURIComponent(job.job_id)}`, {
-        status: 'SUCCEEDED',
-        finished_at: new Date().toISOString(),
-        progress_processed: 100,
-        progress_total: 100
-      }, { returning: 'minimal' })
-      console.log(`Job ${job.job_id} succeeded.`)
+      // 4. Mark as SUCCEEDED / FAILED (skip while upstream pending)
+      if (markFailedSummary) {
+        await supabase.update('jobs', `job_id=eq.${encodeURIComponent(job.job_id)}`, {
+          status: 'FAILED',
+          finished_at: new Date().toISOString(),
+          progress_processed: 1,
+          progress_total: 1,
+          error_summary: String(markFailedSummary).slice(0, 1000),
+        }, { returning: 'minimal' })
+        console.log(`Job ${job.job_id} failed (handled).`)
+      } else if (markSucceeded) {
+        await supabase.update('jobs', `job_id=eq.${encodeURIComponent(job.job_id)}`, {
+          status: 'SUCCEEDED',
+          finished_at: new Date().toISOString(),
+          progress_processed: 1,
+          progress_total: 1
+        }, { returning: 'minimal' })
+        console.log(`Job ${job.job_id} succeeded.`)
+      } else {
+        console.log(`Job ${job.job_id} pending upstream; remains RUNNING.`)
+      }
 
     } catch (err) {
       console.error(`Job ${job.job_id} failed:`, err)
@@ -750,6 +906,55 @@ async function handleBillingGenerateJob(job) {
   }, { returning: 'minimal' })
 }
 
+async function handleUsageRatingRollupJob(job) {
+  console.log(`[Job ${job.job_id}] Running usage rating rollup...`)
+  const payload = job.payload || {}
+  const result = await runUsageRatingRollup({
+    supabase,
+    period: payload.period ?? null,
+    enterpriseId: payload.enterpriseId ?? null,
+    resellerId: payload.resellerId ?? null,
+    jobId: job.job_id,
+  })
+  if (!result?.ok) {
+    return {
+      failed: true,
+      errorSummary: result?.message || 'Usage rating rollup failed.',
+    }
+  }
+  const processed = Number(result?.value?.enterpriseCount ?? 0)
+  await supabase.update('jobs', `job_id=eq.${encodeURIComponent(job.job_id)}`, {
+    progress_processed: processed,
+    progress_total: processed,
+  }, { returning: 'minimal' })
+  return { failed: false }
+}
+
+async function handleUsageMonthlyRollupJob(job) {
+  console.log(`[Job ${job.job_id}] Running usage monthly rollup...`)
+  const payload = job.payload || {}
+  const result = await runUsageMonthlyRollup({
+    supabase,
+    period: payload.period ?? null,
+    enterpriseId: payload.enterpriseId ?? null,
+    resellerId: payload.resellerId ?? null,
+    jobId: job.job_id,
+  })
+  if (!result?.ok) {
+    // Expected business outcomes (no daily rows, bad period, scope) — fail the job quietly (no stack dump).
+    return {
+      failed: true,
+      errorSummary: result?.message || 'Usage monthly rollup failed.',
+    }
+  }
+  const processed = Number(result?.value?.monthlyRows ?? 0)
+  await supabase.update('jobs', `job_id=eq.${encodeURIComponent(job.job_id)}`, {
+    progress_processed: processed,
+    progress_total: processed,
+  }, { returning: 'minimal' })
+  return { failed: false }
+}
+
 async function handleDunningCheckJob(job) {
   console.log(`[Job ${job.job_id}] Running dunning check...`)
   const payload = job.payload || {}
@@ -806,107 +1011,54 @@ async function computeExponentialBackoffMs(attempt) {
 
 async function handleSimStatusChangeJob(job) {
   const payload = job.payload || {}
-  const iccid = payload.iccid ? String(payload.iccid) : null
-  const targetStatus = payload.targetStatus ? String(payload.targetStatus).toUpperCase() : null
-  const supplierId = payload.supplierId ? String(payload.supplierId) : null
-  const requestId = payload.requestId ?? job.request_id ?? null
-  const idempotencyKey = payload.idempotencyKey ?? null
+  let supplierId = payload.supplierId ? String(payload.supplierId) : null
+  let operatorId = payload.operatorId ? String(payload.operatorId) : null
   const traceId = `worker-sim-status-change-${job.job_id}`
+  const targetStatus = String(payload.afterStatus || payload.targetStatus || '').toUpperCase()
 
-  console.log(`[${traceId}] Processing SIM status change: iccid=${iccid} target=${targetStatus} supplier=${supplierId}`)
-
-  if (!iccid) {
-    throw new Error('Missing iccid in payload')
-  }
-  if (!targetStatus) {
-    throw new Error('Missing targetStatus in payload')
-  }
-
-  // T141b: Idempotency check
-  if (idempotencyKey) {
-    const existingJob = await findIdempotentJobByKey('SIM_STATUS_CHANGE', idempotencyKey)
-    if (existingJob && existingJob.job_id !== job.job_id && existingJob.status === 'SUCCEEDED') {
-      console.log(`[${traceId}] Idempotent duplicate detected, skipping. existing_job=${existingJob.job_id}`)
-      return
+  if (!supplierId || !operatorId) {
+    const simId = payload.simId ? String(payload.simId) : null
+    const iccid = payload.iccid ? String(payload.iccid) : null
+    if (simId || iccid) {
+      const simRows = await supabase.select(
+        'sims',
+        `select=supplier_id,operator_id&${
+          simId ? `sim_id=eq.${encodeURIComponent(simId)}` : `iccid=eq.${encodeURIComponent(iccid)}`
+        }&limit=1`
+      )
+      const sim = Array.isArray(simRows) ? simRows[0] : null
+      if (sim?.supplier_id) supplierId = String(sim.supplier_id)
+      if (sim?.operator_id) operatorId = String(sim.operator_id)
     }
   }
 
-  // T141c: Check if SPI adapter exists and supports the operation
-  const capCheck = checkOperationSupported({ supplierId, operation: 'SIM_STATUS_CHANGE' })
+  console.log(`[${traceId}] Processing SIM status change: iccid=${payload.iccid} target=${targetStatus}`)
+
+  const capCheck = await checkOperationSupported({
+    supabase,
+    supplierId,
+    operatorId,
+    operation: 'SIM_STATUS_CHANGE',
+  })
+  const adapter = capCheck.supported ? capCheck.adapter : null
   if (!capCheck.supported) {
-    const reason = capCheck.reason || 'UPSTREAM_NOT_SUPPORTED'
-    console.warn(`[${traceId}] No upstream capability for SIM_STATUS_CHANGE: ${reason}`)
-    await supabase.update('jobs', `job_id=eq.${encodeURIComponent(job.job_id)}`, {
-      status: 'FAILED',
-      finished_at: new Date().toISOString(),
-      error_summary: reason,
-    }, { returning: 'minimal' })
-    throw new Error(reason)
+    console.warn(`[${traceId}] No upstream adapter: ${capCheck.reason || 'UPSTREAM_NOT_SUPPORTED'} — local-only finalize if policy allows`)
   }
 
-  const adapter = capCheck.adapter
+  const result = await processSimStatusChangeJob({
+    supabase,
+    job,
+    adapter,
+    finalizeSimStatusChange,
+  })
 
-  // T141b: Exponential backoff retry logic
-  const retryCount = Number(payload.retryCount ?? 0)
-  let lastError = null
-
-  for (let attempt = retryCount; attempt < SIM_STATUS_CHANGE_MAX_RETRIES; attempt++) {
-    try {
-      // T141a: Route to the appropriate SPI adapter method based on targetStatus
-      let result = null
-      const adapterParams = { iccid, idempotencyKey: idempotencyKey ?? `sim-status-${iccid}-${Date.now()}` }
-
-      switch (targetStatus) {
-        case 'ACTIVATED':
-          result = await adapter.activateSim(adapterParams)
-          break
-        case 'SUSPENDED':
-          result = await adapter.suspendSim(adapterParams)
-          break
-        default:
-          // For other status changes, try updateCardStatus directly if available
-          if (typeof adapter.updateCardStatus === 'function') {
-            result = { ok: true, status: 'COMPLETED', raw: await adapter.updateCardStatus(iccid, targetStatus) }
-          } else {
-            throw new Error(`Unsupported target status: ${targetStatus}`)
-          }
-      }
-
-      if (!result?.ok) {
-        throw new Error(result?.message || `Upstream returned failure for ${targetStatus}`)
-      }
-
-      console.log(`[${traceId}] SIM status change succeeded: iccid=${iccid} target=${targetStatus} attempt=${attempt + 1}`)
-
-      // Update SIM record in DB
-      const nowIso = new Date().toISOString()
-      await supabase.update('sims', `iccid=eq.${encodeURIComponent(iccid)}`, {
-        upstream_status: targetStatus,
-        upstream_status_updated_at: nowIso,
-      }, { returning: 'minimal' })
-
-      return // Success
-    } catch (err) {
-      lastError = err
-      console.error(`[${traceId}] Attempt ${attempt + 1}/${SIM_STATUS_CHANGE_MAX_RETRIES} failed: ${err.message}`)
-
-      if (attempt + 1 < SIM_STATUS_CHANGE_MAX_RETRIES) {
-        const backoffMs = await computeExponentialBackoffMs(attempt)
-        console.log(`[${traceId}] Retrying in ${Math.round(backoffMs)}ms...`)
-        await new Promise((resolve) => setTimeout(resolve, backoffMs))
-      }
-    }
+  if (result?.pending) {
+    return { pending: true }
   }
-
-  // T141b: Max retries exhausted - dead-letter state
-  console.error(`[${traceId}] Retry exhausted after ${SIM_STATUS_CHANGE_MAX_RETRIES} attempts.`)
-  const errorMessage = `retry_exhausted: ${String(lastError?.message ?? 'unknown').slice(0, 500)}`
-  await supabase.update('jobs', `job_id=eq.${encodeURIComponent(job.job_id)}`, {
-    status: 'FAILED',
-    finished_at: new Date().toISOString(),
-    error_summary: errorMessage,
-  }, { returning: 'minimal' })
-  throw new Error(errorMessage)
+  if (result?.failed) {
+    throw new Error('SIM_STATUS_CHANGE_UPSTREAM_FAILED')
+  }
+  return { ok: true }
 }
 
 async function handleWebhookDeliveryJob(job) {
@@ -946,6 +1098,8 @@ scheduleCron('SYNC_USAGE_CRON', SYNC_USAGE_CRON, syncUsageTask)
 scheduleCron('DUNNING_CHECK_CRON', DUNNING_CHECK_CRON, dunningCheckTask)
 scheduleCron('ALERT_EVAL_CRON', ALERT_EVAL_CRON, alertEvaluationTask)
 scheduleCron('WEBHOOK_DELIVERY_CRON', WEBHOOK_DELIVERY_CRON, webhookDeliveryTask)
+scheduleCron('USAGE_RATING_ROLLUP_CRON', USAGE_RATING_ROLLUP_CRON, usageRatingRollupTask)
+scheduleCron('USAGE_MONTHLY_ROLLUP_CRON', USAGE_MONTHLY_ROLLUP_CRON, usageMonthlyRollupTask)
 scheduleCron('TEST_EXPIRY_CHECK_CRON', TEST_EXPIRY_CHECK_CRON, testExpiryCheckTask)
 scheduleCron('SUBSCRIPTION_CANCEL_CRON', SUBSCRIPTION_CANCEL_CRON, subscriptionCancelTask)
 scheduleCron('AUTO_BILLING_CRON', AUTO_BILLING_CRON, autoBillingTask)

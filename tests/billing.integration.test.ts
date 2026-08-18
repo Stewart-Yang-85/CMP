@@ -6,7 +6,7 @@
  * - T037: Waterfall matching (Add-on → Main → PAYG)
  * - T038: FIXED_BUNDLE pool deduction (simContexts sorted by sim_id)
  * - T039: Overage billing (overage_rate_per_mb)
- * - T040: PAYG fallback + PAYG_RULE_MISSING
+ * - T040: Out-of-profile OOP roaming via package roamingProfileId + roaming_profiles.mccmnc_list
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -35,11 +35,13 @@ function createMockSupabase() {
       switch (table) {
         case 'sims':
           return mockData.sims
-        case 'package_versions':
-          return mockData.package_versions
+        case 'packages':
+          return (mockData as { packages?: unknown }).packages ?? []
         case 'price_plan_versions':
           return mockData.price_plan_versions
         case 'price_plans':
+          return mockData.price_plans
+        case 'price_plans_expanded':
           return mockData.price_plans
         case 'subscriptions': {
           const match = queryString.match(/sim_id=in\.\(([^)]+)\)/)
@@ -63,6 +65,27 @@ function createMockSupabase() {
         }
         case 'sim_state_history':
           return mockData.sim_state_history
+        case 'covered_network_profile_entries':
+          return (mockData as { covered_network_profile_entries?: unknown[] }).covered_network_profile_entries ?? []
+        case 'roaming_profiles': {
+          const rows = (mockData as { roaming_profiles?: { roaming_profile_id: string }[] }).roaming_profiles ?? []
+          const match = queryString.match(/roaming_profile_id=in\.\(([^)]+)\)/)
+          if (match) {
+            const ids = match[1].split(',').map((s) => s.trim().replace(/^["']|["']$/g, ''))
+            return rows.filter((r) => ids.includes(r.roaming_profile_id))
+          }
+          return rows
+        }
+        case 'carrier_service_modules': {
+          const rows =
+            (mockData as { carrier_service_modules?: { carrier_service_id: string }[] }).carrier_service_modules ?? []
+          const match = queryString.match(/carrier_service_id=in\.\(([^)]+)\)/)
+          if (match) {
+            const ids = match[1].split(',').map((s) => decodeURIComponent(s.trim()))
+            return rows.filter((r) => ids.includes(r.carrier_service_id))
+          }
+          return rows
+        }
         default:
           return []
       }
@@ -174,5 +197,241 @@ describe('Billing Golden Case Integration (T036-T040)', () => {
       .filter((ref): ref is string => !!ref && goldenRefs.has(ref))
 
     expect(foundRefs.length, 'All 8 golden cases should have rating results').toBe(8)
+  })
+})
+
+function createPhase30MockSupabase(phase30Data: {
+  sims: unknown[]
+  packages: unknown[]
+  price_plans: unknown[]
+  subscriptions: unknown[]
+  usage_daily_summary: unknown[]
+  sim_state_history: unknown[]
+  covered_network_profile_entries?: unknown[]
+  roaming_profiles?: unknown[]
+  carrier_service_modules?: unknown[]
+}) {
+  return {
+    async select(table: string, queryString: string) {
+      switch (table) {
+        case 'sims':
+          return phase30Data.sims
+        case 'packages':
+          return phase30Data.packages
+        case 'carrier_service_modules': {
+          const rows = (phase30Data.carrier_service_modules ?? []) as { carrier_service_id?: string }[]
+          const m = queryString.match(/carrier_service_id=in\.\(([^)]+)\)/)
+          if (m) {
+            const ids = m[1].split(',').map((s) => decodeURIComponent(s.trim()))
+            return rows.filter((r) => r.carrier_service_id && ids.includes(String(r.carrier_service_id)))
+          }
+          return rows
+        }
+        case 'price_plans':
+          return phase30Data.price_plans
+        case 'price_plans_expanded':
+          return phase30Data.price_plans
+        case 'covered_network_profile_entries':
+          return phase30Data.covered_network_profile_entries ?? []
+        case 'roaming_profiles':
+          return phase30Data.roaming_profiles ?? []
+        case 'subscriptions': {
+          const match = queryString.match(/sim_id=in\.\(([^)]+)\)/)
+          if (match) {
+            const ids = match[1].split(',').map((s) => s.trim().replace(/^["']|["']$/g, ''))
+            return (phase30Data.subscriptions as { sim_id: string }[]).filter((s) => ids.includes(s.sim_id))
+          }
+          return phase30Data.subscriptions
+        }
+        case 'usage_daily_summary': {
+          const match = queryString.match(/sim_id=in\.\(([^)]+)\)/)
+          if (match) {
+            const ids = match[1].split(',').map((s) => s.trim().replace(/^["']|["']$/g, ''))
+            return (phase30Data.usage_daily_summary as { sim_id: string }[]).filter((u) => ids.includes(u.sim_id))
+          }
+          return phase30Data.usage_daily_summary
+        }
+        case 'sim_state_history':
+          return phase30Data.sim_state_history
+        default:
+          return []
+      }
+    },
+    async selectWithCount(table: string, _queryString: string) {
+      if (table === 'sims') {
+        const data = phase30Data.sims as unknown[]
+        return { data, total: data.length }
+      }
+      return { data: [], total: 0 }
+    },
+  }
+}
+
+/** T226: in-profile vs OOP roaming cases (mock DB); CoveredNetworkProfile API/service tests: `coveredNetworkProfile.test.ts`. */
+describe('Phase 30 (T222) billing waterfall — Covered vs OOP roaming vs PAYG', () => {
+  const enterpriseId = meta.enterpriseId
+  const supplierId = meta.supplierId
+  const coveredId = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
+  const roamingId = 'rrrrrrrr-rrrr-rrrr-rrrr-rrrrrrrrrrrr'
+  const pkgId = 'pkg-phase30-1'
+  const ppId = 'pp-phase30-1'
+  const simId = 'ssssssss-ssss-ssss-ssss-ssssssssss02'
+
+  const basePhase30 = {
+    sims: [{ sim_id: simId, iccid: '89860000000000999999', enterprise_id: enterpriseId, status: 'ACTIVATED' }],
+    subscriptions: [
+      {
+        subscription_id: 'sub-p30-1',
+        sim_id: simId,
+        package_id: pkgId,
+        subscription_kind: 'MAIN',
+        state: 'ACTIVE',
+        effective_at: '2024-12-01T00:00:00Z',
+        expires_at: null,
+      },
+    ],
+    packages: [
+      {
+        package_id: pkgId,
+        price_plan_id: ppId,
+        name: 'Phase30 pkg',
+        carrier_service_id: 'cs-phase30-1',
+      },
+    ],
+    carrier_service_modules: [
+      {
+        carrier_service_id: 'cs-phase30-1',
+        supplier_id: supplierId,
+        operator_id: '22222222-2222-2222-2222-222222222222',
+        roaming_profile_id: roamingId,
+        apn_profile_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        rat: '4G',
+        status: 'PUBLISHED',
+      },
+    ],
+    price_plans: [
+      {
+        price_plan_id: ppId,
+        type: 'FIXED_BUNDLE',
+        currency: 'USD',
+        first_cycle_proration: 'NONE',
+        covered_network_profile_id: coveredId,
+        monthly_fee: 0,
+        deactivated_monthly_fee: 0,
+        total_quota_mb: 200,
+        overage_rate_per_mb: 2,
+      },
+    ],
+    covered_network_profile_entries: [{ covered_network_profile_id: coveredId, mcc: '234', mnc: '15' }],
+    roaming_profiles: [
+      {
+        roaming_profile_id: roamingId,
+        mccmnc_list: [{ mcc: '234', mnc: '15', ratePerMb: 99 }],
+      },
+    ],
+    sim_state_history: [] as unknown[],
+  }
+
+  it('in-profile matches CoveredNetworkProfile mcc-* against any MNC under that MCC', async () => {
+    const phase30Data = {
+      ...basePhase30,
+      covered_network_profile_entries: [
+        { covered_network_profile_id: coveredId, mcc: '310', mnc: '*' },
+      ],
+      usage_daily_summary: [
+        {
+          sim_id: simId,
+          iccid: '89860000000000999999',
+          enterprise_id: enterpriseId,
+          supplier_id: supplierId,
+          usage_day: '2025-01-15',
+          visited_mccmnc: '310-260',
+          total_mb: 25,
+          input_ref: 'p30:covered-mcc-star',
+        },
+      ],
+    }
+    const result = await computeMonthlyCharges(
+      {
+        enterpriseId,
+        billPeriod: meta.billPeriod,
+        calculationId: 'phase30-covered-wildcard',
+      },
+      createPhase30MockSupabase(phase30Data) as any
+    )
+    const row = result.ratingResults.find(
+      (r) => (r as { input_ref?: string }).input_ref === 'p30:covered-mcc-star'
+    )
+    expect(row).toBeDefined()
+    expect((row as { classification?: string }).classification).toBe('IN_PACKAGE')
+    expect(Number((row as { amount?: number }).amount)).toBe(0)
+  })
+
+  it('in-profile membership follows CoveredNetworkProfile entries even if package.roaming_profile disagrees', async () => {
+    const phase30Data = {
+      ...basePhase30,
+      usage_daily_summary: [
+        {
+          sim_id: simId,
+          iccid: '89860000000000999999',
+          enterprise_id: enterpriseId,
+          supplier_id: supplierId,
+          usage_day: '2025-01-15',
+          visited_mccmnc: '234-15',
+          total_mb: 50,
+          input_ref: 'p30:covered-in',
+        },
+      ],
+    }
+    const result = await computeMonthlyCharges(
+      {
+        enterpriseId,
+        billPeriod: meta.billPeriod,
+        calculationId: 'phase30-covered',
+      },
+      createPhase30MockSupabase(phase30Data) as any
+    )
+    const row = result.ratingResults.find((r) => (r as { input_ref?: string }).input_ref === 'p30:covered-in')
+    expect(row).toBeDefined()
+    expect((row as { classification?: string }).classification).toBe('IN_PACKAGE')
+    expect(Number((row as { amount?: number }).amount)).toBe(0)
+  })
+
+  it('out-of-profile uses carrier roaming tariff (price plan has no zone PAYG)', async () => {
+    const phase30Data = {
+      ...basePhase30,
+      price_plans: [basePhase30.price_plans[0]],
+      usage_daily_summary: [
+        {
+          sim_id: simId,
+          iccid: '89860000000000999999',
+          enterprise_id: enterpriseId,
+          supplier_id: supplierId,
+          usage_day: '2025-01-15',
+          visited_mccmnc: '999-99',
+          total_mb: 10,
+          input_ref: 'p30:oop-first',
+        },
+      ],
+      roaming_profiles: [
+        {
+          roaming_profile_id: roamingId,
+          mccmnc_list: [{ mcc: '999', mnc: '99', ratePerMb: 3 }],
+        },
+      ],
+    }
+    const result = await computeMonthlyCharges(
+      {
+        enterpriseId,
+        billPeriod: meta.billPeriod,
+        calculationId: 'phase30-oop',
+      },
+      createPhase30MockSupabase(phase30Data) as any
+    )
+    const row = result.ratingResults.find((r) => (r as { input_ref?: string }).input_ref === 'p30:oop-first')
+    expect(row).toBeDefined()
+    expect((row as { classification?: string }).classification).toBe('OOP_ROAMING')
+    expect((row as { rate_per_mb?: number }).rate_per_mb).toBe(3)
+    expect((row as { amount?: number }).amount).toBe(30)
   })
 })

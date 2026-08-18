@@ -5,12 +5,13 @@
  *
  * Usage:
  *   node tools/test_billing_generate.js --enterpriseId <uuid> --period 2026-02
- *   node tools/test_billing_generate.js --enterpriseId <uuid> --period 2026-02 --resellerId <代理商-tenant-uuid>
+ *   node tools/test_billing_generate.js --enterpriseId <uuid> --period 2026-02 --resellerId <RESELLER tenants.tenant_id>
  *   node tools/test_billing_generate.js --enterpriseId <uuid> --period 2026-02 --autoPublish true
  *
  * 说明：
  * - period 须为 YYYY-MM；该企业该账期若已有账单会跳过（幂等）。
  * - 若无订阅/用量等，computeMonthlyCharges 可能不产生新账单，results 可能为空。
+ * - --resellerId（可选）：FR-058，须为代理商 RESELLER 的 tenants.tenant_id。
  */
 import 'dotenv/config'
 import { createSupabaseRestClient } from '../src/supabaseRest.js'

@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import path from 'node:path'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { WXZHONGGENG_DIAGNOSTICS_CAPABILITIES } from './diagnosticsCapabilities.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -43,6 +44,7 @@ const DEFAULT_SUPPORTED_OPERATIONS = Object.freeze([
   'SUSPEND',
   'RESUME',
   'DEACTIVATE',
+  'CHANGE_PLAN',
   'GET_USAGE',
   'SIM_STATUS_CHANGE',
 ])
@@ -68,17 +70,42 @@ function normalizeCapabilities(config) {
   }
 }
 
-function resolveOperation(config, action) {
-  const ops = config?.operations ?? {}
-  const direct = ops && typeof ops === 'object' ? ops[action] : null
+function resolveOperation(config, action, integrationConfig) {
+  const ops = {
+    ...(config?.operations || {}),
+    ...(integrationConfig?.operations || {}),
+    ...(integrationConfig?.config?.operations || {}),
+  }
+  const direct = ops[action]
   if (direct) return String(direct)
   const envKey =
     action === 'activate'
       ? 'WXZHONGGENG_ACTIVATE_OP'
       : action === 'suspend'
         ? 'WXZHONGGENG_SUSPEND_OP'
-        : 'WXZHONGGENG_CHANGE_PLAN_OP'
+        : action === 'resume'
+          ? 'WXZHONGGENG_RESUME_OP'
+          : 'WXZHONGGENG_CHANGE_PLAN_OP'
   return getEnvTrim(envKey)
+}
+
+function mergeEndpointConfig(fileConfig, integrationConfig) {
+  const base = fileConfig && typeof fileConfig === 'object' ? fileConfig : {}
+  const extra = integrationConfig?.endpoints && typeof integrationConfig.endpoints === 'object'
+    ? integrationConfig.endpoints
+    : integrationConfig?.config?.endpoints && typeof integrationConfig.config.endpoints === 'object'
+      ? integrationConfig.config.endpoints
+      : {}
+  return {
+    ...base,
+    endpoints: { ...(base.endpoints || {}), ...extra },
+    auth: { ...(base.auth || {}), ...(integrationConfig?.auth || {}), ...(integrationConfig?.config?.auth || {}) },
+    operations: {
+      ...(base.operations || {}),
+      ...(integrationConfig?.operations || {}),
+      ...(integrationConfig?.config?.operations || {}),
+    },
+  }
 }
 
 function buildProvisioningResult({ ok, status, raw, message }) {
@@ -92,18 +119,81 @@ function buildProvisioningResult({ ok, status, raw, message }) {
   }
 }
 
-export function createWxzhonggengClient() {
-  const config = loadWxzhonggengConfig()
+function isWxUpstreamHealthResponseOk(res) {
+  return isWxApiSuccess(res)
+}
 
-  let baseUrl = getEnvTrim('WXZHONGGENG_URL')
+/** @param {unknown} res */
+export function isWxApiSuccess(res) {
+  if (res == null || typeof res !== 'object') return false
+  if (res.success === false) return false
+  const code = res.code != null ? String(res.code).trim() : ''
+  if (code && code !== '00000' && code !== '0') return false
+  return true
+}
+
+function parseWxExpireAtMs(data, config) {
+  const field = config.auth?.expireTimeField || 'data.expireTime'
+  const raw = getNested(data, field) ?? data?.data?.expireTime ?? data?.expireTime
+  if (raw != null && String(raw).trim() !== '') {
+    const normalized = String(raw).trim().replace(' ', 'T')
+    const withZone = /[zZ]|[+-]\d{2}:?\d{2}$/.test(normalized) ? normalized : `${normalized}Z`
+    const parsed = Date.parse(withZone)
+    if (!Number.isNaN(parsed)) return parsed
+  }
+  const ttlSec = Number(config.auth?.tokenExpirySeconds ?? 7200)
+  return Date.now() + Math.max(60, ttlSec) * 1000
+}
+
+function formatWxEffectTime(value) {
+  if (value == null || String(value).trim() === '') return ''
+  const d = value instanceof Date ? value : new Date(String(value))
+  if (Number.isNaN(d.getTime())) return ''
+  const iso = d.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
+  return iso
+}
+
+function provisioningOkFromResponse(res) {
+  if (!isWxApiSuccess(res)) return false
+  const data = res?.data
+  if (data && typeof data === 'object' && 'success' in data) {
+    return data.success !== false
+  }
+  return true
+}
+
+export function createWxzhonggengClient(integration = {}) {
+  const fileConfig = loadWxzhonggengConfig()
+  const config = mergeEndpointConfig(fileConfig, integration)
+
+  let baseUrl = integration.apiEndpoint ? String(integration.apiEndpoint).trim() : null
+  if (!baseUrl) baseUrl = getEnvTrim('WXZHONGGENG_URL')
   if (!baseUrl && config.apiBaseUrl) {
     baseUrl = config.apiBaseUrl
   }
-  let tokenUrl = getEnvTrim('WXZHONGGENG_TOKEN_URL')
-  const username = getEnvTrim('WXZHONGGENG_USERNAME')
-  const password = getEnvTrim('WXZHONGGENG_PASSWORD')
-  const apiKey = getEnvTrim('WXZHONGGENG_API_KEY')
-  const apiSecret = getEnvTrim('WXZHONGGENG_API_SECRET')
+  let tokenUrl = integration.tokenUrl ? String(integration.tokenUrl).trim() : null
+  if (!tokenUrl) tokenUrl = getEnvTrim('WXZHONGGENG_TOKEN_URL')
+  const fromIntegrationRecord = Boolean(integration.apiEndpoint || integration.authType)
+  const username = integration.username
+    ? String(integration.username).trim()
+    : fromIntegrationRecord
+      ? null
+      : getEnvTrim('WXZHONGGENG_USERNAME')
+  const password = integration.password
+    ? String(integration.password)
+    : fromIntegrationRecord
+      ? null
+      : getEnvTrim('WXZHONGGENG_PASSWORD')
+  const apiKey = integration.apiKey
+    ? String(integration.apiKey).trim()
+    : fromIntegrationRecord
+      ? null
+      : getEnvTrim('WXZHONGGENG_API_KEY')
+  const apiSecret = integration.apiSecret
+    ? String(integration.apiSecret)
+    : fromIntegrationRecord
+      ? null
+      : getEnvTrim('WXZHONGGENG_API_SECRET')
   let tokenValue = null
   let tokenExpireAt = 0
   
@@ -113,11 +203,22 @@ export function createWxzhonggengClient() {
     tokenUrl = makeUrl(baseUrl, endpoint)
   }
 
+  function resolveOutboundAuthMode() {
+    if (apiKey && apiSecret) return 'api_key'
+    if (username && password) return 'username_password'
+    return null
+  }
+
   async function fetchToken() {
     if (!tokenUrl) throw new Error('missing_token_url')
-    const useUserPass = Boolean(username && password)
-    const useKeySecret = Boolean(apiKey && apiSecret)
-    if (!useUserPass && !useKeySecret) throw new Error('missing_credentials')
+    const mode = resolveOutboundAuthMode()
+    const useUserPass = mode === 'username_password'
+    if (!mode) throw new Error('missing_credentials')
+    if (useUserPass) {
+      if (!username || !password) throw new Error('missing_credentials')
+    } else if (!apiKey || !apiSecret) {
+      throw new Error('missing_credentials')
+    }
     const res = await fetch(tokenUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -140,10 +241,9 @@ export function createWxzhonggengClient() {
     if (!token) {
       token = data?.token || data?.accessToken || null
     }
-    const ttl = Number(data?.expiresIn ?? 1800)
     if (!token) throw new Error('token_missing')
     tokenValue = String(token)
-    tokenExpireAt = Date.now() + Math.max(60000, Math.min(86400000, ttl * 1000))
+    tokenExpireAt = parseWxExpireAtMs(data, config)
     return tokenValue
   }
 
@@ -196,6 +296,24 @@ export function createWxzhonggengClient() {
     }
   }
 
+  async function healthCheck() {
+    if (!baseUrl) return false
+    const epConfig = config.endpoints?.healthCheck
+    if (!epConfig?.path) {
+      return ping()
+    }
+    try {
+      const body =
+        epConfig.requestBody && typeof epConfig.requestBody === 'object' && !Array.isArray(epConfig.requestBody)
+          ? epConfig.requestBody
+          : { pageSize: 1, pageIndex: 1 }
+      const res = await request(epConfig.method || 'POST', epConfig.path, { body })
+      return isWxUpstreamHealthResponseOk(res)
+    } catch {
+      return false
+    }
+  }
+
   async function getUsage(iccid, date) {
      const epConfig = config.endpoints?.getUsage
      if (!epConfig) {
@@ -231,8 +349,19 @@ export function createWxzhonggengClient() {
      }
    }
 
+  async function getSimInfo(iccid) {
+    const epConfig = config.endpoints?.getSimInfo
+    if (!epConfig) throw new Error('WXZHONGGENG API "getSimInfo" not configured in wxzhonggeng_config.json')
+    try {
+      return await request(epConfig.method || 'POST', epConfig.path, { body: { iccid } })
+    } catch (err) {
+      console.error(`WXZHONGGENG getSimInfo failed for ${iccid}:`, err.message)
+      throw err
+    }
+  }
+
   async function getSimStatus(iccid) {
-    const epConfig = config.endpoints?.getSimStatus
+    const epConfig = config.endpoints?.getSimStatus ?? config.endpoints?.getSimCardStatus
     if (!epConfig) throw new Error('WXZHONGGENG API "getSimStatus" not configured')
     
     try {
@@ -369,10 +498,57 @@ export function createWxzhonggengClient() {
     }
   }
 
+  async function updateCardStatusBatch(iccids, operation) {
+    const epConfig = config.endpoints?.updateCardStatusBatch
+    if (!epConfig) throw new Error('WXZHONGGENG API "updateCardStatusBatch" not configured in wxzhonggeng_config.json')
+    const list = Array.isArray(iccids) ? iccids.map((v) => String(v)).filter((v) => v.length > 0) : []
+    try {
+      return await request(epConfig.method || 'POST', epConfig.path, {
+        body: { iccids: list, operation: String(operation) },
+      })
+    } catch (err) {
+      console.error('WXZHONGGENG updateCardStatusBatch failed:', err.message)
+      throw err
+    }
+  }
+
+  async function queryPackageInfo() {
+    const epConfig = config.endpoints?.queryPackageInfo ?? config.endpoints?.healthCheck
+    if (!epConfig) throw new Error('WXZHONGGENG API "queryPackageInfo" not configured in wxzhonggeng_config.json')
+    const body =
+      epConfig.requestBody && typeof epConfig.requestBody === 'object' && !Array.isArray(epConfig.requestBody)
+        ? epConfig.requestBody
+        : {}
+    try {
+      return await request(epConfig.method || 'POST', epConfig.path, { body })
+    } catch (err) {
+      console.error('WXZHONGGENG queryPackageInfo failed:', err.message)
+      throw err
+    }
+  }
+
+  async function changePlan({ iccid, productCode, effectTime }) {
+    const epConfig = config.endpoints?.changePlan
+    if (!epConfig) throw new Error('WXZHONGGENG API "changePlan" not configured in wxzhonggeng_config.json')
+    const body = {
+      iccid: String(iccid),
+      productCode: String(productCode),
+      effectTime: effectTime != null ? String(effectTime) : '',
+    }
+    try {
+      return await request(epConfig.method || 'POST', epConfig.path, { body })
+    } catch (err) {
+      console.error(`WXZHONGGENG changePlan failed for ${iccid}:`, err.message)
+      throw err
+    }
+  }
+
   return {
     ping,
+    healthCheck,
     request,
     getUsage,
+    getSimInfo,
     getSimStatus,
     getSimInfoBatch,
     getSimInfoSync,
@@ -382,45 +558,81 @@ export function createWxzhonggengClient() {
     getSimFlowsBatch,
     getUsageByMonth,
     updateCardStatus,
+    updateCardStatusBatch,
+    queryPackageInfo,
+    changePlan,
   }
 }
 
-export function createWxzhonggengAdapter() {
-  const config = loadWxzhonggengConfig()
-  const client = createWxzhonggengClient()
+export function createWxzhonggengAdapter(integration = {}) {
+  const fileConfig = loadWxzhonggengConfig()
+  const config = mergeEndpointConfig(fileConfig, integration)
+  const client = createWxzhonggengClient(integration)
   const capabilities = normalizeCapabilities(config)
 
   async function activateSim({ iccid }) {
-    const operation = resolveOperation(config, 'activate')
+    const operation = resolveOperation(config, 'activate', integration)
     if (!operation) {
       return buildProvisioningResult({ ok: false, status: 'FAILED', message: 'MISSING_OPERATION' })
     }
     const res = await client.updateCardStatus(iccid, operation)
-    return buildProvisioningResult({ ok: true, status: 'COMPLETED', raw: res })
+    const ok = provisioningOkFromResponse(res)
+    return buildProvisioningResult({
+      ok,
+      status: ok ? 'COMPLETED' : 'FAILED',
+      raw: res,
+      message: ok ? null : String(res?.message || res?.code || 'UPSTREAM_FAILED'),
+    })
   }
 
   async function suspendSim({ iccid }) {
-    const operation = resolveOperation(config, 'suspend')
+    const operation = resolveOperation(config, 'suspend', integration)
     if (!operation) {
       return buildProvisioningResult({ ok: false, status: 'FAILED', message: 'MISSING_OPERATION' })
     }
     const res = await client.updateCardStatus(iccid, operation)
-    return buildProvisioningResult({ ok: true, status: 'COMPLETED', raw: res })
+    const ok = provisioningOkFromResponse(res)
+    return buildProvisioningResult({
+      ok,
+      status: ok ? 'COMPLETED' : 'FAILED',
+      raw: res,
+      message: ok ? null : String(res?.message || res?.code || 'UPSTREAM_FAILED'),
+    })
   }
 
-  async function changePlan({ iccid, externalProductId, effectiveAt, idempotencyKey }) {
+  async function resumeSim({ iccid }) {
+    const operation = resolveOperation(config, 'resume', integration) || resolveOperation(config, 'activate', integration)
+    if (!operation) {
+      return buildProvisioningResult({ ok: false, status: 'FAILED', message: 'MISSING_OPERATION' })
+    }
+    const res = await client.updateCardStatus(iccid, operation)
+    const ok = provisioningOkFromResponse(res)
+    return buildProvisioningResult({
+      ok,
+      status: ok ? 'COMPLETED' : 'FAILED',
+      raw: res,
+      message: ok ? null : String(res?.message || res?.code || 'UPSTREAM_FAILED'),
+    })
+  }
+
+  async function changePlan({ iccid, externalProductId, effectiveAt, idempotencyKey: _idempotencyKey }) {
     const epConfig = config.endpoints?.changePlan
     if (!epConfig) {
       return buildProvisioningResult({ ok: false, status: 'FAILED', message: 'NOT_SUPPORTED' })
     }
-    const body = {
+    const effectTime = formatWxEffectTime(effectiveAt)
+    const res = await client.changePlan({
       iccid,
-      externalProductId,
-      idempotencyKey,
-    }
-    if (effectiveAt) body.effectiveAt = new Date(effectiveAt).toISOString()
-    const res = await client.request(epConfig.method || 'POST', epConfig.path, { body })
-    return buildProvisioningResult({ ok: true, status: 'ACCEPTED', raw: res })
+      productCode: externalProductId,
+      effectTime,
+    })
+    const ok = isWxApiSuccess(res)
+    return buildProvisioningResult({
+      ok,
+      status: ok ? 'ACCEPTED' : 'FAILED',
+      raw: res,
+      message: ok ? null : String(res?.message || res?.code || 'UPSTREAM_FAILED'),
+    })
   }
 
   async function getDailyUsage({ iccid, date }) {
@@ -463,9 +675,11 @@ export function createWxzhonggengAdapter() {
   return {
     supplierKey: 'wxzhonggeng',
     capabilities,
+    diagnosticsCapabilities: WXZHONGGENG_DIAGNOSTICS_CAPABILITIES,
     ...client,
     activateSim,
     suspendSim,
+    resumeSim,
     changePlan,
     getDailyUsage,
     fetchCdrFiles,

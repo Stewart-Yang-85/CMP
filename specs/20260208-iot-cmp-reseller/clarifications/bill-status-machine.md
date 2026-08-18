@@ -52,7 +52,8 @@ create type bill_status as enum (
   'PUBLISHED',   -- 已发布
   'PAID',        -- 已支付
   'OVERDUE',     -- 已逾期
-  'WRITTEN_OFF'  -- 已核销
+  'WRITTEN_OFF', -- 已核销
+  'VOIDED'       -- 已作废（可同账期重出，见 bill-void-regenerate.md）
 );
 ```
 
@@ -60,19 +61,24 @@ create type bill_status as enum (
 
 ```
 GENERATED ──publish──► PUBLISHED ──pay──► PAID
-                          │
-                          ├──overdue──► OVERDUE ──pay──► PAID
-                          │                │
-                          │                └──write_off──► WRITTEN_OFF
-                          │
-                          └──(不可逆)
+     │                      │
+     │ void                 ├──overdue──► OVERDUE ──pay──► PAID
+     ▼                      │                │
+  VOIDED                    │                └──write_off──► WRITTEN_OFF
+     ▲                      │
+PUBLISHED/OVERDUE ──void───┘
 ```
+
+**VOIDED** 为终态；作废后同 `(enterprise, period)` 可重新出账（见 [bill-void-regenerate.md](./bill-void-regenerate.md)）。
 
 ### 1.3 允许的转换
 
 | 当前状态 | 动作 | 下一状态 |
 |----------|------|----------|
 | GENERATED | publish | PUBLISHED |
+| GENERATED | void | VOIDED |
+| PUBLISHED | void | VOIDED |
+| OVERDUE | void | VOIDED |
 | PUBLISHED | pay | PAID |
 | PUBLISHED | overdue | OVERDUE |
 | OVERDUE | pay | PAID |
@@ -82,7 +88,7 @@ GENERATED ──publish──► PUBLISHED ──pay──► PAID
 
 - **GENERATED**：可修改（追加 line items）
 - **PUBLISHED**：不可篡改，仅可通过 Adjustment Note 调账
-- **PAID** / **WRITTEN_OFF**：终态，不可再转换
+- **PAID** / **WRITTEN_OFF** / **VOIDED**：终态，不可再转换（**VOIDED** 除外：同账期可新建另一张 bill）
 
 ---
 
@@ -122,12 +128,14 @@ const transitions = {
 | 目标状态 | 更新字段 | 触发事件 |
 |----------|----------|----------|
 | PUBLISHED | `published_at`, `due_date` | `BILL_PUBLISHED` |
-| PAID | `paid_at`, `payment_ref` | `PAYMENT_CONFIRMED` |
-| OVERDUE | `overdue_at` | 无 |
+| PAID | `paid_at`, `paid_amount`, `payment_ref`, `payment_proof`（可选） | `PAYMENT_CONFIRMED` |
+| OVERDUE | `overdue_at` | — |
+| WRITTEN_OFF | `written_off_at`, `write_off_reason` | `BILL_WRITTEN_OFF` |
+| VOIDED | `voided_at`, `void_reason` | `BILL_VOIDED` |
 
 ### 2.5 特殊逻辑
 
-- **PAID + pay**：已是 PAID 时再次执行 pay，视为幂等，直接返回成功
+- **mark-paid 前置**：仅 **PUBLISHED** / **OVERDUE** 可执行 `pay`；**GENERATED**、**PAID**、**WRITTEN_OFF**、**VOIDED** 返回 **409 `INVALID_STATUS`**
 - **非法转换**：返回 `409 INVALID_STATUS`，例如对 GENERATED 执行 pay
 
 ---
@@ -136,11 +144,12 @@ const transitions = {
 
 | 入口 | 动作 | 说明 |
 |------|------|------|
-| `billingGenerate.js` | publish | 出账完成后，若 `autoPublish` 为 true 则自动发布 |
-| `app.js` POST `/bills/:billId:mark-paid` | pay | 人工标记已支付 |
-| `dunning.js` | overdue | Dunning 定时任务检测到 due_date 已过，将 PUBLISHED 转为 OVERDUE |
-
-**write_off** 动作：当前代码中未发现调用入口，需通过其他服务或后续实现。
+| `billingGenerate.js` / Worker | publish | 出账完成后，若 `auto_publish` 为 true 则自动发布 |
+| **POST /v1/bills/{billId}:publish** | publish | 手动发布 **GENERATED** 账单；租户范围同 **GET /bills/{billId}** |
+| **POST /v1/bills/{billId}:mark-paid** | pay | 人工标记已支付；可选 `paymentProof` 记录付款佐证 |
+| `dunning.js` / Cron | overdue | Dunning 定时任务：`due_date <= 今日` 且 **PUBLISHED** |
+| **POST /v1/bills/{billId}:write-off** | write_off | 人工核销逾期坏账；租户范围同 **GET /bills/{billId}** |
+| **POST /v1/bills/{billId}:void** | void | 作废 **GENERATED/PUBLISHED/OVERDUE**，允许同账期重出；需 **`bills.void`** |
 
 ---
 
@@ -153,4 +162,5 @@ const transitions = {
 ## 5. 其它 Clarifications
 
 - [Jobs：`SIM_STATUS_CHANGE` 与上游供应商同步](./jobs-sim-status-change.md)
+- [bill-void-regenerate.md](./bill-void-regenerate.md)
 - [Webhook 向下游投递与失败重试](./webhook-delivery.md)（`BILL_PUBLISHED` 等事件推送）

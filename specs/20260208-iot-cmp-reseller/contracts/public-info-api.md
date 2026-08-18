@@ -8,31 +8,32 @@
 
 ---
 
-## 1. 只读查询（所有已认证非管理员用户 + platform_admin）
+## 1. 只读查询（系统内所有已认证用户）
 
 ```
 GET /v1/public-infos?name={}&mcc={}&mnc={}&page={}&pageSize={}
 ```
 
-**权限**: 任意**已认证**用户（reseller / customer / platform_admin）。匿名请求 **401**。
+**权限**: 任意**已认证**用户（platform / reseller / enterprise / department 等系统角色均可）。匿名请求 **401**。（`reseller` 角色 JWT 中的 `resellerId` 语义见 [tenant-api.md §0 — FR-058](tenant-api.md)。）
 
 **说明**:
 
-- **名称模糊**：`name` 非空时，对 `public_infos.name` 做**不区分大小写**子串匹配（`ilike %name%`）。
-- **MCC/MNC 精确**：`mcc` 与 `mnc` **同时提供**时，按 E.212 **精确等值**过滤（规范化：数字字符串，前导零保留与库内 `char(3)` 一致）。
-- **组合语义**：若同时提供 `name` 与 `mcc`+`mnc`，结果为 **AND**（既匹配名称模糊又匹配 PLMN）。
-- 仅提供 `mcc` 或仅 `mnc`：**400** `INVALID_QUERY`（须成对精确查询或只用名称）。
-- 三者皆空：**400** `QUERY_REQUIRED`（至少提供 `name` 或 `(mcc+mnc)`）。
+- **名称模糊**：`name` 非空时，对 `public_infos.name` 做**不区分大小写**的**子串模糊匹配**（`ilike %name%`），**不做精准等值匹配**。原因：目录行可能按运营商下属具体公司全称入库，精准匹配会漏掉可用结果。
+- **MCC 单查**：仅提供 `mcc` 时，返回该国家（MCC）下全部运营商目录行。
+- **MCC+MNC 精确**：`mcc` 与 `mnc` **同时提供**时，按 E.212 **精确等值**过滤到目标运营商（`mnc` 会规范化为 3 位以匹配库内存储）。
+- **禁止仅 MNC**：仅提供 `mnc` → **400**（各国 MNC 大量重复，无法唯一定位）。
+- **组合语义**：若同时提供 `name` 与 `mcc`（或 `mcc`+`mnc`），结果为 **AND**。
+- 过滤条件皆空：返回全量目录的分页结果。
 
 **Query Parameters**:
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| name | string | 否 | 运营商名称模糊搜索 |
-| mcc | string | 否 | 与 `mnc` 成对，3 位 |
-| mnc | string | 否 | 与 `mcc` 成对，2～3 位 |
-| page | integer | 否 | 默认 1 |
-| pageSize | integer | 否 | 默认 20，最大 100 |
+| name | string | 否 | 运营商名称**模糊**搜索（子串，不区分大小写） |
+| mcc | string | 否 | 单独：该国全部运营商；与 `mnc` 成对：精确 PLMN |
+| mnc | string | 否 | 须与 `mcc` 成对；单独提供 → 400 |
+| page | integer | 否 | 默认 **1** |
+| pageSize | integer | 否 | 默认 **50**，最大 **100** |
 
 **Response 200**:
 
@@ -50,7 +51,7 @@ GET /v1/public-infos?name={}&mcc={}&mnc={}&page={}&pageSize={}
   ],
   "total": 0,
   "page": 1,
-  "pageSize": 20
+  "pageSize": 50
 }
 ```
 
@@ -66,6 +67,8 @@ GET /v1/public-infos?name={}&mcc={}&mnc={}&page={}&pageSize={}
 POST /v1/admin/public-infos
 ```
 
+**权限**: 仅 **platform_admin**；否则 **403**。匿名 **401**。
+
 **Request Body**:
 
 ```json
@@ -73,22 +76,48 @@ POST /v1/admin/public-infos
   "mcc": "460",
   "mnc": "00",
   "name": "string",
-  "countryName": "string (optional)",
+  "country": "string",
   "lteBands": "string (optional)"
 }
 ```
 
-**约束**: `UNIQUE(mcc, mnc)` 冲突 → **409** `DUPLICATE_PLMN`
+**约束**:
+
+- **必填**: `mcc`、`mnc`、`name`、`country`
+- **可选**: `lteBands`（省略时写入 `null`）
+- **MNC 规范化**: 习惯性 2 位 `mnc`（如 `"02"`）在查重与落库前**左侧补 0** 为 3 位（`"002"`），与 `GET /public-infos` 一致
+- **同 PLMN 冲突**: 若已存在相同 `(mcc, 规范化后 mnc)` 记录 → **409** `DUPLICATE_PLMN`（**不覆盖**；更新请用 PATCH）
 
 **Response 201**: 单条对象（同查询项字段 + `createdAt`/`updatedAt` 可选）
 
-### 2.2 更新
+### 2.2 按 publicInfoId 更新
 
 ```
 PATCH /v1/admin/public-infos/{publicInfoId}
 ```
 
-**Request Body**: 可部分更新 `name`、`countryName`、`lteBands`、`mcc`、`mnc`（若改 PLMN 仍须满足唯一约束）
+**权限**: 仅 **platform_admin**。
+
+**Request Body**:
+
+```json
+{
+  "mcc": "460",
+  "mnc": "00",
+  "name": "string",
+  "country": "string",
+  "lteBands": "string (optional)"
+}
+```
+
+**约束**:
+
+- **必填**: `mcc`、`mnc`、`name`、`country`
+- **可选**: `lteBands`（省略 → `null`）
+- **MNC 规范化**: 同 POST，2 位 `mnc` 左侧补 0 至 3 位后再做查重与更新
+- 定位键为路径 `publicInfoId`；同时**始终**检查 `(mcc, 规范化后 mnc)` 是否已被**其他**行占用：
+  - 冲突 → **409** `DUPLICATE_PLMN`（不覆盖另一行）
+  - 本行保持原 `(mcc, mnc)` 或改到空闲 PLMN → **200**
 
 **Response 200**: 更新后对象
 
@@ -98,9 +127,11 @@ PATCH /v1/admin/public-infos/{publicInfoId}
 DELETE /v1/admin/public-infos/{publicInfoId}
 ```
 
-**说明**: 目标数据模型下 **无任何业务表 FK 指向 `public_infos`**（V1.1 已移除历史 `operators.carrier_id` 引用，见 FR-057）。删除成功返回 **204**；若迁移尚未完成、仍存在遗留 FK，应优先通过**数据迁移**解除约束而非长期依赖 **409**。
+**权限**: 仅 **platform_admin**；否则 **403**。匿名 **401**。
 
-**Response 204**
+**说明**: 目标数据模型下 **无任何业务表 FK 指向 `public_infos`**（V1.1 已移除历史 `operators.carrier_id` 引用，见 FR-057）。删除成功返回 **200** `{ "deleted": true }`；若仍存在遗留 FK → **409** `FK_CONFLICT`。
+
+**Response 200**: `{ "deleted": true }`
 
 ---
 

@@ -20,7 +20,8 @@ function main() {
   const hasSvc = present('SUPABASE_SERVICE_ROLE_KEY')
   const hasCmpKey = present('CMP_WEBHOOK_KEY') || hasAdmin
   const hasSimIccid = present('SMOKE_SIM_ICCID')
-  const hasWxKey = present('WXZHONGGENG_WEBHOOK_KEY')
+  const hasWxKey =
+    present('SMOKE_WEBHOOK_KEY') && present('SMOKE_SUPPLIER_ID') && present('SMOKE_OPERATOR_ID')
   const hasDemoSim = present('DEMO_SIM_ICCID')
 
   process.stdout.write('Env status:\n')
@@ -30,7 +31,7 @@ function main() {
   process.stdout.write(`- SUPABASE_SERVICE_ROLE_KEY: ${hasSvc ? 'present' : 'missing'}\n`)
   process.stdout.write(`- CMP_WEBHOOK_KEY (or ADMIN_API_KEY): ${hasCmpKey ? 'present' : 'missing'}\n`)
   process.stdout.write(`- SMOKE_SIM_ICCID: ${hasSimIccid ? 'present' : 'missing'}\n`)
-  process.stdout.write(`- WXZHONGGENG_WEBHOOK_KEY: ${hasWxKey ? 'present' : 'missing'}\n`)
+  process.stdout.write(`- SMOKE_SUPPLIER_ID + SMOKE_OPERATOR_ID + SMOKE_WEBHOOK_KEY: ${hasWxKey ? 'present' : 'missing'}\n`)
   process.stdout.write(`- DEMO_SIM_ICCID: ${hasDemoSim ? 'present' : 'missing'}\n`)
 
   const readyE2eMinimal = hasAuthId && hasAuthSecret && hasAdmin
@@ -45,6 +46,7 @@ function main() {
   process.stdout.write(`- e2e_demo_wx webhooks: ${yes(readyWxWebhook)}\n`)
 
   process.stdout.write('\nHints:\n')
+  process.stdout.write('- FR-058: reseller JWT / curl 路径中的代理商 UUID = RESELLER tenants.tenant_id（tools/gen_token.js --resellerId）\n')
   if (!readyE2eMinimal) {
     process.stdout.write('- Set AUTH_CLIENT_ID, AUTH_CLIENT_SECRET, ADMIN_API_KEY\n')
   }
@@ -55,7 +57,9 @@ function main() {
     process.stdout.write('- Set CMP_WEBHOOK_KEY (or ADMIN_API_KEY) and SMOKE_SIM_ICCID to run CMP webhook\n')
   }
   if (!readyWxWebhook) {
-    process.stdout.write('- Set WXZHONGGENG_WEBHOOK_KEY and SMOKE_SIM_ICCID (or DEMO_SIM_ICCID) to run WX webhooks\n')
+    process.stdout.write(
+      '- Set SMOKE_SUPPLIER_ID, SMOKE_OPERATOR_ID, SMOKE_WEBHOOK_KEY and SMOKE_SIM_ICCID (or DEMO_SIM_ICCID) to run WX webhooks (npm run build first)\n'
+    )
   }
 }
 

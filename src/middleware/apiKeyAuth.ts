@@ -40,22 +40,25 @@ export function apiKeyAuth(options: ApiKeyAuthOptions = {}) {
     const supabase = createSupabaseRestClient({ useServiceRole: true })
     const rows = await supabase.select(
       'customers',
-      `select=customer_id,id,reseller_tenant_id,api_secret_hash,status&api_key=eq.${encodeURIComponent(apiKey)}&limit=1`
+      `select=tenant_id,reseller_tenant_id,api_secret_hash,status&api_key=eq.${encodeURIComponent(apiKey)}&limit=1`
     )
     const row = Array.isArray(rows) ? rows[0] : null
-    if (!row || String(row.status || '').toLowerCase() !== 'active') {
+    const custStatus = row ? String((row as any).status || '').toUpperCase() : ''
+    if (!row || custStatus !== 'ACTIVE') {
       reply.status(401).send({ code: 'UNAUTHORIZED', message: 'Invalid API key.' })
       return
     }
-    if (!verifySecretScrypt(String(apiSecret), String(row.api_secret_hash))) {
+    if (!verifySecretScrypt(String(apiSecret), String((row as any).api_secret_hash))) {
       reply.status(401).send({ code: 'UNAUTHORIZED', message: 'Invalid API secret.' })
       return
     }
-    const customerId = row.customer_id ?? row.id ?? null
+    const enterpriseTenantId = (row as any).tenant_id != null ? String((row as any).tenant_id) : null
+    const resellerTenantId =
+      (row as any).reseller_tenant_id != null ? String((row as any).reseller_tenant_id) : null
     setAuthContext(req, {
       userId: null,
-      resellerId: row.reseller_tenant_id ?? null,
-      customerId: customerId ? String(customerId) : null,
+      resellerId: resellerTenantId,
+      customerId: enterpriseTenantId,
       roleScope: 'customer',
       role: 'customer_m2m',
     })

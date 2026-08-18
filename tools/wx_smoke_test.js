@@ -89,7 +89,7 @@ async function main() {
         const wxSyncSimInfo = await httpJson(`${base}/v1/admin/jobs:wx-sync-sim-info-batch`, {
           method: 'POST',
           headers: buildHeaders({ includeAuth: false, extra: { 'X-API-Key': adminKey, 'Content-Type': 'application/json' } }),
-          body: { pageSize: 50, pageIndex: 1 },
+          body: { pageSize: 100, page: 1 },
         })
         log('wx-sync-sim-info-batch response: ' + JSON.stringify(wxSyncSimInfo))
         assert(typeof wxSyncSimInfo?.jobId === 'string', 'wx sync sim info must return jobId')

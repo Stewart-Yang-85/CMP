@@ -13,14 +13,14 @@ async function main() {
     process.stderr.write('Missing AUTH_ENTERPRISE_ID\n')
     process.exit(1)
   }
-  const pkgs = await c.select('packages', `enterprise_id=eq.${encodeURIComponent(ent)}&select=package_id,name,created_at&order=created_at.desc&limit=10`)
-  const pkgIds = Array.isArray(pkgs) ? pkgs.map((p) => p.package_id) : []
+  const pkgs = await c.select(
+    'packages',
+    `enterprise_id=eq.${encodeURIComponent(ent)}&select=package_id,name,status,created_at&order=created_at.desc&limit=10`
+  )
   process.stdout.write(`packages.count=${Array.isArray(pkgs) ? pkgs.length : 0}\n`)
-  if (pkgIds.length > 0) {
-    const pv = await c.select('package_versions', `package_id=in.(${pkgIds.map((id) => encodeURIComponent(id)).join(',')})&select=package_version_id,package_id,version,status,service_type,created_at&order=created_at.desc`)
-    process.stdout.write(`package_versions.count=${Array.isArray(pv) ? pv.length : 0}\n`)
-  } else {
-    process.stdout.write('package_versions.count=0\n')
+  if (Array.isArray(pkgs) && pkgs.length > 0) {
+    const published = pkgs.filter((p) => String(p.status || '').toUpperCase() === 'PUBLISHED').length
+    process.stdout.write(`packages.published=${published}\n`)
   }
 }
 

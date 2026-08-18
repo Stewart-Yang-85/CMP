@@ -1,0 +1,182 @@
+mcc,mnc,country,network,ratePerMb
+232,*,Austria,A1 Telekom & T-Mobile,0.001
+206,*,Belgium,KPN & Mobistar & Proximus,0.001
+284,*,Bulgaria,COSMO & MobilTel AD & VivaTel,0.001
+219,*,Croatia,Croatian Telecom & Tele2 & VipnetGSM,0.001
+280,*,Cyprus,Vodafone & MTN & Primetel,0.001
+230,*,Czech Republic,O2 & T-Mobile & Vodafone,0.001
+238,*,Denmark,Hi3G & TDC & Telenor & Telia,0.001
+248,*,Estonia,Eesti & Elisa & Tele2,0.001
+244,*,Finland,DNA & Elisa & TeliaSonera,0.001
+208,*,France,Bouygues & Free & Orange & SFR,0.001
+262,*,Germany,Telefonica & DT & Vodafone,0.001
+202,*,Greece,COSMOTE & Vodafone & Wind,0.001
+216,*,Hungary,Pannon & T-Mobile & Vodafone,0.001
+272,*,Ireland,Hutchison & Meeor & O2 & Vodafone,0.001
+222,*,Italy,Iliad & TIM & Vodafone & WIND,0.001
+247,*,Latvia,Bite & Latvian Mob & Tele2,0.001
+246,*,Lithuania,Omnitel & Tele2 & UAB Bite,0.001
+270,*,Luxembourg,P&T Tango & VOXmobile,0.001
+278,*,Malta,Melita & Mobisle & Vodafone,0.001
+204,*,Netherlands,KPN,0.001
+260,*,Poland,Orange & P4 & Polkomtel & Telefonica,0.001
+268,*,Portugal,TMN & Optimus & Vodafone,0.001
+226,*,Romania,Cosmote & Orange & RCS & Vodafone,0.001
+231,*,Slovakia,O2 & Orange & T-Mobile,0.001
+293,*,Slovenia,T-Mobile & A1 & Mobitel & TUSMobile,0.001
+214,*,Spain,Orange & Telefonica & Vodafone & Xfera,0.001
+240,*,Sweden,Hi3G & Tele2 & Telenor & TeliaSonera,0.001
+234,*,United Kingdom,T-Mobile & Hutchison & O2 & Vodafone,0.001
+520,*,Thailand,AIS,0.001
+502,*,Malaysia,Celcom & DiGi & Maxis,0.001
+510,*,Indonesia,Hutchison & PT & XL & Telkomsel,0.001
+452,*,Viet nam,Mobifone & Viettel & VNPT,0.001
+456,*,Cambodia,CamGSM & Metfone Vietel,0.001
+505,*,Australia,Optus & Telstra,0.001
+525,*,Singapore,SingTel & StarHub & Tpg,0.001
+310,*,United States,,0.0014
+311,*,United States,,0.0014
+312,*,United States,,0.0014
+313,*,United States,,0.0014
+314,*,United States,,0.0014
+315,*,United States,,0.0014
+316,*,United States,,0.0014
+302,*,Canada,Bell & Rogers & SaskTel & TELUS,0.0037
+334,*,Mexico,Iusacell & Movistar & Telcel,0.0024
+732,*,Colombia,Movil & Comcel & Telefonica,0.0024
+724,*,Brazil,Claro & VIVO,0.0024
+722,*,Argentina,CTI & Telefonica,0.0024
+716,*,Peru,Claro & Nextel & Telefonica,0.0024
+730,*,Chile,Claro & Entel & Telefonica,0.0024
+515,*,Philippines,Globe,0.0056
+414,*,Myanmar,Posts and Telecom,0.0071
+427,*,Qatar,Vodafone & Q-Tel,0.0075
+426,*,Bahrain,Batelco,0.0063
+420,*,Saudi Arabia,Mobily & Zain,0.0081
+424,*,United Arab Emirates,DU & Etisalat,0.0103
+422,*,Oman,Omantel,0.0088
+416,*,Jordan,JMTS,0.0103
+655,*,South Africa,MTN & 8ta,0.0045
+460,*,China,CM & CU,0.0038
+412,*,Afghanistan,MTN,0.0096
+276,*,Albania,Telekom Albania,0.007
+603,*,Algeria,Optimum & Wataniya,0.0221
+213,*,Andorra,Andorra Telecom,0.007
+631,*,Angola,Unitel,0.9525
+365,*,Anguilla,Cable and Wireless,0.0193
+344,*,Antigua And Barbuda,Cable and Wireless,0.0193
+283,*,Armenia,ArmenTel & VivaCell,0.0123
+363,*,Aruba,Setar,0.0075
+400,*,Azerbaijan,Bakcell,0.021
+364,*,Bahamas,Bahamas Telecom & Be Aliv,0.0284
+342,*,Barbados,Cable and Wireless,0.0193
+257,*,Belarus,FE VELCOM,0.0158
+702,*,Belize,Belize Telemedia,0.021
+616,*,Benin,Spacetel,0.0096
+350,*,Bermuda,Digital,0.0194
+736,*,Bolivia,Telefonica,0.007
+218,*,Bosnia And Herzegovina,BH TELECOM,0.007
+652,*,Botswana,Mascom & Orange,0.0101
+613,*,Burkina Faso,Celtel & Telmob,0.123
+642,*,Burundi,Viettel,0.762
+624,*,Cameroon,Orange & MTN,0.0101
+625,*,Cape Verde,Cabo Verde Telecom & T+,0.0588
+346,*,Cayman Islands,Cable and Wireless,0.0193
+623,*,Central African Republic,Orange,0.0105
+622,*,Chad,Celtel,0.0105
+629,*,Congo Republic,Zain,0.0105
+712,*,Costa Rica,Claro & Azules,0.0073
+630,*,Democratic Republic Of The Congo,Celtel & Orange,0.0105
+366,*,Dominica,Cable adn Wireless,0.0193
+370,*,Dominican Republic,Claro,0.007
+636,*,Ethiopia,ETC,0.021
+740,*,Ecuador,OteCel,0.007
+602,*,Egypt,Orange & Etisalat,0.002
+706,*,El Salvador,CTE & Telefonica,0.007
+288,*,Faroe Islands,Faroese Telecom,0.007
+742,*,French Guiana,DIGICEL,0.0019
+547,*,French Polynesia,Vodafone,0.12
+628,*,Gabon,Zain,0.0105
+607,*,Gambia,Africell & Qcel,0.3885
+282,*,Georgia,Magticom & Mobitel,0.014
+620,*,Ghana,Millicom & Scancom,0.0124
+266,*,Gibraltar,Gibtelecom,0.007
+290,*,Greenland,TeleGreenland,0.063
+352,*,Grenada,Cable and Wireless,0.0193
+340,*,Guadeloupe,Dauphin,0.007
+704,*,Guatemala,Sercom,0.007
+611,*,Guinea,MTN & Orange,0.0101
+632,*,Guinea-Bissau,Orange & Spacetel,0.0101
+738,*,Guyana,GT&T & U-Mobile,0.0139
+372,*,Haiti,Natcom,1.1175
+708,*,Honduras,Celtel & Claro,0.007
+274,*,Iceland,Nova & Siminn & Vodafone,0.0019
+418,*,Iraq,Asiacell & Zain & Korek,0.0105
+425,*,Israel,Orange & Cellcom & HOT & Pelephone,0.007
+612,*,Ivory Coast,MTN,0.0096
+338,*,Jamaica,Cable and Wireless & Digicel,0.0139
+401,*,Kazakhstan,KaR,0.0075
+639,*,Kenya,Airtel & Safaricom,0.0101
+221,*,Kosovo,IPKO,0.0255
+419,*,Kuwait,VIVA & Zain & Wataniya,0.007
+437,*,Kyrgyzstan,SKY Mobile,0.0088
+415,*,Lebanon,MTC,0.7
+651,*,Lesotho,ETL,0.7696
+618,*,Liberia,Cellcom,0.0105
+606,*,Libya,Libyana Mobile,0.2204
+295,*,Liechtenstein,Mobikom & Orange,0.007
+294,*,Macedonia,T-Mobile & VIP-Net,0.0089
+646,*,Madagascar,Zain,0.0105
+650,*,Malawi,Zain,0.0105
+610,*,Mali,Orange,0.168
+609,*,Mauritania,Mauritel,0.7344
+259,*,Moldova,Moldcell & Orange,0.007
+212,*,Monaco,Monaco Telecom,0.0095
+297,*,Montenegro,M-Tel & Telenor & T-Mobile,0.0081
+604,*,Morocco,MORIAM & Wana & Orange,0.0041
+643,*,Mozambique,mCell & Movitel,0.216
+649,*,Namibia,CellOne,0.21
+362,*,Netherlands Antilles,Digicell & UTS Setel,0.0091
+710,*,Nicaragua,Claro & Telefonica,0.007
+614,*,Niger,Zain,0.0105
+621,*,Nigeria,Etisalat & Celtel & Globacom & MTN,0.0038
+242,*,Norway,NetCom & Telenor,0.0016
+410,*,Pakistan,JAZZ & Telenor,0.0089
+425,*,Palestinian Territory,Palestine Telecom,0.0124
+714,*,Panama,CWP & Telefonica,0.0089
+744,*,Paraguay,Claro & Neucleo & TIGO,0.008
+330,*,Puerto Rico,Claro,0.007
+647,*,Reunion,SRR,0.0019
+250,*,Russian Federation,MTS & VimpelCom,0.0054
+635,*,Rwanda,MTN & Tigo,0.0101
+626,*,Sao Tome And Principe,Unitel,0.9364
+608,*,Senegal,Sonatel & Sentel,0.0179
+220,*,Serbia,Telenor,0.007
+633,*,Seychelles,Telecom Seychelles,0.0105
+619,*,Sierra Leone,Africell & Airtel,0.4253
+659,*,South Sudan,MTN & 8ta,0.007
+356,*,St Kitts And Nevis,Cable and Wireless,0.0193
+358,*,St Lucia,Cable and Wireless,0.0193
+360,*,St Vincent And The Grenadines,Cable and Wireless,0.0193
+634,*,Sudan,MTN,0.007
+746,*,Suriname,Digcel & Telesur,0.0078
+653,*,Swaziland,MTN,0.0096
+228,*,Switzerland,Sunrise & Orange,0.0045
+436,*,Tajikistan,Indigo,0.1935
+640,*,Tanzania,Airtel & Mobitel,0.0586
+615,*,Togo,Telecom Togo,0.4449
+374,*,Trinidad And Tobago,Digiccel,0.0084
+605,*,Tunisia,Orange & Orascom & Tunisie Telecom,0.0081
+286,*,Turkey,Avea & Turkcel,0.007
+376,*,Turks And Caicos Islands,Cble and Wireless,0.0193
+234,*,Uk Channel Islands - Guernsey,Guernsey Telecoms,0.0019
+234,*,Uk Channel Islands - Isle Of Man,Manx Telecom,0.0019
+234,*,Uk Channel Islands - Jersey,AirTel & Telecoms,0.0019
+641,*,Uganda,Zain & MTN,0.0101
+255,*,Ukraine,Kyivstar & MTS,0.0058
+748,*,Uruguay,Claro & Telefonica,0.0076
+434,*,Uzbekistan,Unitel,0.0655
+734,*,Venezuela,Digitel & Telcel,0.0378
+348,*,Virgin Islands (British),CCT & LIME,0.0199
+645,*,Zambia,Airtel,0.0105
+648,*,Zimbabwe,Econet & Telecel,0.2995

@@ -1,7 +1,7 @@
 # 安全债务登记簿 (T-NEW-6)
 
 > **状态**: MVP 阶段已知并接受的安全债务，V1.1 前必须全部解决。
-> **最后更新**: 2026-03-11
+> **最后更新**: 2026-04-21
 
 ---
 
@@ -112,7 +112,48 @@ CREATE POLICY sims_tenant_isolation ON sims
 5. **OIDC**: 文档化 OIDC claims 必须使用 tenant_id 语义
 6. **代码清理**: 移除 `resolveResellerIdentity` workaround 函数（`src/app.js`、`src/routes/simPhase4.js`）
 
-**设计决策**: 所有身份标识统一使用 `tenants.tenant_id`，不保留 `resellers.id` 的任何运行时语义。
+**设计决策**: 所有身份标识统一使用 `tenants.tenant_id`。对外契约与鉴权语义以 **`tenant_id`** 为准；**`resellers.id` 仅在有限 HTTP 兼容期**内仍可作为路径/Body 输入，见 **SD-07**。
+
+---
+
+## SD-07: `resellers.id` 路径与 Body 兼容日落（T183）
+
+**严重级**: LOW（过渡期） | **公告日**: 2026-03-30 | **目标移除日**: **2027-03-31**（此后次要版本发布中落实）
+
+**背景（FR-058）**: 路径参数、查询、Body 与 JWT 中的 **`resellerId`** 语义应为 RESELLER **`tenants.tenant_id`**。为降低既有集成破损，实现上仍允许将 **`resellers.id`** 传入部分路由，经 `resolveResellerForEnterpriseScope`（或等价逻辑）解析为同一代理商主体。
+
+**对外公告**（集成方须知）:
+
+1. **应立即采用** `create_reseller`（或 `GET /v1/resellers` 等）返回的 **`tenant_id` / JSON `resellerId`**（与 **`tenants.tenant_id`** 一致），勿依赖 `resellerRecordId`（`resellers.id`）拼 URL。
+2. **自 2027-03-31 起**：在计划内的版本中，**不再保证**在路径或请求体中使用裸 **`resellers.id`** 作为代理商标识；此类请求将按未识别资源处理（如 **404**），请在此之前完成切换。
+3. **例外**：数据库 RPC（如 `create_customer(p_reseller_id)`）若仍定义为 `resellers.id`，以数据库函数签名为准；与 HTTP API 的「代理商公网 id」分离。
+
+**到期后工程动作**（维护者清单）:
+
+- 收窄或删除对路径/Body **`resellers.id`** 的 `or=(id.eq...,tenant_id.eq...)` 式解析；仅接受 **UUID = `tenants.tenant_id`**。
+- 更新 OpenAPI / 契约文案，移除「误传 `resellers.id` 仍可解析」的兼容说明。
+- 回归：`tests/resellerIdentity.test.ts` 等中「path 使用 `resellers.id` 仍可 200」用例改为仅限过渡期或删除。
+
+**参考**: [tenant-api.md §0](contracts/tenant-api.md)、[tasks.md T183](tasks.md)。
+
+---
+
+<a id="sd-08-control-policy-breaking"></a>
+
+## SD-08: Control Policy 请求体破坏性变更（Phase 29）
+
+**严重级**: MEDIUM（集成兼容性） | **公告日**: 2026-04-21 | **生效**: 部署含 **T210** 的应用版本起（写路径立即拒绝旧键）
+
+**背景**: 产品包域 `controlPolicy`（`control_policy_modules.control_policy`、`packages.control_policy`、资费 `payg_rates.meta.controlPolicy`）已统一为 [clarifications/control-policy-module.md](clarifications/control-policy-module.md)（T205）嵌套结构，**不再**使用扁平废弃键。
+
+**对外公告**（集成方迁移清单）:
+
+1. **禁止** 在请求 JSON 根级再发送 **`cutoffPolicyId`**、**`throttlingPolicyId`**、**`cutoffThresholdMb`**；此类请求返回 **400**。
+2. **应改用**：**`enabled`**（boolean，必填）；可选 **`cutoff`**（`timeWindow`: `DAILY` \| `MONTHLY`，`thresholdMb`，`action`）；可选 **`throttling`**（`timeWindow`，非空 **`tiers[]`**：`thresholdMb`，`downlinkKbps`，`uplinkKbps`）。
+3. **存量行**（库内仍为旧 JSON）：读响应可能仍含旧键直至迁移或重保存；**发布**前须符合 T205（见 [runbook-phase29-control-policy-legacy.md](runbook-phase29-control-policy-legacy.md)、[T209](tasks.md#phase-29-control-policy)）。
+4. **OpenAPI / 生成客户端**：以 `iot-cmp-api.yaml` / `packages/openapi/*` 中 **`ControlPolicy`** schema 为准；若使用旧生成物，请 **T199** 再生。
+
+**参考**: [tasks.md — Phase 29](tasks.md#phase-29-control-policy)、[plan.md — 变更交付顺序 / 路线图](plan.md#t184-gate)、[pricing-api.md §5](contracts/pricing-api.md)。
 
 ---
 
@@ -126,3 +167,5 @@ CREATE POLICY sims_tenant_isolation ON sims
 | SD-04 | eSIM 未实现 | LOW | 501 guard | 独立 spec + 实现 |
 | SD-05 | 租户双层断裂 | HIGH | **已修复** | N/A |
 | SD-06 | Reseller 身份双标识 | HIGH | **V1.1 已修复** | N/A |
+| SD-07 | `resellers.id` HTTP 输入兼容 | LOW | 过渡期接受 | **2027-03-31** 起仅 `tenant_id` |
+| SD-08 | Control Policy JSON 请求体换型 | MEDIUM | N/A | T205 + T210；见公告与 runbook |

@@ -4,8 +4,11 @@
  * Usage:
  *   node tools/gen_token.js --scope platform
  *   node tools/gen_token.js --scope customer --enterpriseId <uuid>
- *   node tools/gen_token.js --scope reseller --resellerId <uuid>
+ *   node tools/gen_token.js --scope reseller --resellerId <RESELLER tenants.tenant_id>
+ *   node tools/gen_token.js --scope reseller --resellerId <uuid> --userId <users.id uuid>
  *   node tools/gen_token.js --scope department --enterpriseId <uuid> --departmentId <uuid>
+ *
+ * FR-058: --resellerId 须为 create_reseller / tenants 表中 RESELLER 的 tenant_id（非 resellers.id）。
  */
 import 'dotenv/config'
 import crypto from 'node:crypto'
@@ -53,12 +56,14 @@ const payload = {
 const enterpriseId = getArg('enterpriseId')
 const resellerId = getArg('resellerId')
 const departmentId = getArg('departmentId')
+const userId = getArg('userId')
 const customerId = enterpriseId
 
 if (enterpriseId) payload.enterpriseId = enterpriseId
 if (customerId) payload.customerId = customerId
 if (resellerId) payload.resellerId = resellerId
 if (departmentId) payload.departmentId = departmentId
+if (userId) payload.userId = userId
 
 const token = signJwtHs256(payload, secret)
 

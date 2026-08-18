@@ -17,6 +17,7 @@ BEGIN;
 INSERT INTO permissions (code, name, description, category) VALUES
   ('bills.list', 'List Bills', 'View bill list with pagination and filters', 'bills'),
   ('bills.read', 'Read Bill', 'View bill details and line items', 'bills'),
+  ('bills.line_items.read', 'Read Bill Line Items', 'View SIM-level bill line items (L3) and CSV export', 'bills'),
   ('bills.export', 'Export Bills', 'Download bill files (PDF/CSV)', 'bills'),
   ('bills.mark_paid', 'Mark Bill Paid', 'Transition bill status to PAID', 'bills'),
   ('bills.adjust', 'Adjust Bill', 'Create adjustment notes (credit/debit)', 'bills'),
@@ -36,6 +37,8 @@ INSERT INTO permissions (code, name, description, category) VALUES
   ('sims.retire', 'Retire SIM', 'Change SIM status to RETIRED (terminal)', 'sims'),
   ('sims.batch_status_change', 'Batch SIM Status Change', 'Bulk status change operations', 'sims'),
   ('sims.batch_deactivate', 'Batch Deactivate SIMs', 'Bulk deactivation', 'sims'),
+  ('sims.assign_inventory', 'Assign Inventory SIMs', 'Assign reseller pool SIMs to child enterprise', 'sims'),
+  ('sims.assign_department', 'Assign SIMs to Department', 'Assign enterprise SIMs to a child department via CSV', 'sims'),
   ('sims.reset_connection', 'Reset SIM Connection', 'Trigger connection reset via upstream', 'sims'),
   ('sims.connectivity.read', 'Read SIM Connectivity', 'View connectivity diagnostics', 'sims'),
   ('sims.location.read', 'Read SIM Location', 'View current SIM location', 'sims'),
@@ -106,10 +109,10 @@ ON CONFLICT (code) DO NOTHING;
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r, permissions p
 WHERE r.code = 'reseller_admin' AND p.code IN (
-  'bills.list', 'bills.read', 'bills.export', 'bills.mark_paid', 'bills.adjust', 'bills.write_off',
+  'bills.list', 'bills.read', 'bills.line_items.read', 'bills.export', 'bills.mark_paid', 'bills.adjust', 'bills.write_off',
   'sims.list', 'sims.read', 'sims.create', 'sims.import', 'sims.export',
   'sims.activate', 'sims.deactivate', 'sims.reactivate', 'sims.retire',
-  'sims.batch_status_change', 'sims.batch_deactivate', 'sims.reset_connection',
+  'sims.batch_status_change', 'sims.batch_deactivate', 'sims.assign_inventory', 'sims.assign_department', 'sims.reset_connection',
   'sims.connectivity.read', 'sims.location.read', 'sims.location.history',
   'subscriptions.list', 'subscriptions.read', 'subscriptions.create', 'subscriptions.switch', 'subscriptions.cancel',
   'catalog.packages.list', 'catalog.packages.export', 'catalog.package_versions.list', 'price_plans.read',
@@ -167,8 +170,8 @@ INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r, permissions p
 WHERE r.code = 'customer_admin' AND p.code IN (
   'bills.list', 'bills.read', 'bills.export', 'bills.mark_paid', 'bills.adjust',
-  'sims.list', 'sims.read', 'sims.export',
-  'sims.activate', 'sims.deactivate', 'sims.reactivate',
+  'sims.list', 'sims.read', 'sims.export', 'sims.assign_department',
+  'sims.activate', 'sims.deactivate', 'sims.reactivate', 'sims.retire',
   'sims.batch_status_change', 'sims.reset_connection',
   'sims.connectivity.read', 'sims.location.read', 'sims.location.history',
   'subscriptions.list', 'subscriptions.read', 'subscriptions.create', 'subscriptions.switch', 'subscriptions.cancel',

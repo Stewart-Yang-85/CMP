@@ -1,6 +1,7 @@
 import { createSupabaseRestClient } from '../supabaseRest.js'
 import { computeMonthlyCharges } from '../billing.js'
 import { cleanUsageRecords } from './usageCleaning.js'
+import { refreshPastMonthsAfterDailyWrite } from './usageMonthlyRollup.js'
 
 function normalizeVisitedMccMnc(value) {
   const raw = String(value || '').trim()
@@ -28,6 +29,7 @@ export async function handleLateCdr({
   const supabase = supabaseClient || createSupabaseRestClient({ useServiceRole: true, traceId: traceId ?? null })
   const cleaned = await cleanUsageRecords({ records, source, batchId, traceId, supabaseClient: supabase })
   const lateGroups = new Map()
+  const touchedUsageDays = []
 
   for (const record of cleaned.kept) {
     const enterpriseId = record?.enterpriseId ?? record?.enterprise_id
@@ -92,10 +94,18 @@ export async function handleLateCdr({
       }, { returning: 'minimal' })
     }
 
+    touchedUsageDays.push(usageDay)
+
     const periodStart = String(bill.period_start)
     const billPeriod = periodStart.slice(0, 7)
     const key = `${enterpriseId}:${billPeriod}`
     lateGroups.set(key, { enterpriseId, bill, billPeriod })
+  }
+
+  try {
+    await refreshPastMonthsAfterDailyWrite(supabase, touchedUsageDays)
+  } catch (err) {
+    console.error('[late-cdr] monthly rollup refresh failed:', err)
   }
 
   const results = []

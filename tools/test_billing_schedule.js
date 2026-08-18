@@ -7,8 +7,8 @@
  *
  * Usage:
  *   node tools/test_billing_schedule.js --enterpriseId <uuid>              # 企业 billing_config（或与企业同查代理商）
- *   node tools/test_billing_schedule.js --resellerId <代理商 tenants.tenant_id>  # 仅代理商 billing_config → source 应为 RESELLER
- *   node tools/test_billing_schedule.js --enterpriseId <uuid> --resellerId <uuid>  # 企业优先；企业无行时用代理商
+ *   node tools/test_billing_schedule.js --resellerId <RESELLER tenants.tenant_id>  # 仅代理商 billing_config → source 应为 RESELLER
+ *   node tools/test_billing_schedule.js --enterpriseId <uuid> --resellerId <RESELLER tenants.tenant_id>  # 企业优先；企业无行时用代理商
  *
  * 说明：billing_config.enterprise_id 存的是 tenants.tenant_id；代理商配置行里 enterprise_id 填代理商自己的 tenant_id。
  */

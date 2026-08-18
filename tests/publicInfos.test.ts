@@ -180,11 +180,73 @@ describe('publicInfos service', () => {
           { public_info_id: randomUUID(), name: 'AT&T', country: 'US', mcc: '310', mnc: '410', lte_bands: 'B2,B4' },
         ],
       })
-      const result = await listPublicInfos({ supabase, name: null, mcc: null, mnc: null, page: 1, pageSize: 20 })
+      const result = await listPublicInfos({ supabase, name: null, mcc: null, mnc: null, page: 1, pageSize: 50 })
       expect(result.ok).toBe(true)
       expect(result.value.items.length).toBe(2)
       expect(result.value.total).toBe(2)
       expect(result.value.page).toBe(1)
+      expect(result.value.pageSize).toBe(50)
+    })
+
+    it('defaults page=1 and pageSize=50, and caps pageSize at 100', async () => {
+      const rows = Array.from({ length: 120 }, (_, i) => ({
+        public_info_id: randomUUID(),
+        name: `Carrier ${String(i).padStart(3, '0')}`,
+        country: 'XX',
+        mcc: '999',
+        mnc: String(i).padStart(3, '0'),
+      }))
+      const supabase = createFakeSupabase({ public_infos: rows })
+      const defaults = await listPublicInfos({
+        supabase,
+        name: null,
+        mcc: null,
+        mnc: null,
+        page: null,
+        pageSize: null,
+      })
+      expect(defaults.ok).toBe(true)
+      expect(defaults.value.page).toBe(1)
+      expect(defaults.value.pageSize).toBe(50)
+      expect(defaults.value.items.length).toBe(50)
+
+      const capped = await listPublicInfos({
+        supabase,
+        name: null,
+        mcc: null,
+        mnc: null,
+        page: 1,
+        pageSize: 500,
+      })
+      expect(capped.ok).toBe(true)
+      expect(capped.value.pageSize).toBe(100)
+      expect(capped.value.items.length).toBe(100)
+    })
+
+    it('filters by name with fuzzy substring (ilike), not exact match', async () => {
+      const supabase = createFakeSupabase({
+        public_infos: [
+          {
+            public_info_id: randomUUID(),
+            name: 'China Mobile Communications Group Co., Ltd.',
+            country: 'CN',
+            mcc: '460',
+            mnc: '000',
+          },
+          { public_info_id: randomUUID(), name: 'AT&T', country: 'US', mcc: '310', mnc: '410' },
+        ],
+      })
+      const result = await listPublicInfos({
+        supabase,
+        name: 'china mobile',
+        mcc: null,
+        mnc: null,
+        page: 1,
+        pageSize: 50,
+      })
+      expect(result.ok).toBe(true)
+      expect(result.value.items.length).toBe(1)
+      expect(result.value.items[0].name).toContain('China Mobile')
     })
 
     it('filters by name (ilike)', async () => {
@@ -194,13 +256,27 @@ describe('publicInfos service', () => {
           { public_info_id: randomUUID(), name: 'AT&T', country: 'US', mcc: '310', mnc: '410' },
         ],
       })
-      const result = await listPublicInfos({ supabase, name: 'china', mcc: null, mnc: null, page: 1, pageSize: 20 })
+      const result = await listPublicInfos({ supabase, name: 'china', mcc: null, mnc: null, page: 1, pageSize: 50 })
       expect(result.ok).toBe(true)
       expect(result.value.items.length).toBe(1)
       expect(result.value.items[0].name).toBe('China Mobile')
     })
 
-    it('filters by mcc+mnc pair', async () => {
+    it('filters by mcc alone (all carriers in that country)', async () => {
+      const supabase = createFakeSupabase({
+        public_infos: [
+          { public_info_id: randomUUID(), name: 'China Mobile', country: 'CN', mcc: '460', mnc: '000' },
+          { public_info_id: randomUUID(), name: 'China Unicom', country: 'CN', mcc: '460', mnc: '001' },
+          { public_info_id: randomUUID(), name: 'AT&T', country: 'US', mcc: '310', mnc: '410' },
+        ],
+      })
+      const result = await listPublicInfos({ supabase, name: null, mcc: '460', mnc: null, page: 1, pageSize: 50 })
+      expect(result.ok).toBe(true)
+      expect(result.value.items.length).toBe(2)
+      expect(result.value.items.every((i) => i.mcc === '460')).toBe(true)
+    })
+
+    it('filters by mcc+mnc pair (exact carrier)', async () => {
       const supabase = createFakeSupabase({
         public_infos: [
           { public_info_id: randomUUID(), name: 'China Mobile', country: 'CN', mcc: '460', mnc: '000' },
@@ -213,19 +289,12 @@ describe('publicInfos service', () => {
       expect(result.value.items[0].mcc).toBe('460')
     })
 
-    it('returns 400 if only mcc provided without mnc', async () => {
-      const supabase = createFakeSupabase({})
-      const result = await listPublicInfos({ supabase, name: null, mcc: '460', mnc: null, page: 1, pageSize: 20 })
-      expect(result.ok).toBe(false)
-      expect(result.status).toBe(400)
-      expect(result.code).toBe('BAD_REQUEST')
-    })
-
     it('returns 400 if only mnc provided without mcc', async () => {
       const supabase = createFakeSupabase({})
       const result = await listPublicInfos({ supabase, name: null, mcc: null, mnc: '000', page: 1, pageSize: 20 })
       expect(result.ok).toBe(false)
       expect(result.status).toBe(400)
+      expect(result.message).toMatch(/mnc/i)
     })
   })
 
@@ -238,6 +307,7 @@ describe('publicInfos service', () => {
       })
       expect(result.ok).toBe(true)
       expect(result.value.name).toBe('Vodafone')
+      expect(result.value.country).toBe('DE')
       expect(result.value.mcc).toBe('262')
       expect(result.value.mnc).toBe('002')  // normalized to 3-digit
       expect(result.value.lteBands).toBe('B1,B3,B7')
@@ -247,40 +317,84 @@ describe('publicInfos service', () => {
       const supabase = createFakeSupabase({ public_infos: [] })
       const result = await createPublicInfo({
         supabase,
-        payload: { mcc: '262', mnc: '02' },
+        payload: { country: 'DE', mcc: '262', mnc: '02' },
       })
       expect(result.ok).toBe(false)
       expect(result.status).toBe(400)
+    })
+
+    it('returns 400 if country is missing', async () => {
+      const supabase = createFakeSupabase({ public_infos: [] })
+      const result = await createPublicInfo({
+        supabase,
+        payload: { name: 'Vodafone', mcc: '262', mnc: '02' },
+      })
+      expect(result.ok).toBe(false)
+      expect(result.status).toBe(400)
+      expect(result.message).toMatch(/country/i)
     })
 
     it('returns 400 if mcc is invalid', async () => {
       const supabase = createFakeSupabase({ public_infos: [] })
       const result = await createPublicInfo({
         supabase,
-        payload: { name: 'Test', mcc: '26', mnc: '02' },
+        payload: { name: 'Test', country: 'XX', mcc: '26', mnc: '02' },
       })
       expect(result.ok).toBe(false)
       expect(result.status).toBe(400)
     })
 
-    it('returns 409 DUPLICATE_PLMN if mcc+mnc already exists', async () => {
+    it('normalizes 2-digit mnc to 3 digits on create and detects duplicate', async () => {
       const supabase = createFakeSupabase({
         public_infos: [
-          { public_info_id: randomUUID(), name: 'Existing', mcc: '262', mnc: '002' },
+          { public_info_id: randomUUID(), name: 'Existing', country: 'HK', mcc: '454', mnc: '002' },
+        ],
+      })
+      const dup = await createPublicInfo({
+        supabase,
+        payload: { name: 'New', country: 'Hong Kong', mcc: '454', mnc: '02' },
+      })
+      expect(dup.ok).toBe(false)
+      expect(dup.status).toBe(409)
+      expect(dup.code).toBe('DUPLICATE_PLMN')
+      expect(dup.message).toMatch(/mnc=002/)
+
+      const created = await createPublicInfo({
+        supabase,
+        payload: { name: 'CSL', country: 'Hong Kong', mcc: '454', mnc: '03' },
+      })
+      expect(created.ok).toBe(true)
+      expect(created.value.mnc).toBe('003')
+    })
+
+    it('returns 409 DUPLICATE_PLMN when mcc+mnc already exists (does not overwrite)', async () => {
+      const id = randomUUID()
+      const supabase = createFakeSupabase({
+        public_infos: [
+          {
+            public_info_id: id,
+            name: 'Existing',
+            country: 'XX',
+            mcc: '262',
+            mnc: '002',
+            lte_bands: 'B1',
+            created_at: '2020-01-01T00:00:00.000Z',
+          },
         ],
       })
       const result = await createPublicInfo({
         supabase,
-        payload: { name: 'Vodafone', country: 'DE', mcc: '262', mnc: '02' },
+        payload: { name: 'Vodafone', country: 'DE', mcc: '262', mnc: '02', lteBands: 'B1,B3,B7' },
       })
       expect(result.ok).toBe(false)
       expect(result.status).toBe(409)
       expect(result.code).toBe('DUPLICATE_PLMN')
+      expect(supabase.getTable('public_infos')[0].name).toBe('Existing')
     })
   })
 
   describe('updatePublicInfo', () => {
-    it('updates an existing entry', async () => {
+    it('updates an existing entry with required fields', async () => {
       const id = randomUUID()
       const supabase = createFakeSupabase({
         public_infos: [
@@ -290,10 +404,11 @@ describe('publicInfos service', () => {
       const result = await updatePublicInfo({
         supabase,
         publicInfoId: id,
-        payload: { name: 'Vodafone DE', lteBands: 'B1,B20' },
+        payload: { name: 'Vodafone DE', country: 'DE', mcc: '262', mnc: '02', lteBands: 'B1,B20' },
       })
       expect(result.ok).toBe(true)
       expect(result.value.name).toBe('Vodafone DE')
+      expect(result.value.lteBands).toBe('B1,B20')
     })
 
     it('returns 404 if entry does not exist', async () => {
@@ -301,23 +416,23 @@ describe('publicInfos service', () => {
       const result = await updatePublicInfo({
         supabase,
         publicInfoId: randomUUID(),
-        payload: { name: 'Test' },
+        payload: { name: 'Test', country: 'XX', mcc: '001', mnc: '01' },
       })
       expect(result.ok).toBe(false)
       expect(result.status).toBe(404)
     })
 
-    it('returns 400 if no fields provided', async () => {
+    it('returns 400 if required fields are missing', async () => {
       const id = randomUUID()
       const supabase = createFakeSupabase({
         public_infos: [
-          { public_info_id: id, name: 'Vodafone', mcc: '262', mnc: '002' },
+          { public_info_id: id, name: 'Vodafone', country: 'DE', mcc: '262', mnc: '002' },
         ],
       })
       const result = await updatePublicInfo({
         supabase,
         publicInfoId: id,
-        payload: {},
+        payload: { name: 'Only name' },
       })
       expect(result.ok).toBe(false)
       expect(result.status).toBe(400)
@@ -328,29 +443,74 @@ describe('publicInfos service', () => {
       const result = await updatePublicInfo({
         supabase,
         publicInfoId: 'not-a-uuid',
-        payload: { name: 'Test' },
+        payload: { name: 'Test', country: 'XX', mcc: '001', mnc: '01' },
       })
       expect(result.ok).toBe(false)
       expect(result.status).toBe(400)
     })
 
-    it('returns 409 DUPLICATE_PLMN when changing mcc+mnc to existing pair', async () => {
+    it('returns 409 DUPLICATE_PLMN when mcc+mnc belongs to another row', async () => {
       const id1 = randomUUID()
       const id2 = randomUUID()
       const supabase = createFakeSupabase({
         public_infos: [
-          { public_info_id: id1, name: 'Vodafone', mcc: '262', mnc: '002' },
-          { public_info_id: id2, name: 'T-Mobile', mcc: '262', mnc: '001' },
+          { public_info_id: id1, name: 'Vodafone', country: 'DE', mcc: '262', mnc: '002' },
+          { public_info_id: id2, name: 'T-Mobile', country: 'DE', mcc: '262', mnc: '001' },
         ],
       })
       const result = await updatePublicInfo({
         supabase,
         publicInfoId: id2,
-        payload: { mcc: '262', mnc: '002' },
+        payload: { name: 'T-Mobile', country: 'DE', mcc: '262', mnc: '002' },
       })
       expect(result.ok).toBe(false)
       expect(result.status).toBe(409)
       expect(result.code).toBe('DUPLICATE_PLMN')
+    })
+
+    it('normalizes 2-digit mnc on PATCH and detects duplicate against other rows', async () => {
+      const id1 = randomUUID()
+      const id2 = randomUUID()
+      const supabase = createFakeSupabase({
+        public_infos: [
+          { public_info_id: id1, name: 'A', country: 'HK', mcc: '454', mnc: '002' },
+          { public_info_id: id2, name: 'B', country: 'HK', mcc: '454', mnc: '003' },
+        ],
+      })
+      const conflict = await updatePublicInfo({
+        supabase,
+        publicInfoId: id2,
+        payload: { name: 'B', country: 'HK', mcc: '454', mnc: '02' },
+      })
+      expect(conflict.ok).toBe(false)
+      expect(conflict.status).toBe(409)
+      expect(conflict.code).toBe('DUPLICATE_PLMN')
+
+      const ok = await updatePublicInfo({
+        supabase,
+        publicInfoId: id2,
+        payload: { name: 'B updated', country: 'Hong Kong', mcc: '454', mnc: '03' },
+      })
+      expect(ok.ok).toBe(true)
+      expect(ok.value.mnc).toBe('003')
+      expect(ok.value.name).toBe('B updated')
+    })
+
+    it('allows keeping the same mcc+mnc on the same publicInfoId', async () => {
+      const id = randomUUID()
+      const supabase = createFakeSupabase({
+        public_infos: [
+          { public_info_id: id, name: 'Vodafone', country: 'DE', mcc: '262', mnc: '002' },
+        ],
+      })
+      const result = await updatePublicInfo({
+        supabase,
+        publicInfoId: id,
+        payload: { name: 'Vodafone GmbH', country: 'Germany', mcc: '262', mnc: '002' },
+      })
+      expect(result.ok).toBe(true)
+      expect(result.value.name).toBe('Vodafone GmbH')
+      expect(result.value.country).toBe('Germany')
     })
   })
 

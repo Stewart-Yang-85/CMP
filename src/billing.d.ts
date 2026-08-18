@@ -3,7 +3,13 @@ export const BILLING_PRECISION: number
 export function roundAmount(value: number): number
 
 export function computeMonthlyCharges(
-  input: { enterpriseId?: string | null; billPeriod: string; calculationId?: string | null },
+  input: {
+    enterpriseId?: string | null
+    billPeriod: string
+    calculationId?: string | null
+    /** Console log tag; usage-rating-rollup passes `Rating`, billing keeps default `Billing`. */
+    logPrefix?: string | null
+  },
   supabase?: any
 ): Promise<{
   calculationId: string
@@ -12,6 +18,10 @@ export function computeMonthlyCharges(
   ratingResults: any[]
   currency: string
 }>
+
+export function updateUsageDailySummaryClassifiedUsage(supabase: any, ratingResults: any[]): Promise<void>
+
+export function updateUsagePackageDailySummary(supabase: any, ratingResults: any[]): Promise<void>
 
 export function generateMonthlyBill(
   job: { payload?: { enterpriseId?: string; billPeriod?: string; calculationId?: string }; job_id?: string },

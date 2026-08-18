@@ -113,6 +113,25 @@ describe('Phase 23: RBAC Database-Driven Permissions', () => {
     expect(opsBlock).not.toContain("'bills.list'")
   })
 
+  it('Phase 30 T225 migration seeds catalog.covered_network_profiles.* permissions', async () => {
+    const fs = await import('node:fs/promises')
+    const content = await fs.readFile(
+      'supabase/migrations/20260422100008_rbac_covered_network_profiles.sql',
+      'utf-8'
+    )
+    for (const code of [
+      'catalog.covered_network_profiles.list',
+      'catalog.covered_network_profiles.read',
+      'catalog.covered_network_profiles.write',
+      'catalog.covered_network_profiles.publish',
+      'catalog.covered_network_profiles.deprecate',
+    ]) {
+      expect(content).toContain(`'${code}'`)
+    }
+    expect(content).toContain("r.code = 'reseller_admin'")
+    expect(content).toContain("r.code = 'reseller_sales'")
+  })
+
   it('rbac.ts getEffectivePermissions falls back to defaults when DB is empty', async () => {
     // Verify the fallback logic exists in rbac.ts
     const fs = await import('node:fs/promises')
@@ -127,5 +146,7 @@ describe('Phase 23: RBAC Database-Driven Permissions', () => {
     // The flow: JWT permissions → DB → hardcoded
     expect(rbacContent).toContain('if (current.length) return current')
     expect(rbacContent).toContain('if (rolePermissions !== null && rolePermissions.length > 0) return rolePermissions')
+    expect(rbacContent).toContain('checkPermissions')
+    expect(rbacContent).toContain('catalog.covered_network_profiles.list')
   })
 })

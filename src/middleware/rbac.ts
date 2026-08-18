@@ -23,6 +23,7 @@ const rolePermissionCacheTtlMs = Number(process.env.RBAC_ROLE_CACHE_TTL_MS || '3
 const basePermissions = [
   'bills.list',
   'bills.read',
+  'bills.line_items.read',
   'bills.export',
   'bills.mark_paid',
   'bills.adjust',
@@ -42,10 +43,9 @@ const basePermissions = [
   'jobs.read',
   'catalog.packages.list',
   'catalog.packages.export',
-  'catalog.package_versions.list',
   'price_plans.read',
-  'share.read',
-  'share.create',
+  'reports.usage',
+  'reports.billing',
 ]
 
 const defaultPermissionsByRoleScope: Record<string, string[]> = {
@@ -62,9 +62,7 @@ const defaultPermissionsByRoleScope: Record<string, string[]> = {
     'jobs.read',
     'catalog.packages.list',
     'catalog.packages.export',
-    'catalog.package_versions.list',
     'price_plans.read',
-    'share.read',
   ],
   reseller: [
     'bills.list',
@@ -84,6 +82,8 @@ const defaultPermissionsByRoleScope: Record<string, string[]> = {
     'sims.reactivate',
     'sims.retire',
     'sims.batch_deactivate',
+    'sims.assign_inventory',
+    'sims.assign_department',
     'sims.batch_status_change',
     'subscriptions.list',
     'subscriptions.read',
@@ -93,10 +93,14 @@ const defaultPermissionsByRoleScope: Record<string, string[]> = {
     'jobs.read',
     'catalog.packages.list',
     'catalog.packages.export',
-    'catalog.package_versions.list',
     'price_plans.read',
-    'share.read',
-    'share.create',
+    'catalog.covered_network_profiles.list',
+    'catalog.covered_network_profiles.read',
+    'catalog.covered_network_profiles.write',
+    'catalog.covered_network_profiles.publish',
+    'catalog.covered_network_profiles.deprecate',
+    'reports.usage',
+    'reports.billing',
   ],
 }
 
@@ -185,6 +189,11 @@ async function hasRequiredPermissions(auth: AuthContext, required: string[]) {
   if (!required.length) return true
   const set = new Set(await getEffectivePermissions(auth))
   return required.every((p) => set.has(String(p)))
+}
+
+/** True if the auth context has every listed permission code (JWT, DB role, or scope defaults). */
+export async function checkPermissions(auth: AuthContext, required: string[]): Promise<boolean> {
+  return hasRequiredPermissions(auth, required)
 }
 
 export function rbac(requiredPermissions: string[] = [], options: RbacOptions = {}) {

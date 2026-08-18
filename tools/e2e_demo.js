@@ -1,3 +1,7 @@
+/**
+ * 本地 HTTP 演示（JWT / admin / webhook）。不涉及显式 reseller 路径时无需配置代理商 id。
+ * 若扩展为调用 `/v1/resellers/{tenantId}/…`，`tenantId` 须为 RESELLER `tenants.tenant_id`（FR-058）。
+ */
 import 'dotenv/config'
 import { createApp } from '../src/app.js'
 

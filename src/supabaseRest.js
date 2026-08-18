@@ -14,6 +14,23 @@ function parseContentRangeTotal(contentRange) {
   return Number(m[1])
 }
 
+/** PostgREST PGRST103: offset beyond row count — treat as empty page, not an error. */
+function isRangeNotSatisfiable(status, text) {
+  if (status !== 416) return false
+  const body = parseSupabaseError(text)
+  if (body?.code === 'PGRST103') return true
+  const msg = String(body?.message ?? text ?? '')
+  return msg.includes('Requested range not satisfiable')
+}
+
+function parseRangeNotSatisfiableTotal(text) {
+  const body = parseSupabaseError(text)
+  const details = String(body?.details ?? '')
+  const m = details.match(/only (\d+) rows?\.?$/i) || details.match(/only (\d+) rows?/i)
+  if (m) return Number(m[1])
+  return null
+}
+
 function isMissingColumnError(body) {
   const text = String(body ?? '')
   return (
@@ -95,6 +112,17 @@ function mapSupabaseError(status, text) {
     return makeClientError(404, 'RESOURCE_NOT_FOUND', message, body)
   }
   return null
+}
+
+function shouldLogSupabaseUpstreamError(status, text, { suppressMissingColumns = false } = {}) {
+  if (suppressMissingColumns && isMissingColumnError(text)) return false
+  const mapped = mapSupabaseError(status, text)
+  // Mapped ClientErrors (invalid uuid, duplicate, FK not found, …) are expected 4xx
+  // branches — do not spam the terminal as "upstream error".
+  if (mapped?.name === 'ClientError') {
+    return false
+  }
+  return true
 }
 
 export function createSupabaseRestClient({ useServiceRole = false, traceId = null } = {}) {
@@ -193,7 +221,7 @@ export function createSupabaseRestClient({ useServiceRole = false, traceId = nul
       const { res, text } = await request('GET', url, { headers })
 
       if (!res.ok) {
-        if (!(suppressMissingColumns && isMissingColumnError(text))) {
+        if (shouldLogSupabaseUpstreamError(res.status, text, { suppressMissingColumns })) {
           console.error(`Supabase upstream error: ${res.status} ${url} ${text}`)
         }
         const mapped = mapSupabaseError(res.status, text)
@@ -213,7 +241,14 @@ export function createSupabaseRestClient({ useServiceRole = false, traceId = nul
       })
 
       if (!res.ok) {
-        console.error(`Supabase upstream error: ${res.status} ${url} ${text}`)
+        if (isRangeNotSatisfiable(res.status, text)) {
+          const total =
+            parseContentRangeTotal(res.headers.get('content-range')) ?? parseRangeNotSatisfiableTotal(text)
+          return { data: [], total }
+        }
+        if (shouldLogSupabaseUpstreamError(res.status, text)) {
+          console.error(`Supabase upstream error: ${res.status} ${url} ${text}`)
+        }
         const mapped = mapSupabaseError(res.status, text)
         if (mapped) {
           throw mapped
@@ -237,7 +272,7 @@ export function createSupabaseRestClient({ useServiceRole = false, traceId = nul
       })
 
       if (!res.ok) {
-        if (!(suppressMissingColumns && isMissingColumnError(text))) {
+        if (shouldLogSupabaseUpstreamError(res.status, text, { suppressMissingColumns })) {
           console.error(`Supabase upstream error: ${res.status} ${url} ${text}`)
         }
         const mapped = mapSupabaseError(res.status, text)
@@ -261,7 +296,7 @@ export function createSupabaseRestClient({ useServiceRole = false, traceId = nul
       })
 
       if (!res.ok) {
-        if (!(suppressMissingColumns && isMissingColumnError(text))) {
+        if (shouldLogSupabaseUpstreamError(res.status, text, { suppressMissingColumns })) {
           console.error(`Supabase upstream error: ${res.status} ${url} ${text}`)
         }
         const mapped = mapSupabaseError(res.status, text)

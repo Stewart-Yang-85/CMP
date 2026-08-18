@@ -40,9 +40,12 @@ JWT_SECRET=your-jwt-secret-at-least-32-chars
 PORT=3000
 NODE_ENV=development
 
-# Vendor (wxzhonggeng)
-WX_API_BASE=https://api.wxzhonggeng.com
-WX_API_KEY=your-vendor-api-key
+# Vendor (wxzhonggeng) — legacy; prefer DB upstream_integrations (Phase 37)
+# WX_API_BASE=https://api.wxzhonggeng.com
+# WX_API_KEY=your-vendor-api-key
+
+# Phase 37: encrypt upstream_integrations.api_secret / webhook_key at rest
+INTEGRATION_SECRET_KEY=your-integration-master-key-at-least-32-chars
 ```
 
 ### 1.4 启动数据库
@@ -127,7 +130,20 @@ node tools/e2e_demo.js
 node tools/e2e_demo_wx.js
 ```
 
-### 3.4 Golden Test Cases
+### 3.4 curl 与代理商 ID（FR-058）
+
+手工请求里路径/查询中的 `resellerId`、以及 `tools/gen_token.js --resellerId` 的参数，一律使用 **RESELLER 的 `tenants.tenant_id`**（`create_reseller` RPC 返回 JSON 的 `tenant_id`），**不要**使用 `resellers.id`（返回体中的 `reseller_id` 仅用于 DB RPC 如 `create_customer`）。
+
+示例：
+
+```bash
+# 自前面 seed / create_reseller 得到 TENANT_ID 后：
+node tools/gen_token.js --scope reseller --resellerId "$TENANT_ID"
+curl -sS "http://localhost:3000/v1/resellers/$TENANT_ID/suppliers" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+### 3.5 Golden Test Cases
 
 ```bash
 # 计费黄金用例验证
@@ -168,7 +184,7 @@ import { signToken, verifyToken } from './jwt.ts';
 
 const token = signToken({
   userId,
-  resellerId,   // 或 customerId，取决于用户归属
+  resellerId,   // reseller 时：RESELLER tenants.tenant_id（FR-058）；非 resellers.id
   roleScope,    // 'platform' | 'reseller' | 'customer'
   role
 });
@@ -207,7 +223,7 @@ await vendor.getDailyUsage({ iccid, date });
 - **Authentication**: POST /v1/auth/login, /v1/auth/refresh
 - **SIMs**: GET/POST /v1/sims, GET /v1/sims/{simId}, PATCH /v1/sims/{simId}
 - **Subscriptions**: GET/POST /v1/subscriptions, GET /v1/sims/{simId}/subscriptions
-- **Diagnostics**: GET /v1/sims/{simId}/connectivity-status, POST /v1/sims/{simId}:reset-connection
+- **Diagnostics**: GET /v1/sims/{simId}/connectivity-status, GET /v1/sims/{simId}/visited-network, POST /v1/sims/{simId}:cancel-location
 - **Billing**: GET /v1/bills, GET /v1/bills/{billId}, GET /v1/bills/{billId}/files
 - **Packages**: GET /v1/packages, GET /v1/packages/{packageId}
 - **Jobs**: GET /v1/jobs/{jobId}
@@ -218,7 +234,7 @@ await vendor.getDailyUsage({ iccid, date });
 | 端点 | 方法 | 说明 | 关联 US |
 |------|------|------|---------|
 | `/v1/resellers` | POST/GET | 代理商管理 | US1 |
-| `/v1/resellers/{id}/users` | POST | 代理商用户 | US1 |
+| `/v1/resellers/{resellerId}/users` | POST | 代理商用户（路径 `resellerId` = `tenants.tenant_id`，FR-058） | US1 |
 | `/v1/enterprises/{id}:change-status` | POST | 企业状态变更 | US1 |
 | `/v1/enterprises/{id}/departments` | POST/GET | 部门管理 | US1 |
 | `/v1/sims/import-jobs` | POST | SIM 批量导入 | US2 |
@@ -235,14 +251,54 @@ await vendor.getDailyUsage({ iccid, date });
 | `/v1/billing:generate` | POST | 手动出账 | US6 |
 | `/v1/bills/{id}:mark-paid` | POST | 人工核销 | US6 |
 | `/v1/bills/{id}:adjust` | POST | 调账 | US6 |
-| `/v1/enterprises/{id}/dunning` | GET | Dunning 状态 | US7 |
-| `/v1/enterprises/{id}/dunning:resolve` | POST | 信控解除 | US7 |
+| `/v1/enterprises/{id}/overdue-summary` | GET | 企业欠费汇总 | US7 |
 | `/v1/reconciliation:run` | POST | 触发对账 | US8 |
 | `/v1/alerts` | GET | 告警列表 | US9 |
 | `/v1/webhook-subscriptions` | POST/GET | Webhook 管理 | US11 |
 | `/v1/events` | GET | 事件查询 | US11 |
+| `/v1/upstream-integrations` | GET/POST/PATCH/DELETE | 上游集成配置（Platform Admin，Phase 37/38） | US8 |
+| `/v1/upstream-webhook-events` | GET | 入站 Webhook 事件目录（Phase 38，可选 `?adapterType=`） | US8 |
+| `/v1/suppliers/{supplierId}/operators/{operatorId}/webhooks/{adapterType}/{eventKey}` | POST | 供应商入站 Webhook（订阅启用 + **webhook_key**；V1.1 `adapterType=wxzhonggeng`） | US11 |
 | `/v1/public-infos` | GET | 3GPP 公开运营商目录模糊/精确查询（V1.1，见 `contracts/public-info-api.md`） | US1 |
 | `/v1/admin/public-infos` | POST/PATCH/DELETE | 同上目录，仅 platform_admin 写入（V1.1） | US1 |
+
+---
+
+## 5.1 上游集成（Phase 37 + 38）
+
+1. 应用迁移（`npx supabase db push`）：
+   - `supabase/migrations/20260523100001_upstream_integrations_v11.sql`（集成表）
+   - `supabase/migrations/20260619100001_upstream_inbound_webhook_catalog.sql`（事件目录 + 订阅表）
+2. 在 `.env` 设置 **`INTEGRATION_SECRET_KEY`**（≥32 字符，仅用于加密库内 secret，不是上游 API 密钥）。
+3. 以 **platform_admin** JWT 调用 **`GET /v1/upstream-webhook-events?adapterType=wxzhonggeng`** 查看可订阅的 **`event_key`** 列表。
+4. **`POST /v1/upstream-integrations`** 创建集成（**默认无任何已启用订阅**）：
+
+```json
+{
+  "supplierId": "<suppliers.supplier_id>",
+  "operatorId": "<business_operators.operator_id 或 operators.operator_id>",
+  "adapterType": "wxzhonggeng",
+  "apiEndpoint": "https://upstream.example.com",
+  "apiKey": "...",
+  "apiSecret": "...",
+  "webhookKey": "..."
+}
+```
+
+5. **`PATCH /v1/upstream-integrations/{integrationId}`** 逐条启用入站事件（未启用则上游回调 **403** `WEBHOOK_EVENT_NOT_SUBSCRIBED`）：
+
+```json
+{
+  "subscriptions": [
+    { "eventKey": "update-location", "enabled": true },
+    { "eventKey": "traffic-alert", "enabled": true }
+  ]
+}
+```
+
+6. **`GET /v1/upstream-integrations/{integrationId}`** 响应中的 **`webhookEndpoints`** 含完整 URL 与 Header **`webhookKey`** 说明；将对应 URL 配置到上游（每条 URL 共用同一 **`webhookKey`**）。
+7. Worker / 订阅开通 / SIM 状态 Job 按 **`(supplierId, operatorId)`** 从 DB 加载适配器（**MUST NOT** 依赖 **`WXZHONGGENG_*`** env 业务凭证）。
+8. 入站 URL 模板：`POST /v1/suppliers/{supplierId}/operators/{operatorId}/webhooks/wxzhonggeng/{eventKey}`（见 [integration-api.md](./contracts/integration-api.md) §0.5）。
 
 ---
 

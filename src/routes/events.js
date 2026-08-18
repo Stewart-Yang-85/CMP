@@ -157,6 +157,6 @@ export function registerEventRoutes({ app, prefix, deps }) {
       jobId: row.job_id ?? null,
       payload: row.payload ?? {},
     }))
-    res.json({ items, total: total ?? items.length })
+    res.send({ items, total: total ?? items.length })
   })
 }

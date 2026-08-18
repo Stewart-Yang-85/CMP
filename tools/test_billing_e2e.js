@@ -15,22 +15,31 @@ async function main() {
     const suppliers = await supabase.insert('suppliers', { name: `E2E_Supplier_${runId}` })
     const supplierId = suppliers[0].supplier_id
     
-    const carriers = await supabase.insert('carriers', { mcc: '999', mnc: randomMnc, name: `E2E_Carrier_${runId}` })
-    const carrierId = carriers[0].carrier_id
-    const bizRows = await supabase.select(
+    const mnc3 = String(randomMnc).padStart(3, '0').slice(-3)
+    let bizRows = await supabase.select(
       'business_operators',
-      `select=operator_id&mcc=eq.999&mnc=eq.${encodeURIComponent(randomMnc)}&limit=1`
+      `select=operator_id&mcc=eq.999&mnc=eq.${encodeURIComponent(mnc3)}&limit=1`
     )
     if (!Array.isArray(bizRows) || bizRows.length === 0) {
-      await supabase.insert('business_operators', { mcc: '999', mnc: randomMnc, name: `E2E_Carrier_${runId}` })
+      await supabase.insert('business_operators', { mcc: '999', mnc: mnc3, name: `E2E_Carrier_${runId}` })
+      bizRows = await supabase.select(
+        'business_operators',
+        `select=operator_id&mcc=eq.999&mnc=eq.${encodeURIComponent(mnc3)}&limit=1`
+      )
     }
+    const businessOperatorId = Array.isArray(bizRows) && bizRows[0]?.operator_id ? bizRows[0].operator_id : null
+    if (!businessOperatorId) throw new Error('business_operator_id missing')
     const existingOperators = await supabase.select(
       'operators',
-      `select=operator_id&supplier_id=eq.${encodeURIComponent(supplierId)}&carrier_id=eq.${encodeURIComponent(carrierId)}&limit=1`
+      `select=operator_id&supplier_id=eq.${encodeURIComponent(supplierId)}&business_operator_id=eq.${encodeURIComponent(businessOperatorId)}&limit=1`
     )
     const operatorRow = Array.isArray(existingOperators) && existingOperators.length > 0
       ? existingOperators[0]
-      : (await supabase.insert('operators', { supplier_id: supplierId, carrier_id: carrierId, name: `E2E_Carrier_${runId}` }))[0]
+      : (await supabase.insert('operators', {
+          supplier_id: supplierId,
+          business_operator_id: businessOperatorId,
+          name: `E2E_Carrier_${runId}`,
+        }))[0]
     const operatorId = operatorRow.operator_id
     
     // 2. Create Tenant (Enterprise)
@@ -41,71 +50,59 @@ async function main() {
     })
     const enterpriseId = tenants[0].tenant_id
 
-    // 3. Create Price Plan & Version
+    // 3. Price plan (single-table snapshot)
     const plans = await supabase.insert('price_plans', {
-        enterprise_id: enterpriseId,
-        name: 'E2E_Plan',
-        type: 'FIXED_BUNDLE',
-        currency: 'USD'
+      enterprise_id: enterpriseId,
+      name: 'E2E_Plan',
+      type: 'FIXED_BUNDLE',
+      service_type: 'DATA',
+      currency: 'USD',
+      billing_cycle_type: 'CALENDAR_MONTH',
+      first_cycle_proration: 'NONE',
+      version: 1,
+      monthly_fee: 10.0,
+      payg_rates: {
+        zones: {
+          ZONE_E2E: {
+            ratePerMb: 10.24,
+            mccmnc: ['424-02'],
+          },
+        },
+      },
+      is_current: true,
     })
     const planId = plans[0].price_plan_id
 
-    const ppvs = await supabase.insert('price_plan_versions', {
-        price_plan_id: planId,
-        version: 1,
-        monthly_fee: 10.00,
-        payg_rates: {
-            zones: {
-                "ZONE_E2E": {
-                    ratePerMb: 10.24,
-                    mccmnc: ["424-02"] // Test roaming network
-                }
-            }
-        }
+    // 4. Sellable package row (public.packages)
+    const pkgvs = await supabase.insert('packages', {
+      enterprise_id: enterpriseId,
+      name: `E2E_Package_${runId}`,
+      status: 'PUBLISHED',
+      effective_from: new Date().toISOString(),
+      published_at: new Date().toISOString(),
+      price_plan_id: planId,
     })
-    const ppvId = ppvs[0].price_plan_version_id
-
-    // 4. Create Package & Version
-    const pkgs = await supabase.insert('packages', {
-        enterprise_id: enterpriseId,
-        name: `E2E_Package_${runId}`
-    })
-    const pkgId = pkgs[0].package_id
-
-    const pkgvs = await supabase.insert('package_versions', {
-        package_id: pkgId,
-        version: 1,
-        supplier_id: supplierId,
-        carrier_id: carrierId,
-        operator_id: operatorId,
-        price_plan_id: planId,
-        roaming_profile: {
-            type: 'MCCMNC_ALLOWLIST',
-            mccmnc: [`999-${randomMnc}`] // Home network only, so 424-02 will be roaming/PAYG
-        }
-    })
-    const pkgvId = pkgvs[0].package_version_id
+    const sellablePackageId = pkgvs[0].package_id
 
     // 5. Create SIM
     const iccid = `89999${Date.now()}`.slice(0, 20)
     const sims = await supabase.insert('sims', {
-        iccid: iccid,
-        primary_imsi: `99999${Date.now()}`.slice(0, 15),
-        supplier_id: supplierId,
-        carrier_id: carrierId,
-        operator_id: operatorId,
-        enterprise_id: enterpriseId,
-        status: 'ACTIVATED'
+      iccid: iccid,
+      primary_imsi: `99999${Date.now()}`.slice(0, 15),
+      supplier_id: supplierId,
+      operator_id: operatorId,
+      enterprise_id: enterpriseId,
+      status: 'ACTIVATED',
     })
     const simId = sims[0].sim_id
 
     // 6. Create Subscription
     await supabase.insert('subscriptions', {
-        enterprise_id: enterpriseId,
-        sim_id: simId,
-        package_version_id: pkgvId,
-        subscription_kind: 'MAIN',
-        effective_at: new Date().toISOString()
+      enterprise_id: enterpriseId,
+      sim_id: simId,
+      package_id: sellablePackageId,
+      subscription_kind: 'MAIN',
+      effective_at: new Date().toISOString(),
     })
 
     // 7. Insert Usage

@@ -76,6 +76,9 @@ export type SupplierCapabilities = {
   supportedOperations: readonly SpiOperation[]
 }
 
+export type { DiagnosticsCapabilities, DiagnosticsCapabilityMode, DiagnosticsOperation } from './diagnosticsCapabilities.js'
+import type { DiagnosticsCapabilities } from './diagnosticsCapabilities.js'
+
 export interface CapabilityNegotiationSPI {
   getCapabilities(): SupplierCapabilities
   supportsOperation(operation: SpiOperation): boolean
@@ -87,4 +90,8 @@ export type SupplierAdapter = ProvisioningSPI &
   CapabilityNegotiationSPI & {
     capabilities: SupplierCapabilities
     supplierKey: string
+    diagnosticsCapabilities?: DiagnosticsCapabilities
+    getSimCardStatus?: (iccid: string) => Promise<unknown>
+    getSimStatus?: (iccid: string) => Promise<unknown>
+    cancelLocation?: (iccid: string) => Promise<unknown>
   }

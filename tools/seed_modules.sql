@@ -1,6 +1,8 @@
 -- ============================================================
 -- Seed: Control Policy / Carrier Service / Commercial Terms 模块
 -- 用于测试 Package 创建流程
+-- Control Policy JSON：T205（cutoff / throttling），非旧 cutoffRules / throttlingRules
+-- Phase 30 T227（CoveredNetworkProfile + 双 FIXED_BUNDLE 共用 covered）：见 tools/seed_covered_network_profile_chain.sql
 -- ============================================================
 
 DO $$
@@ -29,35 +31,41 @@ BEGIN
   -- 1. Control Policy 模块
   -- ============================================================
 
-  -- CP-1: 达量断网策略（月 2048MB 断网）
-  INSERT INTO control_policy_modules (control_policy)
-  VALUES ('{
-    "enabled": true,
-    "cutoffRules": [
-      {
+  -- CP-1: 达量断网策略（月 2048MB 断网）— T205 形状：cutoff / throttling（非 cutoffRules / throttlingRules）
+  INSERT INTO control_policy_modules (name, control_policy, status, published_at, effective_from)
+  VALUES (
+    'Seed CP monthly cutoff 2GB',
+    '{
+      "enabled": true,
+      "cutoff": {
         "timeWindow": "MONTHLY",
         "thresholdMb": 2048,
         "action": "DEACTIVATED"
       }
-    ],
-    "throttlingRules": []
-  }'::jsonb)
+    }'::jsonb,
+    'PUBLISHED',
+    current_timestamp,
+    current_timestamp
+  )
   RETURNING control_policy_id INTO v_cp_id_1;
 
-  -- CP-2: 达量限速策略（日 500MB 限速至 128kbps）
-  INSERT INTO control_policy_modules (control_policy)
-  VALUES ('{
-    "enabled": true,
-    "cutoffRules": [],
-    "throttlingRules": [
-      {
+  -- CP-2: 达量限速策略（日 500MB 起限速至 128kbps）
+  INSERT INTO control_policy_modules (name, control_policy, status, published_at, effective_from)
+  VALUES (
+    'Seed CP daily throttle 500MB tier',
+    '{
+      "enabled": true,
+      "throttling": {
         "timeWindow": "DAILY",
         "tiers": [
           { "thresholdMb": 500, "downlinkKbps": 128, "uplinkKbps": 64 }
         ]
       }
-    ]
-  }'::jsonb)
+    }'::jsonb,
+    'PUBLISHED',
+    current_timestamp,
+    current_timestamp
+  )
   RETURNING control_policy_id INTO v_cp_id_2;
 
   RAISE NOTICE 'Control Policy 1 (cutoff 2GB/月): %', v_cp_id_1;
@@ -68,44 +76,36 @@ BEGIN
   -- ============================================================
 
   -- CS-1: 4G Data 服务
-  INSERT INTO carrier_service_modules (supplier_id, operator_id, carrier_service_config)
+  INSERT INTO carrier_service_modules (
+    name, supplier_id, operator_id, apn_profile_id, roaming_profile_id, rat, status, published_at, effective_from
+  )
   VALUES (
+    'Seed CS 4G Data',
     v_supplier_id,
     v_operator_id,
-    jsonb_build_object(
-      'supplierId', v_supplier_id,
-      'operatorId', v_operator_id,
-      'rat', '4G',
-      'serviceType', 'DATA',
-      'apn', 'iot.test',
-      'roamingProfile', jsonb_build_object(
-        'entries', jsonb_build_array(
-          jsonb_build_object('mcc', '460', 'mnc', '*', 'ratePerMb', 0.05),
-          jsonb_build_object('mcc', '234', 'mnc', '*', 'ratePerMb', 0.20),
-          jsonb_build_object('mcc', '208', 'mnc', '01', 'ratePerMb', 0.15)
-        )
-      )
-    )
+    NULL,
+    NULL,
+    '4G',
+    'PUBLISHED',
+    current_timestamp,
+    current_timestamp
   )
   RETURNING carrier_service_id INTO v_cs_id_1;
 
   -- CS-2: NB-IoT Data 服务
-  INSERT INTO carrier_service_modules (supplier_id, operator_id, carrier_service_config)
+  INSERT INTO carrier_service_modules (
+    name, supplier_id, operator_id, apn_profile_id, roaming_profile_id, rat, status, published_at, effective_from
+  )
   VALUES (
+    'Seed CS NB-IoT Data',
     v_supplier_id,
     v_operator_id,
-    jsonb_build_object(
-      'supplierId', v_supplier_id,
-      'operatorId', v_operator_id,
-      'rat', 'NB-IoT',
-      'serviceType', 'DATA',
-      'apn', 'nbiot.test',
-      'roamingProfile', jsonb_build_object(
-        'entries', jsonb_build_array(
-          jsonb_build_object('mcc', '460', 'mnc', '*', 'ratePerMb', 0.02)
-        )
-      )
-    )
+    NULL,
+    NULL,
+    'NB-IOT',
+    'PUBLISHED',
+    current_timestamp,
+    current_timestamp
   )
   RETURNING carrier_service_id INTO v_cs_id_2;
 
@@ -117,25 +117,37 @@ BEGIN
   -- ============================================================
 
   -- CT-1: 7天测试期，100MB 测试配额
-  INSERT INTO commercial_terms_modules (commercial_terms)
-  VALUES ('{
+  INSERT INTO commercial_terms_modules (name, commercial_terms, status, published_at, effective_from)
+  VALUES (
+    'Seed CT 7d trial 100MB',
+    '{
     "testPeriodDays": 7,
     "testQuotaMb": 100,
     "testExpiryCondition": "PERIOD_OR_QUOTA",
     "testExpiryAction": "ACTIVATED",
     "commitmentPeriodMonths": 12
-  }'::jsonb)
+  }'::jsonb,
+    'PUBLISHED',
+    current_timestamp,
+    current_timestamp
+  )
   RETURNING commercial_terms_id INTO v_ct_id_1;
 
   -- CT-2: 无测试期，24个月承诺期
-  INSERT INTO commercial_terms_modules (commercial_terms)
-  VALUES ('{
+  INSERT INTO commercial_terms_modules (name, commercial_terms, status, published_at, effective_from)
+  VALUES (
+    'Seed CT no trial 24mo',
+    '{
     "testPeriodDays": 0,
     "testQuotaMb": 0,
     "testExpiryCondition": "PERIOD_ONLY",
     "testExpiryAction": "ACTIVATED",
     "commitmentPeriodMonths": 24
-  }'::jsonb)
+  }'::jsonb,
+    'PUBLISHED',
+    current_timestamp,
+    current_timestamp
+  )
   RETURNING commercial_terms_id INTO v_ct_id_2;
 
   RAISE NOTICE 'Commercial Terms 1 (7天测试+12月承诺): %', v_ct_id_1;

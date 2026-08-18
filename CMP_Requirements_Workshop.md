@@ -570,9 +570,9 @@ SIM 卡清单用于运营与企业自助查询，需支持大规模分页检索�
   - 上游查询超时/限流需返回可重试提示并记录失败原因
 - 相关 API 接口规范：
   - `GET /v1/sims/{simId}/connectivity-status`
-  - `POST /v1/sims/{simId}:reset-connection`
-  - `GET /v1/sims/{simId}/location`（当前国家/运营商网络）
-  - `GET /v1/sims/{simId}/location-history`（历史位置）
+  - `POST /v1/sims/{simId}:cancel-location`
+  - `GET /v1/sims/{simId}/visited-network`（当前拜访地网络）
+  - `GET /v1/sims/{simId}/visited-network-records`（拜访地网络附着记录）
 
 #### 2.4.7 账单与支付管理
 

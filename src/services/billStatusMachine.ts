@@ -31,6 +31,8 @@ const transitions: Record<string, Record<string, string>> = {
   },
 }
 
+const MARK_PAID_ALLOWED_STATUSES = new Set(['PUBLISHED', 'OVERDUE'])
+
 export function getNextBillStatus(currentStatus: unknown, action: unknown) {
   const current = String(currentStatus || '').toUpperCase()
   const next = transitions[current]?.[normalizeAction(action)]
@@ -46,6 +48,9 @@ export async function transitionBillStatus({
   paymentRef,
   paidAt,
   dueDate,
+  paymentProof,
+  paidAmount,
+  writeOffReason,
 }: {
   supabase: SupabaseClient
   billId: string
@@ -55,6 +60,9 @@ export async function transitionBillStatus({
   paymentRef?: string | null
   paidAt?: string | null
   dueDate?: string | null
+  paymentProof?: string | null
+  paidAmount?: number | null
+  writeOffReason?: string | null
 }): Promise<ServiceResult<Record<string, any>>> {
   if (!billId) {
     return toError(400, 'BAD_REQUEST', 'billId is required.')
@@ -68,8 +76,9 @@ export async function transitionBillStatus({
     return toError(404, 'RESOURCE_NOT_FOUND', 'Bill not found.')
   }
   const normalizedAction = normalizeAction(action)
-  if (String(bill.status || '').toUpperCase() === 'PAID' && normalizedAction === 'pay') {
-    return { ok: true, value: bill }
+  const currentStatus = String(bill.status || '').toUpperCase()
+  if (normalizedAction === 'pay' && !MARK_PAID_ALLOWED_STATUSES.has(currentStatus)) {
+    return toError(409, 'INVALID_STATUS', `Cannot mark bill paid in status ${bill.status}.`)
   }
   const nextStatus = getNextBillStatus(bill.status, action)
   if (!nextStatus) {
@@ -88,9 +97,21 @@ export async function transitionBillStatus({
   if (nextStatus === 'PAID') {
     patch.paid_at = paidAt ?? nowIso
     if (paymentRef) patch.payment_ref = String(paymentRef)
+    if (paymentProof != null && String(paymentProof).trim() !== '') {
+      patch.payment_proof = String(paymentProof).trim()
+    }
+    if (paidAmount != null && Number.isFinite(Number(paidAmount))) {
+      patch.paid_amount = Number(Number(paidAmount).toFixed(2))
+    }
   }
   if (nextStatus === 'OVERDUE') {
     patch.overdue_at = nowIso
+  }
+  if (nextStatus === 'WRITTEN_OFF') {
+    patch.written_off_at = nowIso
+    if (writeOffReason != null && String(writeOffReason).trim() !== '') {
+      patch.write_off_reason = String(writeOffReason).trim()
+    }
   }
   const updatedRows = await supabase.update(
     'bills',
@@ -105,7 +126,7 @@ export async function transitionBillStatus({
   if (nextStatus === 'PUBLISHED') {
     await emitEvent({
       eventType: 'BILL_PUBLISHED',
-      tenantId: updated.enterprise_id ?? null,
+      enterpriseId: updated.enterprise_id ?? null,
       actorUserId: actorUserId ?? null,
       requestId: requestId ?? null,
       payload: {
@@ -120,15 +141,31 @@ export async function transitionBillStatus({
   if (nextStatus === 'PAID') {
     await emitEvent({
       eventType: 'PAYMENT_CONFIRMED',
-      tenantId: updated.enterprise_id ?? null,
+      enterpriseId: updated.enterprise_id ?? null,
       actorUserId: actorUserId ?? null,
       requestId: requestId ?? null,
       payload: {
         billId: updated.bill_id,
         customerId: updated.enterprise_id,
-        paidAmount: Number(updated.total_amount ?? 0),
+        paidAmount: Number(updated.paid_amount ?? paidAmount ?? 0),
         paidAt: updated.paid_at ?? paidAt ?? nowIso,
         paymentRef: paymentRef ?? null,
+        paymentProof: paymentProof ?? updated.payment_proof ?? null,
+      },
+    })
+  }
+  if (nextStatus === 'WRITTEN_OFF') {
+    await emitEvent({
+      eventType: 'BILL_WRITTEN_OFF',
+      enterpriseId: updated.enterprise_id ?? null,
+      actorUserId: actorUserId ?? null,
+      requestId: requestId ?? null,
+      payload: {
+        billId: updated.bill_id,
+        customerId: updated.enterprise_id,
+        totalAmount: Number(updated.total_amount ?? 0),
+        writtenOffAt: updated.written_off_at ?? nowIso,
+        reason: updated.write_off_reason ?? writeOffReason ?? null,
       },
     })
   }

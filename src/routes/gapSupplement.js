@@ -27,17 +27,7 @@ export function registerGapRoutes({ app, prefix, deps }) {
     isValidUuid,
   } = deps
 
-  // =========================================================================
-  // T160: GET /v1/bills/:billId/files?format=pdf|csv
-  // The existing /bills/:billId/files endpoint already handles the base case.
-  // This adds the ?format= query param support by intercepting before the
-  // existing handler if format is specified.
-  // =========================================================================
-
-  // Note: T160 format support is handled inline in mountBillsRoutes via
-  // modification of the existing handler, not here (see app.js edit).
-
-  // =========================================================================
+  // Bill file download (T160) removed — use GET /bills/:billId:csv and /line-items:csv (see billing-api.md §1.4).
   // T162: POST /v1/upstream-integrations + GET /v1/upstream-integrations
   // Platform admin only
   // =========================================================================
@@ -90,7 +80,7 @@ export function registerGapRoutes({ app, prefix, deps }) {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }))
-    res.json({ items, total: typeof total === 'number' ? total : items.length, page: p, pageSize: ps })
+    res.send({ items, total: typeof total === 'number' ? total : items.length, page: p, pageSize: ps })
   })
 
   app.post(`${prefix}/upstream-integrations`, async (req, res) => {
@@ -135,7 +125,7 @@ export function registerGapRoutes({ app, prefix, deps }) {
     if (!row) {
       return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create upstream integration.')
     }
-    res.status(201).json({
+    res.code().send({
       integrationId: row.integration_id,
       supplierId: row.supplier_id,
       operatorId: row.operator_id ?? null,
@@ -203,7 +193,7 @@ export function registerGapRoutes({ app, prefix, deps }) {
 
     const totalOpen = statusCounts.find((s) => s.status === 'OPEN')?.count ?? 0
 
-    res.json({
+    res.send({
       totalOpen,
       byStatus: statusCounts,
       bySeverity: severityCounts,
@@ -239,11 +229,11 @@ export function registerGapRoutes({ app, prefix, deps }) {
       })
     )
 
-    res.json({ days, trends: trendData })
+    res.send({ days, trends: trendData })
   })
 
   // =========================================================================
-  // T165: GET /v1/sims/:simId/location + location-history — return 501
+  // T165: GET /v1/sims/:simId/visited-network + visited-network-records — return 501
   // These already exist in mountSimsRoutes. The task says "return 501 (depends
   // on upstream)" — but the existing endpoints already have real implementations.
   // We do NOT override them. This task is satisfied by the existing code.

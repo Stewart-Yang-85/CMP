@@ -324,14 +324,8 @@ function getRoleScope(req) {
   return v ? String(v) : null
 }
 
-function isBillCsvDownloadWithToken(req) {
-  const path = String(req.originalUrl || req.url || req.path || '').split('?')[0]
-  return /\/bills\/[^/]+\/files\/csv$/.test(path) && req.query?.downloadToken
-}
-
 function requireRoleScopes(scopes) {
   return function (req, res, next) {
-    if (isBillCsvDownloadWithToken(req)) return next()
     const roleScope = getRoleScope(req)
     if (!roleScope) {
       return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
@@ -353,7 +347,6 @@ function getEnterpriseIdFromRequest(req) {
 
 function requireEnterpriseScope() {
   return async function (req, res, next) {
-    if (isBillCsvDownloadWithToken(req)) return next()
     const roleScope = getRoleScope(req)
     if (!roleScope) {
       return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
@@ -641,16 +634,23 @@ function resolvePermissionForRequest(req) {
   if (method === 'POST' && (path.endsWith('/billing:generate') || path.endsWith('/v1/billing:generate'))) {
     return 'billing.generate'
   }
+  if (/\/bills\/[^/]+(\/publish|:publish)$/.test(path)) return 'bills.read'
+  if (/\/bills\/[^/]+:write-off$/.test(path)) return 'bills.read'
   if (/\/bills\/[^/]+:mark-paid$/.test(path)) return 'bills.mark_paid'
-  if (/\/bills\/[^/]+:write-off$/.test(path)) return 'bills.write_off'
   if (/\/bills\/[^/]+:adjust$/.test(path)) return 'bills.adjust'
+  if (path.endsWith('/adjustment-notes') || path.endsWith('/v1/adjustment-notes')) {
+    if (method === 'GET') return 'bills.adjust.list'
+  }
+  if (/\/adjustment-notes\/[^/]+:approve$/.test(path)) return 'bills.adjust.approve'
   if (path.endsWith('/bills:csv') || path.endsWith('/v1/bills:csv')) return 'bills.export'
+  if (/\/bills\/[^/]+\/line-items(\/csv|:csv)?$/.test(path)) return 'bills.read'
+  if (/\/bills\/[^/]+(\/csv|:csv)$/.test(path)) return 'bills.read'
   if (/\/bills\/[^/]+$/.test(path)) return 'bills.read'
   if (path.endsWith('/bills') || path.endsWith('/v1/bills')) return 'bills.list'
-  if (/\/sims\/[^/]+:reset-connection$/.test(path)) return 'sims.reset_connection'
+  if (/\/sims\/[^/]+:cancel-location$/.test(path) || /\/sims\/[^/]+\/cancel-location$/.test(path)) return 'sims.reset_connection'
   if (/\/sims\/[^/]+\/connectivity-status$/.test(path)) return 'sims.connectivity.read'
-  if (/\/sims\/[^/]+\/location-history$/.test(path)) return 'sims.location.history'
-  if (/\/sims\/[^/]+\/location$/.test(path)) return 'sims.location.read'
+  if (/\/sims\/[^/]+\/visited-network-records$/.test(path)) return 'sims.location.history'
+  if (/\/sims\/[^/]+\/visited-network$/.test(path)) return 'sims.location.read'
   if (path.endsWith('/sims:csv') || path.endsWith('/v1/sims:csv')) return 'sims.export'
   if (/\/sims\/[^/]+$/.test(path)) return 'sims.read'
   if (path.endsWith('/sims') || path.endsWith('/v1/sims')) {
@@ -877,57 +877,6 @@ function requireCmpWebhookKey(req, res) {
   return false
 }
 
-function getWxWebhookKey() {
-  const v = getEnvTrim('WXZHONGGENG_WEBHOOK_KEY')
-  return v ? v : null
-}
-function requireWxWebhookKey(req, res) {
-  const expected = getWxWebhookKey()
-  if (!expected) {
-    sendError(res, 500, 'INTERNAL_ERROR', 'WXZHONGGENG_WEBHOOK_KEY is not configured.')
-    return false
-  }
-  const actual = req.header('x-api-key')
-  if (!actual || actual !== expected) {
-    sendError(res, 401, 'UNAUTHORIZED', 'Invalid X-API-Key.')
-    return false
-  }
-  return true
-}
-const WX_WEBHOOK_MAX_AGE_MINUTES = getEnvNumber('WX_WEBHOOK_MAX_AGE_MINUTES', 60)
-const WEBHOOK_MAX_FUTURE_SECONDS = getEnvNumber('WEBHOOK_MAX_FUTURE_SECONDS', 300)
-function validateWebhookTimestamp(res, occurredAt, maxAgeMinutes) {
-  if (!occurredAt) {
-    sendError(res, 400, 'BAD_REQUEST', 'eventTime is invalid.')
-    return false
-  }
-  const ts = new Date(occurredAt).getTime()
-  if (!Number.isFinite(ts)) {
-    sendError(res, 400, 'BAD_REQUEST', 'eventTime is invalid.')
-    return false
-  }
-  const now = Date.now()
-  const maxAgeMs = Math.max(1, maxAgeMinutes) * 60 * 1000
-  const maxFutureMs = Math.max(0, WEBHOOK_MAX_FUTURE_SECONDS) * 1000
-  if (now - ts > maxAgeMs) {
-    sendError(res, 409, 'WEBHOOK_REPLAY', 'eventTime is too old.')
-    return false
-  }
-  if (ts - now > maxFutureMs) {
-    sendError(res, 409, 'WEBHOOK_REPLAY', 'eventTime is too far in future.')
-    return false
-  }
-  return true
-}
-async function isDuplicateEventByPayloadField({ supabase, eventType, field, value }) {
-  if (!supabase || !eventType || !field || !value) return false
-  const rows = await supabase.select(
-    'events',
-    `select=event_id&event_type=eq.${encodeURIComponent(eventType)}&payload->>${field}=eq.${encodeURIComponent(value)}&limit=1`
-  )
-  const row = Array.isArray(rows) ? rows[0] : null
-  return Boolean(row?.event_id)
-}
 async function pushSimStatusToUpstream({ iccid, status, traceId, supplierId }) {
   if (supplierId) {
     let adapter
@@ -1015,7 +964,7 @@ async function pushPlanChangeToWebhook({
 }
 function authGuard(req, res, next) {
   if (req.path === '/health') return next()
-  if (req.path === '/ready') return next()
+  if (req.path === '/ready' || req.path === '/v1/ready') return next()
   if (req.path === '/metrics') return next()
   if (req.path === '/v1/auth/token') return next()
   if (req.path === '/auth/token') return next()
@@ -1034,12 +983,6 @@ function authGuard(req, res, next) {
   if (req.path === '/favicon.ico') return next()
   if (req.path === '/auth/token') return next()
   if (req.path === '/v1/auth/token') return next()
-
-  if (isBillCsvDownloadWithToken(req)) {
-    req.cmpAuth = { roleScope: 'platform', role: 'platform_admin' }
-    req.tenantScope = {}
-    return next()
-  }
 
   const apiKey = req.header('x-api-key')
   const apiSecret = req.header('x-api-secret')
@@ -2240,6 +2183,16 @@ export function createApp() {
       return body.includes('does not exist') && body.includes(column)
     }
 
+    function rejectCustomerBillOperation(req, res) {
+      const roleScope = getRoleScope(req)
+      const role = req?.cmpAuth?.role ? String(req.cmpAuth.role) : null
+      if (roleScope === 'customer' || roleScope === 'department' || role === 'customer_m2m') {
+        sendError(res, 403, 'FORBIDDEN', 'Customer tokens are not permitted for this bill operation.')
+        return true
+      }
+      return false
+    }
+
     async function resolveBillWriteAuth(req, res, supabase, bill) {
       const auth = req?.cmpAuth ?? {}
       const roleScope = getRoleScope(req)
@@ -2362,14 +2315,121 @@ export function createApp() {
           overageChargeTotal: Number(l1Summary.overageChargeTotal.toFixed(2)),
         },
         l2Groups,
-        l3LineItemsUrl: `${prefix}/bills/${bill.bill_id ?? bill.billId}/line-items?page=1&pageSize=100`,
       }
+    }
+
+    async function loadBillForRequest(req, res, supabase, billId) {
+      const auth = getAuthContext(req)
+      const roleScope = getRoleScope(req)
+      const role = auth?.role ? String(auth.role) : null
+      const rows = await supabase.select(
+        'bills',
+        `select=bill_id,enterprise_id,period_start,period_end,status,currency,total_amount,due_date,reseller_id&bill_id=eq.${encodeURIComponent(billId)}&limit=1`
+      )
+      const bill = Array.isArray(rows) ? rows[0] : null
+      if (!bill) {
+        sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
+        return null
+      }
+      if (roleScope === 'platform' || role === 'platform_admin') return bill
+      if (roleScope === 'customer' || roleScope === 'department' || role === 'customer_m2m') {
+        const enterpriseId = getEnterpriseIdFromReq(req) ?? (auth?.customerId ? String(auth.customerId) : null)
+        if (!enterpriseId || String(bill.enterprise_id || '') !== String(enterpriseId)) {
+          sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
+          return null
+        }
+        return bill
+      }
+      if (roleScope === 'reseller') {
+        if (!auth?.resellerId) {
+          sendError(res, 403, 'FORBIDDEN', 'Reseller scope required.')
+          return null
+        }
+        const entRows = await supabase.select(
+          'tenants',
+          `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(bill.enterprise_id)}&tenant_type=eq.ENTERPRISE&limit=1`
+        )
+        const ent = Array.isArray(entRows) ? entRows[0] : null
+        if (!ent || String(ent.parent_id || '') !== String(auth.resellerId)) {
+          sendError(res, 403, 'FORBIDDEN', 'Bill is out of reseller scope.')
+          return null
+        }
+        return bill
+      }
+      sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
+      return null
+    }
+
+    function mapBillLineItem(item) {
+      const meta = item.metadata ?? {}
+      return {
+        lineItemId: item.line_item_id,
+        iccid: meta.iccid ?? null,
+        msisdn: meta.msisdn ?? null,
+        departmentName: meta.departmentName ?? null,
+        packageName: meta.packageName ?? null,
+        monthlyFee: meta.monthlyFee ?? 0,
+        usageCharge: meta.usageCharge ?? 0,
+        overageCharge: meta.overageCharge ?? 0,
+        subtotal: meta.subtotal ?? Number(item.amount ?? 0),
+        usageMb: meta.usageMb ?? 0,
+        groupKey: item.group_key ?? null,
+        groupType: item.group_type ?? null,
+      }
+    }
+
+    function buildBillDetailCsv(detail) {
+      const rows = [['section', 'name', 'count', 'amount', 'text']]
+      const pushField = (section, name, value) => {
+        rows.push([section, name, '', value === null || value === undefined ? '' : String(value), ''])
+      }
+      pushField('bill', 'billId', detail.billId)
+      pushField('bill', 'enterpriseId', detail.enterpriseId)
+      pushField('bill', 'period', detail.period)
+      pushField('bill', 'status', detail.status)
+      pushField('bill', 'currency', detail.currency)
+      pushField('bill', 'totalAmount', detail.totalAmount)
+      pushField('bill', 'dueDate', detail.dueDate)
+      pushField('l1', 'monthlyFeeTotal', detail.l1Summary.monthlyFeeTotal)
+      pushField('l1', 'usageChargeTotal', detail.l1Summary.usageChargeTotal)
+      pushField('l1', 'overageChargeTotal', detail.l1Summary.overageChargeTotal)
+      for (const group of detail.l2Groups) {
+        rows.push([
+          'l2',
+          group.groupKey === null || group.groupKey === undefined ? '' : String(group.groupKey),
+          group.groupType === null || group.groupType === undefined ? '' : String(group.groupType),
+          String(group.subtotal),
+          group.groupName === null || group.groupName === undefined ? '' : String(group.groupName),
+        ])
+      }
+      return `${rows.map((row) => row.map(escapeCsv).join(',')).join('\n')}\n`
+    }
+
+    function buildLineItemsCsv(items) {
+      const header = [
+        'lineItemId', 'iccid', 'msisdn', 'departmentName', 'packageName',
+        'monthlyFee', 'usageCharge', 'overageCharge', 'subtotal', 'usageMb', 'groupKey', 'groupType',
+      ]
+      const lines = [header.join(',')]
+      for (const item of items) {
+        lines.push([
+          item.lineItemId, item.iccid, item.msisdn, item.departmentName, item.packageName,
+          item.monthlyFee, item.usageCharge, item.overageCharge, item.subtotal, item.usageMb,
+          item.groupKey, item.groupType,
+        ].map(escapeCsv).join(','))
+      }
+      return `${lines.join('\n')}\n`
     }
 
     app.post(`${prefix}/billing:generate`, async (req, res) => {
       const authCtx = getAuthContext(req)
       if (!authCtx.roleScope && !authCtx.role) {
         return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
+      }
+      const roleScope = authCtx.roleScope ? String(authCtx.roleScope) : null
+      const role = authCtx.role ? String(authCtx.role) : null
+      if (roleScope === 'customer' || roleScope === 'department' || role === 'customer_m2m') {
+        return sendError(res, 403, 'FORBIDDEN', 'Customer tokens are not permitted to trigger billing generation.')
       }
       const isPlatform = authCtx.roleScope === 'platform' || authCtx.role === 'platform_admin'
       const isResellerAdmin = authCtx.roleScope === 'reseller' && authCtx.role === 'reseller_admin'
@@ -2754,46 +2814,26 @@ export function createApp() {
     })
 
     app.get(`${prefix}/bills/:billId`, async (req, res) => {
-      const enterpriseId = getEnterpriseIdFromReq(req)
-      if (enterpriseId) {
-        const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-        const billId = String(req.params.billId)
-        const rows = await supabase.select(
-          'bills',
-          `select=bill_id,enterprise_id,period_start,period_end,status,currency,total_amount,due_date&bill_id=eq.${encodeURIComponent(billId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`
-        )
-        const b = Array.isArray(rows) ? rows[0] : null
-        if (!b) {
-          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
-        }
-        const lineItems = await loadBillLineItems(supabase, billId)
-        return res.json(buildBillDetail({ bill: b, lineItems: Array.isArray(lineItems) ? lineItems : [] }))
-      }
-
-      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const billId = String(req.params.billId)
-      const rows = await supabase.select(
-        'bills',
-        `select=bill_id,enterprise_id,period_start,period_end,status,currency,total_amount,due_date&bill_id=eq.${encodeURIComponent(billId)}&limit=1`
-      )
-      const bill = Array.isArray(rows) ? rows[0] : null
-      if (!bill) {
-        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
-      }
-      const roleScope = getRoleScope(req)
-      const auth = getAuthContext(req)
-      if (roleScope === 'reseller' && auth?.resellerId) {
-        const entRows = await supabase.select(
-          'tenants',
-          `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(bill.enterprise_id)}&tenant_type=eq.ENTERPRISE&limit=1`
-        )
-        const ent = Array.isArray(entRows) ? entRows[0] : null
-        if (!ent || String(ent.parent_id || '') !== String(auth.resellerId)) {
-          return sendError(res, 403, 'FORBIDDEN', 'Bill is out of reseller scope.')
-        }
-      }
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      const bill = await loadBillForRequest(req, res, supabase, billId)
+      if (!bill) return
       const lineItems = await loadBillLineItems(supabase, billId)
-      res.json(buildBillDetail({ bill, lineItems: Array.isArray(lineItems) ? lineItems : [] }))
+      return res.json(buildBillDetail({ bill, lineItems: Array.isArray(lineItems) ? lineItems : [] }))
+    })
+
+    app.get(`${prefix}/bills/:billId\\:csv`, async (req, res) => {
+      const billId = String(req.params.billId)
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      const bill = await loadBillForRequest(req, res, supabase, billId)
+      if (!bill) return
+      const lineItems = await loadBillLineItems(supabase, billId)
+      const detail = buildBillDetail({ bill, lineItems: Array.isArray(lineItems) ? lineItems : [] })
+      const csv = buildBillDetailCsv(detail)
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+      res.setHeader('Content-Disposition', `attachment; filename="bill-${billId}-summary.csv"`)
+      setXFilters(res, `billId=${billId}`)
+      return res.send(csv)
     })
 
     const getBillReconciliationSummary = async (req, res) => {
@@ -2949,60 +2989,38 @@ export function createApp() {
 
     app.get(`${prefix}/bills/:billId/line-items`, async (req, res) => {
       const billId = String(req.params.billId)
-      const enterpriseId = getEnterpriseIdFromReq(req)
       const pageSize = req.query.pageSize ? Number(req.query.pageSize) : 100
       const page = req.query.page ? Number(req.query.page) : 1
       const offset = Math.max(0, (Math.max(1, page) - 1) * Math.max(0, pageSize))
-      const groupKey = req.query.groupKey ? String(req.query.groupKey) : null
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-      if (enterpriseId) {
-        const bills = await supabase.select(
-          'bills',
-          `select=bill_id&bill_id=eq.${encodeURIComponent(billId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`
-        )
-        if (!Array.isArray(bills) || bills.length === 0) {
-          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
-        }
-      }
-      const filters = ['item_type=eq.SIM_TOTAL']
-      if (groupKey) filters.push(`group_key=eq.${encodeURIComponent(groupKey)}`)
-      let data
-      let total
-      try {
-        const result = await loadBillLineItemsWithCount(supabase, billId, filters, pageSize, offset)
-        data = result?.data
-        total = result?.total
-      } catch (err) {
-        if (groupKey && isMissingColumnError(err, 'group_key')) {
-          const result = await loadBillLineItemsWithCount(supabase, billId, ['item_type=eq.SIM_TOTAL'], pageSize, offset)
-          data = result?.data
-          total = result?.total
-        } else {
-          throw err
-        }
-      }
-      const items = Array.isArray(data) ? data : []
-      const mapped = items.map((item) => {
-        const meta = item.metadata ?? {}
-        return {
-          lineItemId: item.line_item_id,
-          iccid: meta.iccid ?? null,
-          msisdn: meta.msisdn ?? null,
-          departmentName: meta.departmentName ?? null,
-          packageName: meta.packageName ?? null,
-          monthlyFee: meta.monthlyFee ?? 0,
-          usageCharge: meta.usageCharge ?? 0,
-          overageCharge: meta.overageCharge ?? 0,
-          subtotal: meta.subtotal ?? Number(item.amount ?? 0),
-          usageMb: meta.usageMb ?? 0,
-          groupKey: item.group_key ?? null,
-          groupType: item.group_type ?? null,
-        }
-      })
+      const bill = await loadBillForRequest(req, res, supabase, billId)
+      if (!bill) return
+      const result = await loadBillLineItemsWithCount(supabase, billId, ['item_type=eq.SIM_TOTAL'], pageSize, offset)
+      const items = Array.isArray(result?.data) ? result.data.map(mapBillLineItem) : []
+      setXFilters(res, `billId=${billId};page=${Math.max(1, page)};pageSize=${pageSize}`)
       res.json({
-        items: mapped,
-        total: typeof total === 'number' ? total : mapped.length,
+        items,
+        total: typeof result?.total === 'number' ? result.total : items.length,
+        page: Math.max(1, page),
+        pageSize,
       })
+    })
+
+    app.get(`${prefix}/bills/:billId/line-items\\:csv`, async (req, res) => {
+      const billId = String(req.params.billId)
+      const pageSize = req.query.pageSize ? Number(req.query.pageSize) : 10000
+      const page = req.query.page ? Number(req.query.page) : 1
+      const offset = Math.max(0, (Math.max(1, page) - 1) * Math.max(0, pageSize))
+      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+      const bill = await loadBillForRequest(req, res, supabase, billId)
+      if (!bill) return
+      const result = await loadBillLineItemsWithCount(supabase, billId, ['item_type=eq.SIM_TOTAL'], pageSize, offset)
+      const items = Array.isArray(result?.data) ? result.data.map(mapBillLineItem) : []
+      const csv = buildLineItemsCsv(items)
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+      res.setHeader('Content-Disposition', `attachment; filename="bill-${billId}-line-items.csv"`)
+      setXFilters(res, `billId=${billId};page=${Math.max(1, page)};pageSize=${pageSize}`)
+      res.send(csv)
     })
 
     app.get(`${prefix}/enterprises/:enterpriseId/dunning`, async (req, res) => {
@@ -3368,244 +3386,103 @@ export function createApp() {
       })
     })
 
-    app.get(`${prefix}/bills/:billId/files`, async (req, res) => {
-      const enterpriseId = getEnterpriseIdFromReq(req)
+    app.post(`${prefix}/bills/:billId\\:publish`, async (req, res) => {
+      if (rejectCustomerBillOperation(req, res)) return
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const billId = String(req.params.billId)
-      let bill = null
-      if (enterpriseId) {
-        const rows = await supabase.select('bills', `select=bill_id,enterprise_id&bill_id=eq.${encodeURIComponent(billId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`)
-        bill = Array.isArray(rows) ? rows[0] : null
-      } else {
-        const rows = await supabase.select('bills', `select=bill_id,enterprise_id&bill_id=eq.${encodeURIComponent(billId)}&limit=1`)
-        bill = Array.isArray(rows) ? rows[0] : null
-        if (bill) {
-          const roleScope = getRoleScope(req)
-          const auth = getAuthContext(req)
-          if (roleScope === 'reseller' && auth?.resellerId) {
-            const entRows = await supabase.select(
-              'tenants',
-              `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(bill.enterprise_id)}&tenant_type=eq.ENTERPRISE&limit=1`
-            )
-            const ent = Array.isArray(entRows) ? entRows[0] : null
-            if (!ent || String(ent.parent_id || '') !== String(auth.resellerId)) {
-              return sendError(res, 403, 'FORBIDDEN', 'Bill is out of reseller scope.')
-            }
-          }
-        }
-      }
-      if (!bill) {
-        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
-      }
-      const baseUrl = buildBaseUrl(req)
-      const secret = getEnvTrim('AUTH_TOKEN_SECRET')
-      let csvUrl = `${baseUrl}${prefix}/bills/${billId}/files/csv`
-      if (secret) {
-        const downloadToken = signJwtHs256(
-          { billId, purpose: 'csv', exp: Math.floor(Date.now() / 1000) + 900 },
-          secret
-        )
-        csvUrl += `?downloadToken=${encodeURIComponent(downloadToken)}`
-      }
-      // T160: Support ?format=pdf|csv query param
-      const format = req.query?.format ? String(req.query.format).toLowerCase() : null
-      if (format === 'pdf') {
-        return sendError(res, 501, 'NOT_IMPLEMENTED', 'PDF bill download is not yet available.')
-      }
-      const tokenExpiry = secret
-        ? new Date(Date.now() + 900 * 1000).toISOString()
-        : null
+      const dueDate = req.body?.dueDate ? String(req.body.dueDate) : null
+      const bill = await loadBillForRequest(req, res, supabase, billId)
+      if (!bill) return
+      const auth = getAuthContext(req)
+      const result = await transitionBillStatus({
+        supabase,
+        billId,
+        action: 'publish',
+        dueDate,
+        actorUserId: auth?.userId ?? null,
+        requestId: getTraceId(res),
+      })
+      if (!result.ok) return sendError(res, result.status, result.code, result.message)
+      const v = result.value || {}
       res.json({
-        downloadUrl: csvUrl,
-        expiresAt: tokenExpiry,
-        format: 'csv',
-        sizeBytes: null,
+        billId: v.bill_id ?? v.billId ?? billId,
+        status: v.status ?? null,
+        publishedAt: v.published_at ?? null,
+        dueDate: v.due_date ?? null,
       })
     })
 
-    app.get(`${prefix}/bills/:billId/files/csv`, async (req, res) => {
-      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-      const billId = String(req.params.billId)
-      const limitParam = req.query?.limit ?? req.query?.pageSize
-      const { page, pageSize, offset } = parsePagination(
-        { pageSize: limitParam, page: req.query?.page },
-        { defaultPage: 1, defaultPageSize: 2000, maxPageSize: 10000 }
-      )
-
-      const downloadToken = req.query?.downloadToken ? String(req.query.downloadToken) : null
-      if (downloadToken) {
-        const secret = getEnvTrim('AUTH_TOKEN_SECRET')
-        if (!secret) {
-          return sendError(res, 401, 'UNAUTHORIZED', 'Download token not supported.')
-        }
-        const result = verifyJwtHs256(downloadToken, secret)
-        if (!result.ok || result.payload?.purpose !== 'csv' || String(result.payload?.billId || '') !== billId) {
-          return sendError(res, 401, 'UNAUTHORIZED', 'Invalid or expired download token.')
-        }
-        const billRows = await supabase.select('bills', `select=bill_id&bill_id=eq.${encodeURIComponent(billId)}&limit=1`)
-        if (!Array.isArray(billRows) || billRows.length === 0) {
-          return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
-        }
-      } else {
-        const enterpriseId = getEnterpriseIdFromReq(req)
-        if (enterpriseId) {
-          const bills = await supabase.select('bills', `select=bill_id&bill_id=eq.${encodeURIComponent(billId)}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`)
-          if (!Array.isArray(bills) || bills.length === 0) {
-            return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
-          }
-        } else {
-          const billRows = await supabase.select('bills', `select=bill_id,enterprise_id&bill_id=eq.${encodeURIComponent(billId)}&limit=1`)
-          const bill = Array.isArray(billRows) ? billRows[0] : null
-          if (!bill) {
-            return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
-          }
-          const roleScope = getRoleScope(req)
-          const auth = getAuthContext(req)
-          if (roleScope === 'reseller' && auth?.resellerId) {
-            const entRows = await supabase.select(
-              'tenants',
-              `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(bill.enterprise_id)}&tenant_type=eq.ENTERPRISE&limit=1`
-            )
-            const ent = Array.isArray(entRows) ? entRows[0] : null
-            if (!ent || String(ent.parent_id || '') !== String(auth.resellerId)) {
-              return sendError(res, 403, 'FORBIDDEN', 'Bill is out of reseller scope.')
-            }
-          }
-        }
-      }
-
-      const rows = await supabase.select(
-        'bill_line_items',
-        `select=line_item_id,item_type,amount,metadata,created_at&bill_id=eq.${encodeURIComponent(billId)}&order=line_item_id.asc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
-      )
-
-      const items = Array.isArray(rows) ? rows : []
-
-      const header = [
-        'lineItemId',
-        'itemType',
-        'amount',
-        'calculationId',
-        'iccid',
-        'visitedMccMnc',
-        'chargedMb',
-        'ratePerMb',
-        'inputRef',
-        'createdAt',
-      ]
-
-      const lines = [header.join(',')]
-      for (const it of items) {
-        const meta = it.metadata ?? {}
-        lines.push(
-          [
-            it.line_item_id,
-            it.item_type,
-            it.amount,
-            meta.calculationId,
-            meta.iccid,
-            meta.visitedMccMnc,
-            meta.chargedMb,
-            meta.ratePerMb,
-            meta.inputRef,
-            it.created_at,
-          ]
-            .map(escapeCsv)
-            .join(',')
-        )
-      }
-
-      const csv = `${lines.join('\n')}\n`
-      res.setHeader('Content-Type', 'text/csv; charset=utf-8')
-      res.setHeader('Content-Disposition', `attachment; filename="bill-${billId}.csv"`)
-      {
-        const filterPairs = []
-        filterPairs.push(`billId=${billId}`)
-        filterPairs.push(`limit=${pageSize}`)
-        filterPairs.push(`page=${page}`)
-        setXFilters(res, filterPairs.join(';'))
-      }
-      res.send(csv)
-    })
-
     app.post(`${prefix}/bills/:billId\\:mark-paid`, async (req, res) => {
+      if (rejectCustomerBillOperation(req, res)) return
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const billId = String(req.params.billId)
-      const { paymentRef, paidAt, paidAmount } = req.body ?? {}
+      const { paymentRef, paidAt, paidAmount, paymentProof } = req.body ?? {}
       if (!paymentRef || String(paymentRef).trim() === '') {
         return sendError(res, 400, 'BAD_REQUEST', 'paymentRef is required')
       }
       if (paidAmount === undefined || paidAmount === null || typeof paidAmount !== 'number' || !Number.isFinite(paidAmount)) {
         return sendError(res, 400, 'BAD_REQUEST', 'paidAmount is required')
       }
-      const rows = await loadBillScope(supabase, billId)
-      const bill = Array.isArray(rows) ? rows[0] : null
-      if (!bill) {
-        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
-      }
-      const auth = await resolveBillWriteAuth(req, res, supabase, bill)
-      if (!auth) return
+      const bill = await loadBillForRequest(req, res, supabase, billId)
+      if (!bill) return
+      const auth = getAuthContext(req)
       const result = await transitionBillStatus({
         supabase,
         billId,
         action: 'pay',
         paymentRef: paymentRef ?? null,
+        paymentProof: paymentProof != null && String(paymentProof).trim() !== '' ? String(paymentProof).trim() : null,
         paidAt: paidAt ?? null,
-        actorUserId: auth.userId ?? null,
+        actorUserId: auth?.userId ?? null,
         requestId: getTraceId(res),
       })
       if (!result.ok) {
         return sendError(res, result.status, result.code, result.message)
       }
       const v = result.value || {}
-      const response = {
+      res.json({
         billId: v.bill_id ?? v.billId ?? billId,
         status: v.status ?? null,
-        paidAmount: paidAmount,
-        paymentRef: v.payment_ref ?? (paymentRef ?? null),
+        paidAmount,
+        paymentRef: v.payment_ref ?? paymentRef ?? null,
+        paymentProof: v.payment_proof ?? (paymentProof ?? null),
         paidAt: v.paid_at ?? (paidAt ?? null),
-      }
-      res.json(response)
+      })
     })
 
     // Phase 22: POST /v1/bills/:billId:write-off
-    // TODO: T120 — add to OpenAPI spec (iot-cmp-api.yaml)
     app.post(`${prefix}/bills/:billId\\:write-off`, async (req, res) => {
+      if (rejectCustomerBillOperation(req, res)) return
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const billId = String(req.params.billId)
       const { reason } = req.body ?? {}
-      const rows = await loadBillScope(supabase, billId)
-      const bill = Array.isArray(rows) ? rows[0] : null
-      if (!bill) {
-        return sendError(res, 404, 'RESOURCE_NOT_FOUND', `Bill ${billId} not found.`)
-      }
-      const auth = await resolveBillWriteAuth(req, res, supabase, bill)
-      if (!auth) return
-      if (!reason) {
+      const bill = await loadBillForRequest(req, res, supabase, billId)
+      if (!bill) return
+      if (!reason || String(reason).trim() === '') {
         return sendError(res, 400, 'BAD_REQUEST', 'reason is required for write-off.')
       }
+      const auth = getAuthContext(req)
       const result = await transitionBillStatus({
         supabase,
         billId,
         action: 'write_off',
-        actorUserId: auth.userId ?? null,
+        actorUserId: auth?.userId ?? null,
         requestId: getTraceId(res),
       })
       if (!result.ok) {
         return sendError(res, result.status, result.code, result.message)
       }
       const v = result.value || {}
-      const response = {
+      res.json({
         billId: v.bill_id ?? v.billId ?? billId,
         status: v.status ?? null,
         totalAmount: typeof v.total_amount === 'number' ? Number(v.total_amount) : null,
-        reason,
-        writtenOffAt: v.written_off_at ?? new Date().toISOString(),
-      }
-      res.json(response)
+        reason: String(reason).trim(),
+      })
     })
 
     app.post(`${prefix}/bills/:billId\\:adjust`, async (req, res) => {
+      if (rejectCustomerBillOperation(req, res)) return
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const billId = String(req.params.billId)
       const { type, amount, reason } = req.body ?? {}
@@ -3648,12 +3525,23 @@ export function createApp() {
       })
     })
 
+    // Legacy Express — canonical Fastify: src/routes/adjustmentNotes.ts (Phase 39 PR-A/B)
     app.post(`${prefix}/adjustment-notes/:noteId\\:approve`, async (req, res) => {
-      const auth = ensureResellerAdmin(req, res)
-      if (!auth) return
+      if (rejectCustomerBillOperation(req, res)) return
+      const authCtx = getAuthContext(req)
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const noteId = String(req.params.noteId)
-      const result = await approveAdjustmentNote({ supabase, noteId })
+      const result = await approveAdjustmentNote({
+        supabase,
+        noteId,
+        actorUserId: authCtx.userId ?? null,
+        requestId: getTraceId(res),
+        scope: {
+          roleScope: getRoleScope(req),
+          role: authCtx.role ? String(authCtx.role) : null,
+          resellerId: authCtx.resellerId ? String(authCtx.resellerId) : null,
+        },
+      })
       if (!result.ok) {
         return sendError(res, result.status, result.code, result.message)
       }
@@ -3661,8 +3549,8 @@ export function createApp() {
     })
 
     app.get(`${prefix}/adjustment-notes`, async (req, res) => {
-      const auth = ensureResellerAdmin(req, res)
-      if (!auth) return
+      if (rejectCustomerBillOperation(req, res)) return
+      const authCtx = getAuthContext(req)
       const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
       const result = await listAdjustmentNotes({
         supabase,
@@ -3671,6 +3559,11 @@ export function createApp() {
         status: req.query.status ? String(req.query.status) : null,
         page: req.query.page ? Number(req.query.page) : 1,
         pageSize: req.query.pageSize ? Number(req.query.pageSize) : 20,
+        scope: {
+          roleScope: getRoleScope(req),
+          role: authCtx.role ? String(authCtx.role) : null,
+          resellerId: authCtx.resellerId ? String(authCtx.resellerId) : null,
+        },
       })
       if (!result.ok) {
         return sendError(res, result.status, result.code, result.message)
@@ -3967,6 +3860,7 @@ export function createApp() {
         createSupabaseRestClient,
         getTraceId,
         sendError,
+        getAuthContext,
         ensurePlatformAdmin,
         isValidUuid,
       },
@@ -5017,7 +4911,7 @@ export function createApp() {
       res.json(result.value)
     })
 
-    app.post(`${prefix}/sims/:iccid\\:reset-connection`, async (req, res) => {
+    app.post(`${prefix}/sims/:iccid\\:cancel-location`, async (req, res) => {
       const iccid = requireIccid(res, req.params.iccid)
       if (!iccid) return
       const enterpriseId = getEnterpriseIdFromReq(req)
@@ -5040,11 +4934,11 @@ export function createApp() {
       res.status(202).json({
         jobId: result.value.jobId,
         simId: result.value.simId ?? null,
-        message: 'Connection reset request submitted',
+        message: 'Cancel location request submitted',
       })
     })
 
-    app.get(`${prefix}/sims/:iccid/location`, async (req, res) => {
+    app.get(`${prefix}/sims/:iccid/visited-network`, async (req, res) => {
       const enterpriseId = getEnterpriseIdFromReq(req)
       const supabase = enterpriseId ? createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) }) : createSupabaseRestClient({ traceId: getTraceId(res) })
       const iccid = requireIccid(res, req.params.iccid)
@@ -5061,7 +4955,7 @@ export function createApp() {
       res.json(result.value)
     })
 
-    app.get(`${prefix}/sims/:iccid/location-history`, async (req, res) => {
+    app.get(`${prefix}/sims/:iccid/visited-network-records`, async (req, res) => {
       const enterpriseId = getEnterpriseIdFromReq(req)
       const supabase = enterpriseId ? createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) }) : createSupabaseRestClient({ traceId: getTraceId(res) })
       const iccid = requireIccid(res, req.params.iccid)
@@ -7857,44 +7751,20 @@ export function createApp() {
     res.json({ ok: true })
   })
 
-  app.get('/ready', async (req, res) => {
-    const details = {
-      config: {
-        supabaseUrl: Boolean(process.env.SUPABASE_URL),
-        supabaseAnonKey: Boolean(process.env.SUPABASE_ANON_KEY),
-        wxzhonggengUrl: Boolean(process.env.WXZHONGGENG_URL),
-        wxzhonggengTokenUrl: Boolean(process.env.WXZHONGGENG_TOKEN_URL),
-      },
-      upstream: {
-        supabase: null,
-        wxzhonggeng: null,
-      },
-    }
-    const supabaseConfigured = details.config.supabaseUrl && details.config.supabaseAnonKey
-    let upstreamReady = null
-    if (supabaseConfigured) {
-      try {
-        const supabase = createSupabaseRestClient({ traceId: getTraceId(res) })
-        await supabase.selectWithCount('sims', 'select=sim_id&limit=1')
-        upstreamReady = true
-      } catch (err) {
-        upstreamReady = false
-      }
-      details.upstream.supabase = upstreamReady
-    }
-    const wxConfigured = details.config.wxzhonggengUrl && details.config.wxzhonggengTokenUrl
-    if (wxConfigured) {
-      try {
-        const client = createWxzhonggengClient()
-        const ok = await client.ping()
-        details.upstream.wxzhonggeng = ok === true
-      } catch (err) {
-        details.upstream.wxzhonggeng = false
-      }
-    }
-    const ok = supabaseConfigured ? upstreamReady === true : true
-    res.status(ok ? 200 : 503).json({ ok, details })
-  })
+  async function readyHandler(req, res) {
+    const supabaseConfigured = Boolean(process.env.SUPABASE_URL) && Boolean(process.env.SUPABASE_ANON_KEY)
+    const hasServiceRoleKey = Boolean(String(process.env.SUPABASE_SERVICE_ROLE_KEY ?? '').trim())
+    const supabase = supabaseConfigured
+      ? createSupabaseRestClient({ useServiceRole: hasServiceRoleKey, traceId: getTraceId(res) })
+      : null
+    const { buildReadyProbeResponse } = await import('./services/readyProbe.js')
+    const result = await buildReadyProbeResponse(supabase, { hasServiceRoleKey })
+    res.status(result.ok ? 200 : 503).json(result)
+  }
+
+  app.get('/ready', readyHandler)
+  app.get('/v1/ready', readyHandler)
+
   async function serveOpenApiYaml(req, res) {
     const here = path.dirname(fileURLToPath(import.meta.url))
     const yamlPath = path.resolve(here, '..', 'iot-cmp-api.yaml')
@@ -10331,25 +10201,34 @@ export function createApp() {
             actTd.style.border = '1px solid #e5e7eb'
             actTd.style.padding = '4px 6px'
             actTd.style.fontSize = '12px'
-            const btnCsv = document.createElement('button')
-            btnCsv.className = 'secondary'
-            btnCsv.textContent = 'CSV'
-            btnCsv.addEventListener('click', async () => {
-              const u = apiBase + '/v1/bills/' + encodeURIComponent(billId) + '/files/csv'
-              await downloadCsv(u, 'bill-' + billId + '.csv')
+            const btnSummaryCsv = document.createElement('button')
+            btnSummaryCsv.className = 'secondary'
+            btnSummaryCsv.textContent = 'Summary CSV'
+            btnSummaryCsv.addEventListener('click', async () => {
+              const u = apiBase + '/v1/bills/' + encodeURIComponent(billId) + ':csv'
+              await downloadCsv(u, 'bill-' + billId + '-summary.csv')
+            })
+            const btnLineItemsCsv = document.createElement('button')
+            btnLineItemsCsv.className = 'secondary'
+            btnLineItemsCsv.textContent = 'Line items CSV'
+            btnLineItemsCsv.style.marginLeft = '6px'
+            btnLineItemsCsv.addEventListener('click', async () => {
+              const u = apiBase + '/v1/bills/' + encodeURIComponent(billId) + '/line-items:csv'
+              await downloadCsv(u, 'bill-' + billId + '-line-items.csv')
             })
             const btnCurl = document.createElement('button')
             btnCurl.className = 'secondary'
-            btnCurl.textContent = 'Copy CSV cURL'
+            btnCurl.textContent = 'Copy summary cURL'
             btnCurl.style.marginLeft = '6px'
             btnCurl.addEventListener('click', async () => {
-              const u = apiBase + '/v1/bills/' + encodeURIComponent(billId) + '/files/csv'
+              const u = apiBase + '/v1/bills/' + encodeURIComponent(billId) + ':csv'
               const token = getStoredToken()
               const curl = 'curl -X GET \"' + u + '\"' + (token ? ' -H \"Authorization: Bearer ' + token + '\"' : '')
               try { await navigator.clipboard.writeText(curl) } catch {}
               setOutput(curl)
             })
-            actTd.appendChild(btnCsv)
+            actTd.appendChild(btnSummaryCsv)
+            actTd.appendChild(btnLineItemsCsv)
             actTd.appendChild(btnCurl)
             tr.appendChild(actTd)
             table.appendChild(tr)
@@ -11504,13 +11383,22 @@ export function createApp() {
         if (!Array.isArray(supplierRows) || supplierRows.length === 0) {
           return sendError(res, 404, 'RESOURCE_NOT_FOUND', `supplier ${supplierId} not found.`)
         }
-        const existingRows = await supabase.select(
+        // FR-042a: each supplier binds to at most one reseller (exclusive).
+        const existingAnyRows = await supabase.select(
           'reseller_suppliers',
-          `select=reseller_id,supplier_id,created_at&reseller_id=eq.${encodeURIComponent(resellerId)}&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+          `select=reseller_id,supplier_id,created_at&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
         )
-        const existing = Array.isArray(existingRows) ? existingRows[0] : null
-        if (existing?.reseller_id) {
-          return sendError(res, 409, 'ALREADY_BOUND', 'supplierId is already bound to resellerId.')
+        const existingAny = Array.isArray(existingAnyRows) ? existingAnyRows[0] : null
+        if (existingAny?.reseller_id) {
+          if (String(existingAny.reseller_id) === String(resellerId)) {
+            return sendError(res, 409, 'ALREADY_BOUND', 'supplierId is already bound to resellerId.')
+          }
+          return sendError(
+            res,
+            409,
+            'SUPPLIER_BOUND_TO_OTHER_RESELLER',
+            'supplierId is already exclusively bound to another reseller.'
+          )
         }
         const insertedRows = await supabase.insert(
           'reseller_suppliers',
@@ -11530,6 +11418,18 @@ export function createApp() {
         const message = String(error?.message ?? '')
         if (message.includes("Could not find the table 'public.reseller_suppliers'")) {
           return sendError(res, 503, 'SCHEMA_NOT_READY', 'reseller_suppliers table is not available yet.')
+        }
+        if (
+          message.includes('uq_reseller_suppliers_supplier_id') ||
+          message.includes('duplicate key') ||
+          message.includes('23505')
+        ) {
+          return sendError(
+            res,
+            409,
+            'SUPPLIER_BOUND_TO_OTHER_RESELLER',
+            'supplierId is already exclusively bound to another reseller.'
+          )
         }
         const status = Number(error?.status) || 500
         const code = error?.code ? String(error.code) : 'INTERNAL_ERROR'
@@ -13745,246 +13645,6 @@ export function createApp() {
       res.send(`${csvRows.join('\n')}\n`)
     })
   }
-  app.post('/v1/wx/webhook/sim-online', async (req, res) => {
-    if (!requireWxWebhookKey(req, res)) return
-    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-    const iccid = requireIccid(res, req.body?.iccid)
-    const messageType = String(req.body?.messageType || '').trim()
-    const msisdn = String(req.body?.msisdn || '').trim()
-    const sign = String(req.body?.sign || '').trim()
-    const uuid = String(req.body?.uuid || '').trim()
-    const data = req.body?.data ?? {}
-    const mncList = String(data?.mncList || '').trim()
-    const eventTime = String(data?.eventTime || '').trim()
-    const mcc = String(data?.mcc || '').trim()
-    const occurredAt = eventTime ? toIsoDateTime(eventTime) : new Date().toISOString()
-    if (!iccid) return
-    if (!messageType || !msisdn || !sign || !uuid || !mncList || !eventTime || !mcc) {
-      return sendError(res, 400, 'BAD_REQUEST', 'messageType, msisdn, sign, uuid, data.mncList, data.eventTime, data.mcc are required.')
-    }
-  if (!validateWebhookTimestamp(res, occurredAt, WX_WEBHOOK_MAX_AGE_MINUTES)) return
-    const isDuplicate = await isDuplicateEventByPayloadField({
-      supabase,
-      eventType: 'SIM_ONLINE',
-      field: 'uuid',
-      value: uuid,
-    })
-    if (isDuplicate) {
-      return res.json({ success: true, duplicate: true })
-    }
-    const rows = await supabase.select('sims', `select=sim_id,iccid,enterprise_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
-    const sim = Array.isArray(rows) ? rows[0] : null
-    if (!sim) {
-      const demoList = (process.env.DEMO_SIMS || '').split(',').map((s) => s.trim()).filter((s) => s.length > 0)
-      if (demoList.includes(iccid)) {
-        return res.json({ success: true, demo: true })
-      }
-      return sendError(res, 404, 'RESOURCE_NOT_FOUND', `sim ${iccid} not found.`)
-    }
-    await supabase.insert('events', {
-      event_type: 'SIM_ONLINE',
-      occurred_at: occurredAt,
-      tenant_id: sim.enterprise_id ?? null,
-      request_id: getTraceId(res),
-      payload: { iccid, messageType, msisdn, mncList, mcc, eventTime, uuid },
-    }, { returning: 'minimal' })
-    await supabase.insert('audit_logs', {
-      actor_role: 'SYSTEM',
-      tenant_id: sim.enterprise_id ?? null,
-      action: 'WX_WEBHOOK_SIM_ONLINE',
-      target_type: 'SIM',
-      target_id: sim.iccid,
-      request_id: getTraceId(res),
-      source_ip: req.ip,
-    }, { returning: 'minimal' })
-    res.json({ success: true })
-  })
-  app.post('/v1/wx/webhook/sim-status-changed', async (req, res) => {
-    if (!requireWxWebhookKey(req, res)) return
-    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-    const iccid = requireIccid(res, req.body?.iccid)
-    const messageType = String(req.body?.messageType || '').trim()
-    const msisdn = String(req.body?.msisdn || '').trim()
-    const sign = String(req.body?.sign || '').trim()
-    const uuid = String(req.body?.uuid || '').trim()
-    const data = req.body?.data ?? {}
-    const toStatus = String(data?.toStatus || '').trim()
-    const fromStatus = String(data?.fromStatus || '').trim()
-    const eventTime = String(data?.eventTime || '').trim()
-    const transactionId = String(data?.transactionId || '').trim()
-    const occurredAt = eventTime ? toIsoDateTime(eventTime) : new Date().toISOString()
-    if (!iccid) return
-    if (!messageType || !msisdn || !sign || !uuid || !toStatus || !fromStatus || !eventTime || !transactionId) {
-      return sendError(res, 400, 'BAD_REQUEST', 'messageType, msisdn, sign, uuid, data.toStatus, data.fromStatus, data.eventTime, data.transactionId are required.')
-    }
-  if (!validateWebhookTimestamp(res, occurredAt, WX_WEBHOOK_MAX_AGE_MINUTES)) return
-    const isDuplicate = await isDuplicateEventByPayloadField({
-      supabase,
-      eventType: 'WX_SIM_STATUS_CHANGED',
-      field: 'transactionId',
-      value: transactionId,
-    })
-    if (isDuplicate) {
-      return res.json({ success: true, duplicate: true })
-    }
-    const rows = await supabase.select('sims', `select=sim_id,iccid,enterprise_id,upstream_status,upstream_info&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
-    const sim = Array.isArray(rows) ? rows[0] : null
-    if (!sim) {
-      const demoList = (process.env.DEMO_SIMS || '').split(',').map((s) => s.trim()).filter((s) => s.length > 0)
-      if (demoList.includes(iccid)) {
-        return res.json({ success: true, demo: true })
-      }
-      return sendError(res, 404, 'RESOURCE_NOT_FOUND', `sim ${iccid} not found.`)
-    }
-    await supabase.update('sims', `sim_id=eq.${encodeURIComponent(sim.sim_id)}`, {
-      upstream_status: toStatus,
-      upstream_info: {
-        toStatus,
-        fromStatus,
-        transactionId,
-        eventTime: occurredAt,
-      },
-    }, { returning: 'minimal' })
-    await supabase.insert('events', {
-      event_type: 'WX_SIM_STATUS_CHANGED',
-      occurred_at: occurredAt,
-      tenant_id: sim.enterprise_id ?? null,
-      request_id: getTraceId(res),
-      payload: {
-        iccid,
-        messageType,
-        msisdn,
-        toStatus,
-        fromStatus,
-        transactionId,
-        eventTime: occurredAt,
-        uuid,
-      },
-    }, { returning: 'minimal' })
-    await supabase.insert('audit_logs', {
-      actor_role: 'SYSTEM',
-      tenant_id: sim.enterprise_id ?? null,
-      action: 'WX_WEBHOOK_SIM_STATUS_CHANGED',
-      target_type: 'SIM',
-      target_id: sim.iccid,
-      request_id: getTraceId(res),
-      source_ip: req.ip,
-    }, { returning: 'minimal' })
-    res.json({ success: true })
-  })
-  app.post('/v1/wx/webhook/traffic-alert', async (req, res) => {
-    if (!requireWxWebhookKey(req, res)) return
-    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-    const iccid = requireIccid(res, req.body?.iccid)
-    const messageType = String(req.body?.messageType || '').trim()
-    const msisdn = String(req.body?.msisdn || '').trim()
-    const sign = String(req.body?.sign || '').trim()
-    const uuid = String(req.body?.uuid || '').trim()
-    const data = req.body?.data ?? {}
-    const thresholdReached = String(data?.thresholdReached || '').trim()
-    const eventTime = String(data?.eventTime || '').trim()
-    const limit = String(data?.limit || '').trim()
-    const eventName = String(data?.eventName || '').trim()
-    const balanceAmount = String(data?.balanceAmount || '').trim()
-    const addOnID = String(data?.addOnID || '').trim()
-    const occurredAt = eventTime ? toIsoDateTime(eventTime) : new Date().toISOString()
-    if (!iccid) return
-    if (!messageType || !msisdn || !sign || !uuid || !thresholdReached || !eventTime || !limit || !eventName || !balanceAmount || !addOnID) {
-      return sendError(res, 400, 'BAD_REQUEST', 'messageType, msisdn, sign, uuid, data.thresholdReached, data.eventTime, data.limit, data.eventName, data.balanceAmount, data.addOnID are required.')
-    }
-  if (!validateWebhookTimestamp(res, occurredAt, WX_WEBHOOK_MAX_AGE_MINUTES)) return
-    const isDuplicate = await isDuplicateEventByPayloadField({
-      supabase,
-      eventType: 'TRAFFIC_ALERT',
-      field: 'uuid',
-      value: uuid,
-    })
-    if (isDuplicate) {
-      return res.json({ success: true, duplicate: true })
-    }
-    const rows = await supabase.select('sims', `select=sim_id,iccid,enterprise_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
-    const sim = Array.isArray(rows) ? rows[0] : null
-    if (!sim) {
-      const demoList = (process.env.DEMO_SIMS || '').split(',').map((s) => s.trim()).filter((s) => s.length > 0)
-      if (demoList.includes(iccid)) {
-        return res.json({ success: true, demo: true })
-      }
-      return sendError(res, 404, 'RESOURCE_NOT_FOUND', `sim ${iccid} not found.`)
-    }
-    await supabase.insert('events', {
-      event_type: 'TRAFFIC_ALERT',
-      occurred_at: occurredAt,
-      tenant_id: sim.enterprise_id ?? null,
-      request_id: getTraceId(res),
-      payload: { iccid, messageType, msisdn, thresholdReached, eventTime, limit, eventName, balanceAmount, addOnID, uuid },
-    }, { returning: 'minimal' })
-    await supabase.insert('audit_logs', {
-      actor_role: 'SYSTEM',
-      tenant_id: sim.enterprise_id ?? null,
-      action: 'WX_WEBHOOK_TRAFFIC_ALERT',
-      target_type: 'SIM',
-      target_id: sim.iccid,
-      request_id: getTraceId(res),
-      source_ip: req.ip,
-    }, { returning: 'minimal' })
-    res.json({ success: true })
-  })
-  app.post('/v1/wx/webhook/product-order', async (req, res) => {
-    if (!requireWxWebhookKey(req, res)) return
-    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-    const iccid = requireIccid(res, req.body?.iccid)
-    const messageType = String(req.body?.messageType || '').trim()
-    const msisdn = String(req.body?.msisdn || '').trim()
-    const sign = String(req.body?.sign || '').trim()
-    const uuid = String(req.body?.uuid || '').trim()
-    const data = req.body?.data ?? {}
-    const addOnId = String(data?.addOnId || '').trim()
-    const addOnType = String(data?.addOnType || '').trim()
-    const startDate = String(data?.startDate || '').trim()
-    const transactionId = String(data?.transactionId || '').trim()
-    const expirationDate = String(data?.expirationDate || '').trim()
-    const occurredAt = startDate ? toIsoDateTime(startDate) : new Date().toISOString()
-    if (!iccid) return
-    if (!messageType || !msisdn || !sign || !uuid || !addOnId || !addOnType || !startDate || !transactionId || !expirationDate) {
-      return sendError(res, 400, 'BAD_REQUEST', 'messageType, msisdn, sign, uuid, data.addOnId, data.addOnType, data.startDate, data.transactionId, data.expirationDate are required.')
-    }
-  if (!validateWebhookTimestamp(res, occurredAt, WX_WEBHOOK_MAX_AGE_MINUTES)) return
-    const isDuplicate = await isDuplicateEventByPayloadField({
-      supabase,
-      eventType: 'PRODUCT_ORDERED',
-      field: 'transactionId',
-      value: transactionId,
-    })
-    if (isDuplicate) {
-      return res.json({ success: true, duplicate: true })
-    }
-    const rows = await supabase.select('sims', `select=sim_id,iccid,enterprise_id&iccid=eq.${encodeURIComponent(iccid)}&limit=1`)
-    const sim = Array.isArray(rows) ? rows[0] : null
-    if (!sim) {
-      const demoList = (process.env.DEMO_SIMS || '').split(',').map((s) => s.trim()).filter((s) => s.length > 0)
-      if (demoList.includes(iccid)) {
-        return res.json({ success: true, demo: true })
-      }
-      return sendError(res, 404, 'RESOURCE_NOT_FOUND', `sim ${iccid} not found.`)
-    }
-    await supabase.insert('events', {
-      event_type: 'PRODUCT_ORDERED',
-      occurred_at: occurredAt,
-      tenant_id: sim.enterprise_id ?? null,
-      request_id: getTraceId(res),
-      payload: { iccid, messageType, msisdn, addOnId, addOnType, startDate, transactionId, expirationDate, uuid },
-    }, { returning: 'minimal' })
-    await supabase.insert('audit_logs', {
-      actor_role: 'SYSTEM',
-      tenant_id: sim.enterprise_id ?? null,
-      action: 'WX_WEBHOOK_PRODUCT_ORDERED',
-      target_type: 'SIM',
-      target_id: sim.iccid,
-      request_id: getTraceId(res),
-      source_ip: req.ip,
-    }, { returning: 'minimal' })
-    res.json({ success: true })
-  })
   mountBillsRoutes('')
   mountBillsRoutes('/v1')
 

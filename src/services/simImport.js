@@ -117,6 +117,66 @@ async function detectSimResellerColumn(supabase) {
   }
 }
 
+async function resolveOperatorLinkedToSupplier(supabase, operatorIdValue, supplierId) {
+  const operatorRows = await supabase.select(
+    'operators',
+    `select=operator_id,business_operator_id&operator_id=eq.${encodeURIComponent(operatorIdValue)}&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+  )
+  let operator = Array.isArray(operatorRows) ? operatorRows[0] : null
+  if (!operator?.operator_id) {
+    const linkRows = await supabase.select(
+      'operators',
+      `select=operator_id,business_operator_id&business_operator_id=eq.${encodeURIComponent(operatorIdValue)}&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+    )
+    operator = Array.isArray(linkRows) ? linkRows[0] : null
+  }
+  return operator
+}
+
+/**
+ * Parse assign-inventory CSV: required column **iccid** only; optional **imsi** (not validated for assignment).
+ * At most 100 non-empty data rows; duplicate ICCIDs in file are de-duplicated.
+ * @returns {{ ok: true, iccids: string[] } | { ok: false, status: number, code: string, message: string }}
+ */
+export function parseIccidsFromAssignInventoryCsv(csvText) {
+  const rows = parseCsvText(String(csvText ?? ''))
+  if (!rows.length) {
+    return toError(400, 'INVALID_FORMAT', 'CSV format is invalid.')
+  }
+  const headers = parseCsvHeaders(rows[0])
+  const headerMap = buildHeaderIndex(headers)
+  if (!headerMap.has('iccid')) {
+    return toError(400, 'INVALID_FORMAT', 'CSV missing required column: iccid.')
+  }
+  const dataRows = rows.slice(1).filter((r) => Array.isArray(r) && r.some((v) => String(v ?? '').trim().length > 0))
+  if (dataRows.length === 0) {
+    return toError(400, 'INVALID_FORMAT', 'CSV has no data rows.')
+  }
+  if (dataRows.length > 100) {
+    return toError(400, 'BAD_REQUEST', 'CSV must not exceed 100 data rows.')
+  }
+  const iccids = []
+  const seen = new Set()
+  for (let i = 0; i < dataRows.length; i++) {
+    const row = dataRows[i]
+    const lineNo = i + 2
+    const rawIccid = getCsvValue(row, headerMap, 'iccid')
+    const iccid = normalizeIccid(rawIccid)
+    if (!iccid) continue
+    if (!isValidIccid(iccid)) {
+      return toError(400, 'INVALID_FORMAT', `Row ${lineNo}: invalid iccid: ${rawIccid}`)
+    }
+    if (!seen.has(iccid)) {
+      seen.add(iccid)
+      iccids.push(iccid)
+    }
+  }
+  if (iccids.length === 0) {
+    return toError(400, 'INVALID_FORMAT', 'CSV has no valid ICCIDs.')
+  }
+  return { ok: true, iccids }
+}
+
 export async function runSimImport(input) {
   const {
     supabase,
@@ -135,10 +195,7 @@ export async function runSimImport(input) {
   if (!supplierId || !isValidUuid(supplierId)) {
     return toError(400, 'BAD_REQUEST', 'supplierId is required and must be a valid uuid.')
   }
-  const apnValue = String(apn ?? '').trim()
-  if (!apnValue) {
-    return toError(400, 'BAD_REQUEST', 'apn is required.')
-  }
+  const apnValue = apn != null && String(apn).trim() !== '' ? String(apn).trim() : null
   const operatorIdValue = String(operatorId ?? '').trim()
   if (!operatorIdValue || !isValidUuid(operatorIdValue)) {
     return toError(400, 'BAD_REQUEST', 'operatorId is required and must be a valid uuid.')
@@ -175,6 +232,21 @@ export async function runSimImport(input) {
   if (dataRows.length > 100000) {
     return toError(400, 'FILE_TOO_LARGE', 'CSV row limit exceeded.')
   }
+  const operator = await resolveOperatorLinkedToSupplier(supabase, operatorIdValue, supplierId)
+  if (!operator?.operator_id) {
+    return toError(400, 'INVALID_OPERATOR', 'Operator is not linked to supplier.')
+  }
+  const businessOperatorId = operator.business_operator_id
+    ? String(operator.business_operator_id)
+    : String(operator.operator_id)
+  const businessRowsPre = await supabase.select(
+    'business_operators',
+    `select=operator_id&operator_id=eq.${encodeURIComponent(businessOperatorId)}&limit=1`
+  )
+  const businessPre = Array.isArray(businessRowsPre) ? businessRowsPre[0] : null
+  if (!businessPre?.operator_id) {
+    return toError(400, 'INVALID_OPERATOR', 'Operator is not found in business operators.')
+  }
   const fileHash = crypto.createHash('sha256').update(Buffer.from(String(csvText ?? ''), 'utf8')).digest('hex')
   const idempotencyKey = batchId || fileHash
   if (idempotencyKey) {
@@ -192,7 +264,7 @@ export async function runSimImport(input) {
     request_id: traceId ?? null,
     actor_user_id: actorUserId ?? null,
     reseller_id: resellerId ?? null,
-    customer_id: enterpriseId ?? null,
+      enterprise_id: enterpriseId ?? null,
     idempotency_key: idempotencyKey ?? null,
     file_hash: fileHash,
     payload: { supplierId, enterpriseId, batchId, fileHash },
@@ -205,56 +277,6 @@ export async function runSimImport(input) {
       status: 'RUNNING',
       started_at: new Date().toISOString(),
     }, { returning: 'minimal' })
-  }
-  const operatorRows = await supabase.select(
-    'operators',
-    `select=operator_id,business_operator_id&operator_id=eq.${encodeURIComponent(operatorIdValue)}&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
-  )
-  let operator = Array.isArray(operatorRows) ? operatorRows[0] : null
-  if (!operator?.operator_id) {
-    const linkRows = await supabase.select(
-      'operators',
-      `select=operator_id,business_operator_id&business_operator_id=eq.${encodeURIComponent(operatorIdValue)}&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
-    )
-    operator = Array.isArray(linkRows) ? linkRows[0] : null
-  }
-  let resolvedBusinessOperatorId = operator?.business_operator_id ? String(operator.business_operator_id) : null
-  if (!operator?.operator_id) {
-    const supplierOperatorRows = await supabase.select(
-      'operators',
-      `select=operator_id,business_operator_id&supplier_id=eq.${encodeURIComponent(supplierId)}`
-    )
-    const supplierOperators = Array.isArray(supplierOperatorRows) ? supplierOperatorRows : []
-    operator = supplierOperators.find((row) => {
-      const rowOperatorId = row?.operator_id ? String(row.operator_id) : ''
-      const rowBusinessOperatorId = row?.business_operator_id ? String(row.business_operator_id) : ''
-      return rowOperatorId === operatorIdValue || rowBusinessOperatorId === operatorIdValue
-    }) ?? null
-    if (operator?.business_operator_id) {
-      resolvedBusinessOperatorId = String(operator.business_operator_id)
-    }
-    if (!operator?.operator_id) {
-      const businessRowsById = await supabase.select(
-        'business_operators',
-        `select=operator_id,mcc,mnc&operator_id=eq.${encodeURIComponent(operatorIdValue)}&limit=1`
-      )
-      const businessById = Array.isArray(businessRowsById) ? businessRowsById[0] : null
-      if (businessById?.operator_id) {
-        resolvedBusinessOperatorId = String(businessById.operator_id)
-      }
-    }
-  }
-  if (!operator?.operator_id) {
-    return toError(400, 'INVALID_OPERATOR', 'Operator is not linked to supplier.')
-  }
-  const businessOperatorId = resolvedBusinessOperatorId || operatorIdValue
-  const businessRows = await supabase.select(
-    'business_operators',
-    `select=operator_id&operator_id=eq.${encodeURIComponent(businessOperatorId)}&limit=1`
-  )
-  const business = Array.isArray(businessRows) ? businessRows[0] : null
-  if (!business?.operator_id) {
-    return toError(400, 'INVALID_OPERATOR', 'Operator is not found in business operators.')
   }
   const allowedFormFactors = new Set(['consumer_removable', 'industrial_removable', 'consumer_embedded', 'industrial_embedded'])
   const hasSimResellerColumn = await detectSimResellerColumn(supabase)

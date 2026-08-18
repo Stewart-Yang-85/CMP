@@ -1,3 +1,5 @@
+import { resolveResellerTenantIdFromContext } from './resellerTenantScope.js'
+
 function isValidUuid(value) {
   const s = String(value || '').trim().toLowerCase()
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s)
@@ -24,6 +26,67 @@ const batchErrorCodes = {
   ENTERPRISE_INACTIVE: 'ENTERPRISE_INACTIVE',
   COMMITMENT_NOT_MET: 'COMMITMENT_NOT_MET',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
+  WRONG_RESELLER: 'WRONG_RESELLER',
+  SIM_ENTERPRISE_CONFLICT: 'SIM_ENTERPRISE_CONFLICT',
+}
+
+function isMissingSimResellerColumnError(err) {
+  const text = String(err?.body ?? err?.message ?? '').toLowerCase()
+  return text.includes('column sims.reseller_id does not exist')
+}
+
+async function detectSimsHasResellerIdColumn(supabase) {
+  try {
+    await supabase.select('sims', 'select=reseller_id&limit=1', { suppressMissingColumns: true })
+    return true
+  } catch (err) {
+    if (isMissingSimResellerColumnError(err)) return false
+    throw err
+  }
+}
+
+async function loadSimRowForInventoryAssign(supabase, field, value, includeResellerId) {
+  const baseCols = 'sim_id,iccid,status,enterprise_id,department_id'
+  const cols = includeResellerId ? `${baseCols},reseller_id,supplier_id` : `${baseCols},supplier_id`
+  const rows = await supabase.select('sims', `select=${cols}&${field}=eq.${encodeURIComponent(value)}&limit=1`)
+  return Array.isArray(rows) ? rows[0] : null
+}
+
+async function resolveInventoryResellerOwnerIds(supabase, resellerTenantId) {
+  const ids = new Set([String(resellerTenantId)])
+  try {
+    const rows = await supabase.select(
+      'resellers',
+      `select=id&tenant_id=eq.${encodeURIComponent(resellerTenantId)}&limit=1`,
+      { suppressMissingColumns: true }
+    )
+    const row = Array.isArray(rows) ? rows[0] : undefined
+    if (row?.id) ids.add(String(row.id))
+  } catch {
+    // optional table
+  }
+  return ids
+}
+
+async function validateAssignTargetEnterprise(supabase, resellerId, enterpriseId) {
+  const rows = await supabase.select(
+    'tenants',
+    `select=tenant_id,parent_id,enterprise_status,tenant_type&tenant_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`
+  )
+  const row = Array.isArray(rows) ? rows[0] : null
+  if (!row?.tenant_id) {
+    return toError(404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+  }
+  if (String(row.tenant_type || '').toUpperCase() !== 'ENTERPRISE') {
+    return toError(400, 'BAD_REQUEST', 'enterpriseId must be an enterprise tenant.')
+  }
+  if (String(row.parent_id || '') !== String(resellerId)) {
+    return toError(403, 'FORBIDDEN', 'enterpriseId is not a child enterprise of resellerId.')
+  }
+  if (String(row.enterprise_status || '').toUpperCase() !== 'ACTIVE') {
+    return toError(409, 'ENTERPRISE_INACTIVE', 'Target enterprise must be ACTIVE.')
+  }
+  return { ok: true }
 }
 
 async function insertBatchEvent({ supabase, eventType, tenantId, requestId, payload }) {
@@ -78,6 +141,10 @@ async function updateSimStatus({ supabase, sim, newStatus, source, requestId, re
     source,
     request_id: requestId,
   }, { returning: 'minimal' })
+  let resellerTenantId = null
+  if (sim.enterprise_id) {
+    resellerTenantId = await resolveResellerTenantIdFromContext(supabase, sim.enterprise_id)
+  }
   if (emitEvent) {
     await supabase.insert('events', {
       event_type: 'SIM_STATUS_CHANGED',
@@ -86,9 +153,11 @@ async function updateSimStatus({ supabase, sim, newStatus, source, requestId, re
       request_id: requestId,
       payload: {
         iccid: sim.iccid,
+        simId: sim.sim_id,
         beforeStatus: sim.status,
         afterStatus: newStatus,
         reason,
+        ...(resellerTenantId ? { resellerId: resellerTenantId } : {}),
       },
     }, { returning: 'minimal' })
   }
@@ -100,7 +169,12 @@ async function updateSimStatus({ supabase, sim, newStatus, source, requestId, re
     target_id: sim.iccid,
     request_id: requestId,
     source_ip: sourceIp,
-    after_data: { beforeStatus: sim.status, afterStatus: newStatus, reason },
+    after_data: {
+      beforeStatus: sim.status,
+      afterStatus: newStatus,
+      reason,
+      ...(resellerTenantId ? { resellerId: resellerTenantId } : {}),
+    },
   }, { returning: 'minimal' })
   return nowIso
 }
@@ -273,11 +347,13 @@ export async function changeSimStatus({
     idempotency_key: idempotencyKey ? String(idempotencyKey) : null,
     actor_user_id: actor?.userId ?? null,
     reseller_id: actor?.resellerId ?? null,
-    customer_id: sim.enterprise_id ?? null,
+    enterprise_id: sim.enterprise_id ?? null,
     payload: {
       action,
       simId: sim.sim_id,
       iccid: sim.iccid,
+      supplierId: sim.supplier_id ?? null,
+      operatorId: sim.operator_id ?? null,
       beforeStatus: sim.status,
       afterStatus: newStatus,
       reason: reason ?? null,
@@ -816,6 +892,10 @@ export async function batchChangeSimStatus({
       })
       failed += 1
     }
+    let rowResellerId = null
+    if (sim.enterprise_id) {
+      rowResellerId = await resolveResellerTenantIdFromContext(supabase, sim.enterprise_id)
+    }
     await supabase.insert('audit_logs', {
       actor_user_id: actor?.userId ?? null,
       actor_role: actor?.role ?? actor?.roleScope ?? null,
@@ -843,6 +923,7 @@ export async function batchChangeSimStatus({
         errorMessage: ok ? null : 'SIM status change failed.',
         beforeStatus: sim.status,
         afterStatus: policy.targetStatus,
+        ...(rowResellerId ? { resellerId: rowResellerId } : {}),
       },
     }, { returning: 'minimal' })
     await insertBatchEvent({
@@ -869,10 +950,14 @@ export async function batchChangeSimStatus({
           errorMessage: ok ? null : 'SIM status change failed.',
           beforeStatus: sim.status,
           afterStatus: policy.targetStatus,
+          ...(rowResellerId ? { resellerId: rowResellerId } : {}),
         },
       },
     })
   }
+  const batchSummaryResellerId = enterpriseId
+    ? await resolveResellerTenantIdFromContext(supabase, enterpriseId)
+    : null
   await supabase.insert('audit_logs', {
     actor_user_id: actor?.userId ?? null,
     actor_role: actor?.role ?? actor?.roleScope ?? null,
@@ -899,6 +984,7 @@ export async function batchChangeSimStatus({
       succeeded,
       failed,
       idempotent: idempotentCount,
+      ...(batchSummaryResellerId ? { resellerId: batchSummaryResellerId } : {}),
     },
   }, { returning: 'minimal' })
   await insertBatchEvent({
@@ -924,6 +1010,7 @@ export async function batchChangeSimStatus({
         succeeded,
         failed,
         idempotent: idempotentCount,
+        ...(batchSummaryResellerId ? { resellerId: batchSummaryResellerId } : {}),
       },
     },
   })
@@ -931,6 +1018,285 @@ export async function batchChangeSimStatus({
     ok: true,
     action: actionValue,
     targetStatus: policy.targetStatus,
+    total: results.length,
+    succeeded,
+    failed,
+    idempotent: idempotentCount,
+    items: results,
+  }
+}
+
+export async function assignInventorySimsToEnterprise({
+  supabase,
+  resellerId,
+  enterpriseId,
+  simIds,
+  actor,
+  traceId,
+  sourceIp,
+}) {
+  const tid = String(resellerId || '').trim()
+  const eid = String(enterpriseId || '').trim()
+  if (!tid || !isValidUuid(tid)) {
+    return toError(400, 'BAD_REQUEST', 'resellerId is required and must be a valid uuid.')
+  }
+  if (!eid || !isValidUuid(eid)) {
+    return toError(400, 'BAD_REQUEST', 'enterpriseId is required and must be a valid uuid.')
+  }
+  const enterpriseOk = await validateAssignTargetEnterprise(supabase, tid, eid)
+  if (!enterpriseOk.ok) {
+    return enterpriseOk
+  }
+  if (!Array.isArray(simIds) || simIds.length === 0) {
+    return toError(400, 'BAD_REQUEST', 'simIds must be a non-empty array.')
+  }
+  if (simIds.length > 100) {
+    return toError(400, 'BAD_REQUEST', 'simIds must not exceed 100 items.')
+  }
+  const hasResellerCol = await detectSimsHasResellerIdColumn(supabase)
+  const ownerIds = await resolveInventoryResellerOwnerIds(supabase, tid)
+  const results = []
+  let succeeded = 0
+  let failed = 0
+  let idempotentCount = 0
+
+  const pushItemAudit = async (simValue, before, after, tenantForAudit) => {
+    await supabase.insert(
+      'audit_logs',
+      {
+        actor_user_id: actor?.userId ?? null,
+        actor_role: actor?.role ?? actor?.roleScope ?? null,
+        tenant_id: tenantForAudit,
+        action: 'SIM_ASSIGN_INVENTORY_RESULT',
+        target_type: 'SIM',
+        target_id: simValue,
+        request_id: traceId ?? null,
+        source_ip: sourceIp ?? null,
+        before_data: before,
+        after_data: after,
+      },
+      { returning: 'minimal' }
+    )
+    await insertBatchEvent({
+      supabase,
+      eventType: 'SIM_ASSIGN_INVENTORY_RESULT',
+      tenantId: tenantForAudit,
+      requestId: traceId ?? null,
+      payload: { beforeData: before, afterData: after },
+    })
+  }
+
+  for (const raw of simIds) {
+    const simValue = String(raw || '').trim()
+    const simIdentifier = parseSimIdentifier(simValue)
+    if (!simIdentifier.ok) {
+      const errorCode = simIdentifier.code === 'BAD_REQUEST' ? batchErrorCodes.INVALID_SIM_ID : simIdentifier.code
+      results.push({
+        input: simValue,
+        ok: false,
+        errorCode,
+        errorMessage: simIdentifier.message,
+      })
+      failed += 1
+      await pushItemAudit(
+        simValue,
+        {
+          input: simValue,
+          resellerId: tid,
+          enterpriseId: eid,
+        },
+        {
+          result: 'FAILED',
+          errorCode,
+          errorMessage: simIdentifier.message,
+        },
+        null
+      )
+      continue
+    }
+    const sim = await loadSimRowForInventoryAssign(supabase, simIdentifier.field, simIdentifier.value, hasResellerCol)
+    if (!sim) {
+      results.push({
+        input: simValue,
+        ok: false,
+        errorCode: batchErrorCodes.RESOURCE_NOT_FOUND,
+        errorMessage: 'sim not found.',
+      })
+      failed += 1
+      await pushItemAudit(
+        simValue,
+        { input: simValue, resellerId: tid, enterpriseId: eid },
+        { result: 'FAILED', errorCode: batchErrorCodes.RESOURCE_NOT_FOUND, errorMessage: 'sim not found.' },
+        null
+      )
+      continue
+    }
+    const curEnterprise = sim.enterprise_id != null && sim.enterprise_id !== '' ? String(sim.enterprise_id) : ''
+    if (curEnterprise && curEnterprise === eid) {
+      results.push({
+        simId: sim.sim_id,
+        iccid: sim.iccid,
+        ok: true,
+        idempotent: true,
+        enterpriseId: eid,
+      })
+      succeeded += 1
+      idempotentCount += 1
+      await pushItemAudit(
+        simValue,
+        {
+          input: simValue,
+          simId: sim.sim_id,
+          iccid: sim.iccid,
+          resellerId: tid,
+          enterpriseId: eid,
+          beforeEnterpriseId: curEnterprise,
+        },
+        { result: 'SUCCEEDED', idempotent: true, enterpriseId: eid },
+        eid
+      )
+      continue
+    }
+    if (curEnterprise && curEnterprise !== eid) {
+      results.push({
+        input: simValue,
+        simId: sim.sim_id,
+        iccid: sim.iccid,
+        ok: false,
+        errorCode: batchErrorCodes.SIM_ENTERPRISE_CONFLICT,
+        errorMessage: 'sim is already assigned to a different enterprise.',
+      })
+      failed += 1
+      await pushItemAudit(
+        simValue,
+        { input: simValue, simId: sim.sim_id, iccid: sim.iccid, resellerId: tid, enterpriseId: eid },
+        {
+          result: 'FAILED',
+          errorCode: batchErrorCodes.SIM_ENTERPRISE_CONFLICT,
+          errorMessage: 'sim is already assigned to a different enterprise.',
+        },
+        curEnterprise
+      )
+      continue
+    }
+    if (String(sim.status || '').toUpperCase() !== 'INVENTORY') {
+      const msg = 'sim must be INVENTORY to assign from reseller pool.'
+      results.push({
+        input: simValue,
+        simId: sim.sim_id,
+        iccid: sim.iccid,
+        ok: false,
+        errorCode: batchErrorCodes.INVALID_STATE,
+        errorMessage: msg,
+      })
+      failed += 1
+      await pushItemAudit(
+        simValue,
+        { input: simValue, simId: sim.sim_id, iccid: sim.iccid, resellerId: tid, enterpriseId: eid },
+        { result: 'FAILED', errorCode: batchErrorCodes.INVALID_STATE, errorMessage: msg },
+        null
+      )
+      continue
+    }
+    if (hasResellerCol) {
+      const rid = sim.reseller_id != null && sim.reseller_id !== '' ? String(sim.reseller_id) : ''
+      if (rid && !ownerIds.has(rid)) {
+        const msg = 'sim does not belong to this reseller inventory.'
+        results.push({
+          input: simValue,
+          simId: sim.sim_id,
+          iccid: sim.iccid,
+          ok: false,
+          errorCode: batchErrorCodes.WRONG_RESELLER,
+          errorMessage: msg,
+        })
+        failed += 1
+        await pushItemAudit(
+          simValue,
+          { input: simValue, simId: sim.sim_id, iccid: sim.iccid, resellerId: tid, enterpriseId: eid },
+          { result: 'FAILED', errorCode: batchErrorCodes.WRONG_RESELLER, errorMessage: msg },
+          null
+        )
+        continue
+      }
+    }
+    await supabase.update(
+      'sims',
+      `sim_id=eq.${encodeURIComponent(String(sim.sim_id))}`,
+      { enterprise_id: eid },
+      { returning: 'minimal' }
+    )
+    results.push({
+      simId: sim.sim_id,
+      iccid: sim.iccid,
+      ok: true,
+      enterpriseId: eid,
+    })
+    succeeded += 1
+    await pushItemAudit(
+      simValue,
+      {
+        input: simValue,
+        simId: sim.sim_id,
+        iccid: sim.iccid,
+        resellerId: tid,
+        enterpriseId: eid,
+        beforeEnterpriseId: curEnterprise || null,
+      },
+      { result: 'SUCCEEDED', enterpriseId: eid },
+      eid
+    )
+  }
+
+  await supabase.insert(
+    'audit_logs',
+    {
+      actor_user_id: actor?.userId ?? null,
+      actor_role: actor?.role ?? actor?.roleScope ?? null,
+      tenant_id: eid,
+      action: 'SIM_ASSIGN_INVENTORY',
+      target_type: 'SIM_BATCH',
+      target_id: null,
+      request_id: traceId ?? null,
+      source_ip: sourceIp ?? null,
+      before_data: {
+        resellerId: tid,
+        enterpriseId: eid,
+        requested: { total: simIds.length },
+      },
+      after_data: {
+        resellerId: tid,
+        enterpriseId: eid,
+        total: results.length,
+        succeeded,
+        failed,
+        idempotent: idempotentCount,
+      },
+    },
+    { returning: 'minimal' }
+  )
+  await insertBatchEvent({
+    supabase,
+    eventType: 'SIM_ASSIGN_INVENTORY',
+    tenantId: eid,
+    requestId: traceId,
+    payload: {
+      beforeData: { resellerId: tid, enterpriseId: eid, requested: { total: simIds.length } },
+      afterData: {
+        resellerId: tid,
+        enterpriseId: eid,
+        total: results.length,
+        succeeded,
+        failed,
+        idempotent: idempotentCount,
+      },
+    },
+  })
+
+  return {
+    ok: true,
+    resellerId: tid,
+    enterpriseId: eid,
     total: results.length,
     succeeded,
     failed,
@@ -990,7 +1356,7 @@ export async function batchDeactivateSims({
     idempotency_key: idempotencyKey ? String(idempotencyKey) : null,
     actor_user_id: actor?.userId ?? null,
     reseller_id: actor?.resellerId ?? null,
-    customer_id: enterpriseId ?? null,
+    enterprise_id: enterpriseId ?? null,
     payload: {
       action: 'SIM_BATCH_DEACTIVATE',
       enterpriseId,

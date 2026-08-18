@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { createApp } from '../src/app.js'
+import { createApp } from '../dist/app.js'
 
 const originalFetch = globalThis.fetch
 const originalEnv = { ...process.env }
@@ -82,7 +82,7 @@ function installSupabaseMock(data: DataSet) {
 
     if (method === 'GET' && table === 'sims') {
       const select = url.searchParams.get('select') ?? ''
-      if (select.includes('reseller_id') && select.trim() === 'reseller_id') {
+      if (select === 'reseller_id' || /^reseller_id(?:&|$)/.test(select)) {
         return jsonResponse(400, { message: 'column sims.reseller_id does not exist' })
       }
       let rows = applySimsFilters(data.sims, url.searchParams)
@@ -139,16 +139,14 @@ function installSupabaseMock(data: DataSet) {
 
 async function withServer(run: (baseUrl: string) => Promise<void>) {
   const app = createApp()
-  const appAny = app as any
-  const server = await new Promise<any>((resolve, reject) => {
-    const s = appAny.listen(0, () => resolve(s))
-    s.on('error', reject)
-  })
-  const port = server.address().port
+  await app.ready()
+  await app.listen({ port: 0, host: '127.0.0.1' })
+  const addr = app.server.address()
+  const port = typeof addr === 'object' && addr && 'port' in addr ? Number(addr.port) : 0
   try {
     await run(`http://127.0.0.1:${port}`)
   } finally {
-    await new Promise<void>((resolve, reject) => server.close((err: any) => (err ? reject(err) : resolve())))
+    await app.close()
   }
 }
 
@@ -158,7 +156,7 @@ afterEach(() => {
 })
 
 describe('sims reseller fallback without sims.reseller_id column', () => {
-  it('returns resellerId and supports resellerId filter for list and csv', async () => {
+  it('returns resellerId and supports resellerId query filter for list and csv', async () => {
     process.env.ADMIN_API_KEY = 'test-admin-key'
     process.env.SUPABASE_URL = 'https://example.supabase.co'
     process.env.SUPABASE_ANON_KEY = 'anon-key'
@@ -205,23 +203,75 @@ describe('sims reseller fallback without sims.reseller_id column', () => {
       const supplierBody = await listBySupplier.json()
       expect(Array.isArray(supplierBody.items)).toBe(true)
       expect(supplierBody.items[0]?.resellerId).toBe(resellerId)
+      expect(supplierBody.items[0]?.resellerName).toBe('R1')
       expect(supplierBody.items[0]?.operatorId).toBe(operatorId)
 
-      const listByReseller = await originalFetch(`${baseUrl}/v1/sims?resellerId=${encodeURIComponent(resellerId)}`, {
+      const listByTenant = await originalFetch(`${baseUrl}/v1/sims?resellerId=${encodeURIComponent(resellerId)}`, {
         headers: { 'x-api-key': 'test-admin-key' },
       })
-      expect(listByReseller.status).toBe(200)
-      const resellerBody = await listByReseller.json()
-      expect(resellerBody.total).toBeGreaterThan(0)
-      expect(resellerBody.items[0]?.resellerId).toBe(resellerId)
+      expect(listByTenant.status).toBe(200)
+      const tenantBody = await listByTenant.json()
+      expect(tenantBody.total).toBeGreaterThan(0)
+      expect(tenantBody.items[0]?.resellerId).toBe(resellerId)
 
-      const csvByReseller = await originalFetch(`${baseUrl}/v1/sims:csv?resellerId=${encodeURIComponent(resellerId)}`, {
+      const csvByTenant = await originalFetch(`${baseUrl}/v1/sims:csv?resellerId=${encodeURIComponent(resellerId)}`, {
         headers: { 'x-api-key': 'test-admin-key' },
       })
-      expect(csvByReseller.status).toBe(200)
-      const csvText = await csvByReseller.text()
-      expect(csvText).toContain(resellerId)
-      expect(csvText).toContain('8986000000000000001')
+      expect(csvByTenant.status).toBe(200)
+      const csvTenantText = await csvByTenant.text()
+      expect(csvTenantText).toContain(resellerId)
+      expect(csvTenantText).toContain('R1')
+      expect(csvTenantText).toContain('8986000000000000001')
+
+    })
+  })
+})
+
+describe('sims reseller_id column', () => {
+  it('returns resellerName from sims.reseller_id when enterprise is null', async () => {
+    process.env.ADMIN_API_KEY = 'test-admin-key'
+    process.env.SUPABASE_URL = 'https://example.supabase.co'
+    process.env.SUPABASE_ANON_KEY = 'anon-key'
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service-role-key'
+
+    const data: DataSet = {
+      sims: [
+        {
+          sim_id: 'sim-1',
+          iccid: '8986000000000000002',
+          primary_imsi: 'imsi-2',
+          status: 'INVENTORY',
+          supplier_id: supplierId,
+          operator_id: supplierOperatorLinkId,
+          reseller_id: resellerId,
+          enterprise_id: null,
+          department_id: null,
+          suppliers: { name: 'S1' },
+          operators: { name: 'O1' },
+        },
+      ],
+      operators: [{ operator_id: supplierOperatorLinkId, business_operator_id: operatorId, supplier_id: supplierId }],
+      businessOperators: [{ operator_id: operatorId, name: 'Operator One', mcc: '460', mnc: '00' }],
+      resellerSuppliers: [{ reseller_id: resellerId, supplier_id: supplierId }],
+      tenants: [{ tenant_id: resellerId, name: 'R1', tenant_type: 'RESELLER', parent_id: null }],
+    }
+    installSupabaseMock(data)
+
+    await withServer(async (baseUrl) => {
+      const listRes = await originalFetch(`${baseUrl}/v1/sims?supplierId=${encodeURIComponent(supplierId)}`, {
+        headers: { 'x-api-key': 'test-admin-key' },
+      })
+      expect(listRes.status).toBe(200)
+      const body = await listRes.json()
+      expect(body.items[0]?.resellerId).toBe(resellerId)
+      expect(body.items[0]?.resellerName).toBe('R1')
+
+      const csvRes = await originalFetch(`${baseUrl}/v1/sims:csv?supplierId=${encodeURIComponent(supplierId)}`, {
+        headers: { 'x-api-key': 'test-admin-key' },
+      })
+      expect(csvRes.status).toBe(200)
+      const csvText = await csvRes.text()
+      expect(csvText).toContain('R1')
     })
   })
 })

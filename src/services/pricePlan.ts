@@ -1,6 +1,15 @@
+import { buildPaginationResponse, parsePagination } from '../utils/pagination.js'
+import { actorUserIdForDb } from '../utils/actorUserId.js'
+
 type SupabaseClient = {
   select: (table: string, queryString: string) => Promise<unknown>
   insert: (table: string, rows: unknown, options?: { returning?: 'minimal' | 'representation' }) => Promise<unknown>
+  update: (
+    table: string,
+    matchQueryString: string,
+    patch: Record<string, unknown>,
+    options?: { returning?: 'minimal' | 'representation' }
+  ) => Promise<unknown>
 }
 
 type ServiceResult<T> =
@@ -24,18 +33,53 @@ function toError(status: number, code: string, message: string) {
 }
 
 async function writeAuditLog(supabase: SupabaseClient, payload: Record<string, unknown>) {
-  await supabase.insert('audit_logs', payload, { returning: 'minimal' })
+  await supabase.insert(
+    'audit_logs',
+    {
+      ...payload,
+      actor_user_id: actorUserIdForDb(payload.actor_user_id as string | null | undefined),
+    },
+    { returning: 'minimal' }
+  )
 }
 
 function toNumber(value: unknown) {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'string' && value.trim() === '') return null
   const num = Number(value)
   return Number.isFinite(num) ? num : null
 }
 
 function toInteger(value: unknown) {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'string' && value.trim() === '') return null
   const num = Number(value)
   if (!Number.isFinite(num)) return null
   return Number.isInteger(num) ? num : Math.trunc(num)
+}
+
+function hasEmptyStringField(payload: any, fieldName: string) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
+  if (!Object.prototype.hasOwnProperty.call(payload, fieldName)) return false
+  return typeof payload[fieldName] === 'string' && payload[fieldName].trim() === ''
+}
+
+function hasInvalidNumberField(payload: any, fieldName: string) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
+  if (!Object.prototype.hasOwnProperty.call(payload, fieldName)) return false
+  const value = payload[fieldName]
+  if (value === null || value === undefined) return false
+  if (typeof value === 'string' && value.trim() === '') return true
+  return toNumber(value) === null
+}
+
+function hasInvalidIntegerField(payload: any, fieldName: string) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false
+  if (!Object.prototype.hasOwnProperty.call(payload, fieldName)) return false
+  const value = payload[fieldName]
+  if (value === null || value === undefined) return false
+  if (typeof value === 'string' && value.trim() === '') return true
+  return toInteger(value) === null
 }
 
 function toBoolean(value: unknown) {
@@ -45,40 +89,27 @@ function toBoolean(value: unknown) {
   return null
 }
 
-function normalizePaygRates(paygRates: unknown, meta: unknown) {
-  const zones: Record<string, { mccmnc: string[]; ratePerMb: number }> = {}
-  const list = Array.isArray(paygRates) ? paygRates : []
-  for (const rate of list) {
-    if (!rate || typeof rate !== 'object') continue
-    const zoneCode = String((rate as { zoneCode?: string }).zoneCode || '').trim()
-    const countries = Array.isArray((rate as { countries?: unknown[] }).countries)
-      ? (rate as { countries?: unknown[] }).countries!.map((c) => String(c).trim()).filter(Boolean)
-      : []
-    const ratePerMb = toNumber((rate as { ratePerMb?: unknown }).ratePerMb)
-    if (!zoneCode || !countries.length || ratePerMb === null || ratePerMb < 0) {
-      return { ok: false as const, message: 'paygRates must include zoneCode, countries[], and ratePerMb >= 0.' }
-    }
-    zones[zoneCode] = { mccmnc: countries, ratePerMb }
+const ISO_4217_CURRENCIES: ReadonlySet<string> | null = (() => {
+  try {
+    const values = (Intl as any)?.supportedValuesOf?.('currency')
+    if (!Array.isArray(values) || !values.length) return null
+    return new Set(values.map((value: unknown) => String(value).trim().toUpperCase()).filter(Boolean))
+  } catch {
+    return null
   }
-  return { ok: true as const, value: { zones, meta } }
-}
+})()
 
-function denormalizePaygRates(paygRates: any) {
-  const zones = paygRates?.zones || {}
-  const out = []
-  for (const [zoneCode, zone] of Object.entries(zones)) {
-    if (!zone) continue
-    out.push({
-      zoneCode,
-      countries: Array.isArray((zone as { mccmnc?: unknown[] }).mccmnc) ? (zone as { mccmnc?: unknown[] }).mccmnc : [],
-      ratePerMb: (zone as { ratePerMb?: number }).ratePerMb ?? 0,
-    })
-  }
-  return out
+function isValidIso4217Currency(value: unknown) {
+  const code = String(value ?? '').trim().toUpperCase()
+  if (!/^[A-Z]{3}$/.test(code)) return false
+  if (!ISO_4217_CURRENCIES) return true
+  return ISO_4217_CURRENCIES.has(code)
 }
 
 function resolveVersionStatus(version: any) {
   if (!version) return 'DRAFT'
+  const raw = String(version.status ?? '').trim().toUpperCase()
+  if (raw === 'DRAFT' || raw === 'PUBLISHED' || raw === 'DEPRECATED') return raw
   if (version.deprecated_at) return 'DEPRECATED'
   if (!version.effective_from) return 'DRAFT'
   const now = Date.now()
@@ -87,434 +118,189 @@ function resolveVersionStatus(version: any) {
   return effective <= now ? 'PUBLISHED' : 'DRAFT'
 }
 
-function normalizeCommercialTerms(input: unknown) {
-  if (input === null || input === undefined) return { ok: true as const, value: null }
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms must be an object.')
-  }
-  const src = input as Record<string, unknown>
-  const testPeriodDays = src.testPeriodDays === undefined ? null : toInteger(src.testPeriodDays)
-  if (src.testPeriodDays !== undefined && (testPeriodDays === null || testPeriodDays < 0)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms.testPeriodDays must be >= 0.')
-  }
-  const testQuotaMb = src.testQuotaMb === undefined ? null : toInteger(src.testQuotaMb)
-  if (src.testQuotaMb !== undefined && (testQuotaMb === null || testQuotaMb < 0)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms.testQuotaMb must be >= 0.')
-  }
-  const rawExpiryCondition = String(src.testExpiryCondition ?? '').trim()
-  if (rawExpiryCondition && !['PERIOD_ONLY', 'QUOTA_ONLY', 'PERIOD_OR_QUOTA'].includes(rawExpiryCondition)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms.testExpiryCondition is invalid.')
-  }
-  const rawExpiryAction = String(src.testExpiryAction ?? '').trim()
-  if (rawExpiryAction && !['ACTIVATED', 'DEACTIVATED'].includes(rawExpiryAction)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms.testExpiryAction is invalid.')
-  }
-  const commitmentPeriodMonths =
-    src.commitmentPeriodMonths === undefined ? null : toInteger(src.commitmentPeriodMonths)
-  if (src.commitmentPeriodMonths !== undefined && (commitmentPeriodMonths === null || commitmentPeriodMonths < 0)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms.commitmentPeriodMonths must be >= 0.')
-  }
-  const commitmentPeriodDays = src.commitmentPeriodDays === undefined ? null : toInteger(src.commitmentPeriodDays)
-  if (src.commitmentPeriodDays !== undefined && (commitmentPeriodDays === null || commitmentPeriodDays < 0)) {
-    return toError(400, 'BAD_REQUEST', 'commercialTerms.commitmentPeriodDays must be >= 0.')
-  }
-  return {
-    ok: true as const,
-    value: {
-      ...(testPeriodDays !== null ? { testPeriodDays } : {}),
-      ...(testQuotaMb !== null ? { testQuotaMb } : {}),
-      testExpiryCondition: rawExpiryCondition || 'PERIOD_OR_QUOTA',
-      testExpiryAction: rawExpiryAction || 'ACTIVATED',
-      ...(commitmentPeriodMonths !== null ? { commitmentPeriodMonths } : {}),
-      ...(commitmentPeriodDays !== null ? { commitmentPeriodDays } : {}),
-    },
-  }
+const PRICE_PLAN_TYPES_WITH_COVERED_NETWORK = new Set([
+  'ONE_TIME',
+  'SIM_DEPENDENT_BUNDLE',
+  'FIXED_BUNDLE',
+  'TIERED_VOLUME_PRICING',
+])
+
+/** All supported price plan types use **CoveredNetworkProfile** for in-profile (MCC,MNC) scope. */
+export function pricePlanTypeUsesCoveredNetwork(type: string) {
+  return PRICE_PLAN_TYPES_WITH_COVERED_NETWORK.has(String(type || '').trim())
 }
 
-function normalizeControlPolicy(input: unknown) {
-  if (input === null || input === undefined) return { ok: true as const, value: null }
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    return toError(400, 'BAD_REQUEST', 'controlPolicy must be an object.')
-  }
-  const src = input as Record<string, unknown>
-  const enabled = src.enabled === undefined ? false : toBoolean(src.enabled)
-  if (src.enabled !== undefined && enabled === null) {
-    return toError(400, 'BAD_REQUEST', 'controlPolicy.enabled must be boolean.')
-  }
-  const cutoffPolicyId = src.cutoffPolicyId === undefined ? '' : String(src.cutoffPolicyId).trim()
-  const throttlingPolicyId = src.throttlingPolicyId === undefined ? '' : String(src.throttlingPolicyId).trim()
-  const cutoffThresholdMb = src.cutoffThresholdMb === undefined ? null : toInteger(src.cutoffThresholdMb)
-  if (src.cutoffThresholdMb !== undefined && (cutoffThresholdMb === null || cutoffThresholdMb < 0)) {
-    return toError(400, 'BAD_REQUEST', 'controlPolicy.cutoffThresholdMb must be >= 0.')
-  }
-  const cutoff: Record<string, unknown> = {}
-  if (cutoffPolicyId) cutoff.cutoffPolicyId = cutoffPolicyId
-  if (cutoffThresholdMb !== null) cutoff.cutoffThresholdMb = cutoffThresholdMb
-  return {
-    ok: true as const,
-    value: {
-      enabled: enabled ?? false,
-      ...(throttlingPolicyId ? { throttlingPolicyId } : {}),
-      ...cutoff,
-    },
-  }
+/** `unset` = body omitted key; `null` = JSON null (clear / explicit null). */
+function parseCoveredNetworkProfileIdInput(payload: unknown): 'unset' | null | string {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 'unset'
+  if (!Object.prototype.hasOwnProperty.call(payload, 'coveredNetworkProfileId')) return 'unset'
+  const v = (payload as Record<string, unknown>).coveredNetworkProfileId
+  if (v === null || v === undefined || v === '') return null
+  return String(v).trim()
 }
 
-function normalizeCarrierService(input: unknown, serviceType: string) {
-  if (input === null || input === undefined) return { ok: true as const, value: null }
-  if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    return toError(400, 'BAD_REQUEST', 'carrierService must be an object.')
-  }
-  const src = input as Record<string, unknown>
-  const supplierId = String(src.supplierId ?? '').trim()
-  const operatorId = String(src.operatorId ?? src.carrierId ?? '').trim()
-  if (supplierId && !isValidUuid(supplierId)) {
-    return toError(400, 'BAD_REQUEST', 'carrierService.supplierId must be a valid uuid.')
-  }
-  if (operatorId && !isValidUuid(operatorId)) {
-    return toError(400, 'BAD_REQUEST', 'carrierService.operatorId must be a valid uuid.')
-  }
-  const rat = String(src.rat ?? '4G').trim()
-  if (rat && !['3G', '4G', '5G', 'NB-IoT'].includes(rat)) {
-    return toError(400, 'BAD_REQUEST', 'carrierService.rat is invalid.')
-  }
-  const apn = String(src.apn ?? '').trim()
-  const apnProfileId = String(src.apnProfileId ?? '').trim()
-  const apnProfileVersionId = String(src.apnProfileVersionId ?? '').trim()
-  const roamingProfileId = String(src.roamingProfileId ?? '').trim()
-  const roamingProfileVersionId = String(src.roamingProfileVersionId ?? '').trim()
-  if (apnProfileId && !isValidUuid(apnProfileId)) {
-    return toError(400, 'BAD_REQUEST', 'carrierService.apnProfileId must be a valid uuid.')
-  }
-  if (apnProfileVersionId && !isValidUuid(apnProfileVersionId)) {
-    return toError(400, 'BAD_REQUEST', 'carrierService.apnProfileVersionId must be a valid uuid.')
-  }
-  if (roamingProfileId && !isValidUuid(roamingProfileId)) {
-    return toError(400, 'BAD_REQUEST', 'carrierService.roamingProfileId must be a valid uuid.')
-  }
-  if (roamingProfileVersionId && !isValidUuid(roamingProfileVersionId)) {
-    return toError(400, 'BAD_REQUEST', 'carrierService.roamingProfileVersionId must be a valid uuid.')
-  }
-  const roamingProfile = src.roamingProfile
-  const allowedMccMnc = Array.isArray((roamingProfile as any)?.allowedMccMnc)
-    ? (roamingProfile as any).allowedMccMnc.map((v: unknown) => String(v).trim()).filter(Boolean)
-    : []
-  if (serviceType === 'DATA' && !apn && !apnProfileId && !apnProfileVersionId && !roamingProfileId && !roamingProfileVersionId) {
-    return toError(
-      400,
-      'BAD_REQUEST',
-      'carrierService.apn or carrierService.apnProfileId or carrierService.apnProfileVersionId or carrierService.roamingProfileId or carrierService.roamingProfileVersionId is required for DATA serviceType.'
-    )
-  }
-  if (roamingProfile !== undefined && !Array.isArray((roamingProfile as any)?.allowedMccMnc)) {
-    return toError(400, 'BAD_REQUEST', 'carrierService.roamingProfile.allowedMccMnc must be an array.')
-  }
-  return {
-    ok: true as const,
-    value: {
-      ...(supplierId ? { supplierId } : {}),
-      ...(operatorId ? { operatorId } : {}),
-      rat: rat || '4G',
-      ...(apn ? { apn } : {}),
-      ...(apnProfileId ? { apnProfileId } : {}),
-      ...(apnProfileVersionId ? { apnProfileVersionId } : {}),
-      ...(roamingProfileId ? { roamingProfileId } : {}),
-      ...(roamingProfileVersionId ? { roamingProfileVersionId } : {}),
-      ...(allowedMccMnc.length ? { roamingProfile: { allowedMccMnc } } : {}),
-    },
-  }
+async function loadEnterpriseParentResellerId(supabase: SupabaseClient, enterpriseId: string): Promise<string | null> {
+  const rows = await supabase.select(
+    'tenants',
+    `select=parent_id,tenant_type&tenant_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`
+  )
+  const row = Array.isArray(rows) ? rows[0] : null
+  if (!row) return null
+  const parent = String((row as any)?.parent_id ?? '').trim()
+  return parent || null
 }
 
-function parseCarrierMccMncPattern(value: unknown) {
-  const raw = String(value ?? '').trim()
-  if (!raw) return null
-  const wildcard = raw.match(/^(\d{3})-\*$/)
-  if (wildcard) {
-    return { mcc: wildcard[1], mnc: null as string | null, normalized: `${wildcard[1]}-*` }
-  }
-  const exact = raw.match(/^(\d{3})-?(\d{2,3})$/)
-  if (!exact) return null
-  return { mcc: exact[1], mnc: exact[2], normalized: `${exact[1]}-${exact[2]}` }
-}
-
-function normalizeCarrierMccMncList(input: unknown) {
-  const list = Array.isArray(input) ? input : []
-  const normalized: string[] = []
-  for (const item of list) {
-    if (typeof item === 'string') {
-      const parsed = parseCarrierMccMncPattern(item)
-      if (!parsed) return toError(400, 'BAD_REQUEST', `carrierService.roamingProfile.allowedMccMnc contains invalid value: ${String(item)}`)
-      normalized.push(parsed.normalized)
-      continue
-    }
-    if (item && typeof item === 'object') {
-      const mcc = String((item as any).mcc ?? '').trim()
-      const mnc = String((item as any).mnc ?? '').trim()
-      const parsed = parseCarrierMccMncPattern(`${mcc}-${mnc}`)
-      if (!parsed) return toError(400, 'BAD_REQUEST', `carrierService.roamingProfile.allowedMccMnc contains invalid value: ${mcc}-${mnc}`)
-      normalized.push(parsed.normalized)
-      continue
-    }
-    return toError(400, 'BAD_REQUEST', 'carrierService.roamingProfile.allowedMccMnc entries are invalid.')
-  }
-  return { ok: true as const, value: Array.from(new Set(normalized)) }
-}
-
-async function loadOperatorBinding(
+/** Reseller (tenants.tenant_id, RESELLER) must match the ENTERPRISE row's parent_id. */
+export async function assertEnterpriseBelongsToReseller(
   supabase: SupabaseClient,
-  supplierId: string | null,
-  operatorId: string
-): Promise<ServiceResult<{ operatorId: string; businessOperatorId: string | null }>> {
-  const supplierFilter = supplierId ? `&supplier_id=eq.${encodeURIComponent(supplierId)}` : ''
-  const directRows = await supabase.select(
-    'operators',
-    `select=operator_id,business_operator_id,supplier_id&operator_id=eq.${encodeURIComponent(operatorId)}${supplierFilter}&limit=1`
-  )
-  const direct = Array.isArray(directRows) ? directRows[0] : null
-  if ((direct as any)?.operator_id) {
-    return {
-      ok: true,
-      value: {
-        operatorId: String((direct as any).operator_id),
-        businessOperatorId: String((direct as any)?.business_operator_id ?? '').trim() || null,
-      },
-    }
-  }
-  const mappedRows = await supabase.select(
-    'operators',
-    `select=operator_id,business_operator_id,supplier_id&business_operator_id=eq.${encodeURIComponent(operatorId)}${supplierFilter}&limit=1`
-  )
-  const mapped = Array.isArray(mappedRows) ? mappedRows[0] : null
-  if ((mapped as any)?.operator_id) {
-    return {
-      ok: true,
-      value: {
-        operatorId: String((mapped as any).operator_id),
-        businessOperatorId: String((mapped as any)?.business_operator_id ?? operatorId).trim() || null,
-      },
-    }
-  }
-  if (supplierId) return toError(400, 'BAD_REQUEST', 'carrierService.operatorId is not linked to supplierId.')
-  return toError(400, 'BAD_REQUEST', 'carrierService.operatorId is not found.')
-}
-
-async function hasSupplierCapabilityForBusinessOperator(
-  supabase: SupabaseClient,
-  supplierId: string,
-  businessOperatorId: string
-) {
-  const directRows = await supabase.select(
-    'operators',
-    `select=operator_id&supplier_id=eq.${encodeURIComponent(supplierId)}&operator_id=eq.${encodeURIComponent(businessOperatorId)}&limit=1`
-  )
-  if (Array.isArray(directRows) && (directRows[0] as any)?.operator_id) return true
-  const mappedRows = await supabase.select(
-    'operators',
-    `select=operator_id&supplier_id=eq.${encodeURIComponent(supplierId)}&business_operator_id=eq.${encodeURIComponent(businessOperatorId)}&limit=1`
-  )
-  return Array.isArray(mappedRows) && Boolean((mappedRows[0] as any)?.operator_id)
-}
-
-async function validateCarrierServiceReferences(
-  supabase: SupabaseClient,
-  serviceType: string,
-  carrierService: any
+  enterpriseId: string,
+  resellerId: string
 ): Promise<ServiceResult<null>> {
-  if (!carrierService || typeof carrierService !== 'object') return { ok: true, value: null }
-  const supplierId = String(carrierService.supplierId ?? '').trim() || null
-  const operatorIdInput = String(carrierService.operatorId ?? carrierService.carrierId ?? '').trim() || null
-  const apn = String(carrierService.apn ?? '').trim() || null
-  const apnProfileId = String(carrierService.apnProfileId ?? '').trim() || null
-  const apnProfileVersionId = String(carrierService.apnProfileVersionId ?? '').trim() || null
-  const roamingProfileId = String(carrierService.roamingProfileId ?? '').trim() || null
-  const roamingProfileVersionId = String(carrierService.roamingProfileVersionId ?? '').trim() || null
-  const rawAllowed = (carrierService as any)?.roamingProfile?.allowedMccMnc
-  const allowedNormalize = normalizeCarrierMccMncList(rawAllowed)
-  if (!allowedNormalize.ok) return allowedNormalize
-  const allowedMccMnc = allowedNormalize.value
-  let resolvedOperatorId: string | null = null
-  let resolvedBusinessOperatorId: string | null = null
-  if (operatorIdInput) {
-    const resolved = await loadOperatorBinding(supabase, supplierId, operatorIdInput)
-    if (!resolved.ok) return resolved
-    resolvedOperatorId = resolved.value.operatorId
-    resolvedBusinessOperatorId = resolved.value.businessOperatorId
+  if (!isValidUuid(enterpriseId)) {
+    return toError(400, 'BAD_REQUEST', 'enterpriseId is invalid.')
   }
-  let apnFromProfile: string | null = null
-  if (apnProfileId) {
-    const profileRows = await supabase.select(
-      'apn_profiles',
-      `select=apn_profile_id,apn,supplier_id,operator_id,status&apn_profile_id=eq.${encodeURIComponent(apnProfileId)}&limit=1`
-    )
-    const profile = Array.isArray(profileRows) ? profileRows[0] : null
-    if (!(profile as any)?.apn_profile_id) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.apnProfileId is not found.')
-    }
-    if (supplierId && String((profile as any)?.supplier_id ?? '').trim() !== supplierId) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.apnProfileId does not belong to supplierId.')
-    }
-    if (resolvedOperatorId && String((profile as any)?.operator_id ?? '').trim() !== resolvedOperatorId) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.apnProfileId does not match operatorId.')
-    }
-    apnFromProfile = String((profile as any)?.apn ?? '').trim() || null
+  if (!isValidUuid(resellerId)) {
+    return toError(400, 'BAD_REQUEST', 'resellerId is invalid.')
   }
-  if (apnProfileVersionId) {
-    const versionRows = await supabase.select(
-      'profile_versions',
-      `select=profile_version_id,profile_type,profile_id,config&profile_type=eq.APN&profile_version_id=eq.${encodeURIComponent(apnProfileVersionId)}&limit=1`
-    )
-    const profileVersion = Array.isArray(versionRows) ? versionRows[0] : null
-    if (!(profileVersion as any)?.profile_id) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.apnProfileVersionId is not found.')
-    }
-    const profileRows = await supabase.select(
-      'apn_profiles',
-      `select=apn_profile_id,apn,supplier_id,operator_id,status&apn_profile_id=eq.${encodeURIComponent(String((profileVersion as any).profile_id))}&limit=1`
-    )
-    const profile = Array.isArray(profileRows) ? profileRows[0] : null
-    if (!(profile as any)?.apn_profile_id) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.apnProfileVersionId references missing APN profile.')
-    }
-    if (supplierId && String((profile as any)?.supplier_id ?? '').trim() !== supplierId) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.apnProfileVersionId does not belong to supplierId.')
-    }
-    if (resolvedOperatorId && String((profile as any)?.operator_id ?? '').trim() !== resolvedOperatorId) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.apnProfileVersionId does not match operatorId.')
-    }
-    apnFromProfile = String((profile as any)?.apn ?? '').trim() || null
+  const rows = await supabase.select(
+    'tenants',
+    `select=tenant_id,parent_id,tenant_type&tenant_id=eq.${encodeURIComponent(enterpriseId)}&limit=1`
+  )
+  const row = Array.isArray(rows) ? rows[0] : null
+  if (!row) {
+    return toError(400, 'BAD_REQUEST', 'enterpriseId is invalid.')
   }
-  const apnToValidate = apn || apnFromProfile
-  if (serviceType === 'DATA' && !apnToValidate && !roamingProfileId && !roamingProfileVersionId) {
-    return toError(
-      400,
-      'BAD_REQUEST',
-      'carrierService.apn or carrierService.apnProfileId or carrierService.apnProfileVersionId or carrierService.roamingProfileId or carrierService.roamingProfileVersionId is required for DATA serviceType.'
-    )
+  if (String((row as any).tenant_type ?? '').trim() !== 'ENTERPRISE') {
+    return toError(400, 'BAD_REQUEST', 'enterpriseId is invalid.')
   }
-  if (apn && apnFromProfile && apn !== apnFromProfile) {
-    return toError(400, 'BAD_REQUEST', 'carrierService.apn must match carrierService.apnProfileId/apnProfileVersionId.')
+  const parent = String((row as any).parent_id ?? '').trim()
+  const rid = String(resellerId).trim()
+  if (!parent || parent !== rid) {
+    return toError(400, 'BAD_REQUEST', 'resellerId is invalid.')
   }
-  if (apnToValidate && supplierId) {
-    const filters = [
-      `supplier_id=eq.${encodeURIComponent(supplierId)}`,
-      `apn=eq.${encodeURIComponent(apnToValidate)}`,
-    ]
-    if (resolvedOperatorId) filters.push(`operator_id=eq.${encodeURIComponent(resolvedOperatorId)}`)
-    const rows = await supabase.select('apn_profiles', `select=apn_profile_id,status&${filters.join('&')}&limit=1`)
-    const apnProfile = Array.isArray(rows) ? rows[0] : null
-    if (!(apnProfile as any)?.apn_profile_id) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.apn is not found in supplier capability directory.')
-    }
-    const status = String((apnProfile as any)?.status ?? '').trim().toUpperCase()
-    if (status === 'DEPRECATED') {
-      return toError(400, 'BAD_REQUEST', 'carrierService.apn is deprecated for current supplier capability.')
-    }
-  }
-  if (roamingProfileVersionId) {
-    const versionRows = await supabase.select(
-      'profile_versions',
-      `select=profile_version_id,profile_type,profile_id,config&profile_type=eq.ROAMING&profile_version_id=eq.${encodeURIComponent(roamingProfileVersionId)}&limit=1`
-    )
-    const profileVersion = Array.isArray(versionRows) ? versionRows[0] : null
-    if (!(profileVersion as any)?.profile_id) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.roamingProfileVersionId is not found.')
-    }
-    const profileRows = await supabase.select(
-      'roaming_profiles',
-      `select=roaming_profile_id,supplier_id,operator_id,mccmnc_list,status&roaming_profile_id=eq.${encodeURIComponent(String((profileVersion as any).profile_id))}&limit=1`
-    )
-    const profile = Array.isArray(profileRows) ? profileRows[0] : null
-    if (!(profile as any)?.roaming_profile_id) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.roamingProfileVersionId references missing roaming profile.')
-    }
-    if (supplierId && String((profile as any)?.supplier_id ?? '').trim() !== supplierId) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.roamingProfileVersionId does not belong to supplierId.')
-    }
-    if (resolvedOperatorId && String((profile as any)?.operator_id ?? '').trim() !== resolvedOperatorId) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.roamingProfileVersionId does not match operatorId.')
-    }
-    if (!allowedMccMnc.length) {
-      const fromVersion = normalizeCarrierMccMncList((profileVersion as any)?.config?.mccmncList ?? (profile as any)?.mccmnc_list)
-      if (!fromVersion.ok) return fromVersion
-      for (const value of fromVersion.value) allowedMccMnc.push(value)
-    }
-  }
-  if (roamingProfileId) {
-    const profileRows = await supabase.select(
-      'roaming_profiles',
-      `select=roaming_profile_id,supplier_id,operator_id,mccmnc_list,status&roaming_profile_id=eq.${encodeURIComponent(roamingProfileId)}&limit=1`
-    )
-    const profile = Array.isArray(profileRows) ? profileRows[0] : null
-    if (!(profile as any)?.roaming_profile_id) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.roamingProfileId is not found.')
-    }
-    if (supplierId && String((profile as any)?.supplier_id ?? '').trim() !== supplierId) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.roamingProfileId does not belong to supplierId.')
-    }
-    if (resolvedOperatorId && String((profile as any)?.operator_id ?? '').trim() !== resolvedOperatorId) {
-      return toError(400, 'BAD_REQUEST', 'carrierService.roamingProfileId does not match operatorId.')
-    }
-    if (!allowedMccMnc.length) {
-      const fromProfile = normalizeCarrierMccMncList((profile as any)?.mccmnc_list)
-      if (!fromProfile.ok) return fromProfile
-      for (const value of fromProfile.value) allowedMccMnc.push(value)
-    }
-  }
-  for (const pattern of allowedMccMnc) {
-    const parsed = parseCarrierMccMncPattern(pattern)
-    if (!parsed) {
-      return toError(400, 'BAD_REQUEST', `carrierService.roamingProfile.allowedMccMnc contains invalid value: ${pattern}`)
-    }
-    const query = parsed.mnc
-      ? `select=operator_id,mcc,mnc&mcc=eq.${encodeURIComponent(parsed.mcc)}&mnc=eq.${encodeURIComponent(parsed.mnc)}`
-      : `select=operator_id,mcc,mnc&mcc=eq.${encodeURIComponent(parsed.mcc)}`
-    const rows = await supabase.select('business_operators', query)
-    const operators = Array.isArray(rows) ? rows : []
-    if (!operators.length) {
-      return toError(400, 'BAD_REQUEST', `carrierService.roamingProfile.allowedMccMnc is unknown: ${pattern}`)
-    }
-    if (supplierId) {
-      let hasCapability = false
-      for (const row of operators) {
-        const businessOperatorId = String((row as any)?.operator_id ?? '').trim()
-        if (!businessOperatorId) continue
-        if (await hasSupplierCapabilityForBusinessOperator(supabase, supplierId, businessOperatorId)) {
-          hasCapability = true
-          break
-        }
-      }
-      if (!hasCapability) {
-        return toError(400, 'BAD_REQUEST', `carrierService.roamingProfile.allowedMccMnc is not supported by supplier: ${pattern}`)
-      }
-    }
-    if (resolvedBusinessOperatorId) {
-      const matched = operators.some((row) => {
-        const businessOperatorId = String((row as any)?.operator_id ?? '').trim()
-        return businessOperatorId === resolvedBusinessOperatorId || businessOperatorId === resolvedOperatorId
-      })
-      if (!matched) {
-        return toError(400, 'BAD_REQUEST', `carrierService.roamingProfile.allowedMccMnc does not match operatorId: ${pattern}`)
-      }
-    }
+  const rrows = await supabase.select(
+    'tenants',
+    `select=tenant_id,tenant_type&tenant_id=eq.${encodeURIComponent(rid)}&limit=1`
+  )
+  const r = Array.isArray(rrows) ? rrows[0] : null
+  if (!r || String((r as any).tenant_type ?? '').trim() !== 'RESELLER') {
+    return toError(400, 'BAD_REQUEST', 'resellerId is invalid.')
   }
   return { ok: true, value: null }
 }
 
-function extractCarrierServiceMeta(meta: unknown) {
-  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null
-  const value = (meta as Record<string, unknown>).carrierService
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  return value as Record<string, unknown>
+async function assertResellerSupplierBinding(
+  supabase: SupabaseClient,
+  resellerTenantId: string,
+  supplierId: string
+): Promise<boolean> {
+  const rows = await supabase.select(
+    'reseller_suppliers',
+    `select=supplier_id&reseller_id=eq.${encodeURIComponent(resellerTenantId)}&supplier_id=eq.${encodeURIComponent(supplierId)}&limit=1`
+  )
+  const row = Array.isArray(rows) ? rows[0] : null
+  return Boolean((row as any)?.supplier_id)
 }
 
-function buildMeta(payload: any, normalized: { commercialTerms: unknown; controlPolicy: unknown; carrierService: unknown }) {
-  const meta: Record<string, unknown> = {}
-  if (normalized.commercialTerms) meta.commercialTerms = normalized.commercialTerms
-  if (normalized.controlPolicy) meta.controlPolicy = normalized.controlPolicy
-  if (normalized.carrierService) meta.carrierService = normalized.carrierService
-  if (payload?.expiryBoundary) meta.expiryBoundary = payload.expiryBoundary
-  if (payload?.prorationRounding) meta.prorationRounding = payload.prorationRounding
-  return Object.keys(meta).length ? meta : null
+/**
+ * Validates CoveredNetworkProfile for a price plan row: existence, lifecycle, reseller/supplier scope vs enterprise.
+ */
+async function validateCoveredNetworkProfileForPricePlan(
+  supabase: SupabaseClient,
+  enterpriseId: string,
+  coveredNetworkProfileId: string,
+  options: { requirePublished: boolean }
+): Promise<ServiceResult<null>> {
+  if (!isValidUuid(coveredNetworkProfileId)) {
+    return toError(400, 'BAD_REQUEST', 'coveredNetworkProfileId is invalid.')
+  }
+  const profileRows = await supabase.select(
+    'covered_network_profiles',
+    `select=covered_network_profile_id,supplier_id,reseller_id,operator_id,status&covered_network_profile_id=eq.${encodeURIComponent(coveredNetworkProfileId)}&limit=1`
+  )
+  const profile = Array.isArray(profileRows) ? profileRows[0] : null
+  if (!(profile as any)?.covered_network_profile_id) {
+    return toError(400, 'BAD_REQUEST', 'coveredNetworkProfileId is invalid.')
+  }
+  const status = String((profile as any).status ?? '').trim().toUpperCase()
+  if (status === 'DEPRECATED') {
+    return toError(400, 'BAD_REQUEST', 'coveredNetworkProfileId references a DEPRECATED profile.')
+  }
+  if (options.requirePublished) {
+    if (status !== 'PUBLISHED') {
+      return toError(
+        409,
+        'INVALID_STATUS',
+        'coveredNetworkProfileId is invalid.'
+      )
+    }
+  } else if (status !== 'DRAFT' && status !== 'PUBLISHED') {
+    return toError(400, 'BAD_REQUEST', 'coveredNetworkProfileId has an invalid status.')
+  }
+  const supplierId = String((profile as any).supplier_id ?? '').trim()
+  const profileResellerId = String((profile as any).reseller_id ?? '').trim() || null
+  const enterpriseResellerId = await loadEnterpriseParentResellerId(supabase, enterpriseId)
+
+  if (profileResellerId) {
+    if (!enterpriseResellerId) {
+      return toError(400, 'BAD_REQUEST', 'coveredNetworkProfileId is scoped to a reseller but enterprise has no reseller parent.')
+    }
+    if (profileResellerId !== enterpriseResellerId) {
+      return toError(400, 'BAD_REQUEST', 'coveredNetworkProfileId is invalid.')
+    }
+  }
+
+  if (enterpriseResellerId) {
+    const bound = await assertResellerSupplierBinding(supabase, enterpriseResellerId, supplierId)
+    if (!bound) {
+      return toError(400, 'BAD_REQUEST', 'coveredNetworkProfileId is invalid.')
+    }
+  }
+
+  return { ok: true, value: null }
+}
+
+async function resolveCoveredNetworkProfileIdForWrite(
+  supabase: SupabaseClient,
+  enterpriseId: string,
+  planType: string,
+  payload: unknown,
+  existingCoveredId: string | null | undefined,
+  mode: 'create' | 'update',
+  lifecycle: { requirePublished: boolean }
+): Promise<ServiceResult<string | null>> {
+  const uses = pricePlanTypeUsesCoveredNetwork(planType)
+  const raw = parseCoveredNetworkProfileIdInput(payload)
+  let next: string | null = null
+
+  if (!uses) {
+    if (raw !== 'unset' && raw !== null && String(raw).trim() !== '') {
+      return toError(400, 'BAD_REQUEST', 'coveredNetworkProfileId is not supported for this price plan type.')
+    }
+    return { ok: true, value: null }
+  }
+
+  if (mode === 'create') {
+    if (raw === 'unset' || raw === null) {
+      return toError(400, 'BAD_REQUEST', 'coveredNetworkProfileId is required.')
+    }
+    next = String(raw).trim() || null
+  } else {
+    if (raw === 'unset') {
+      next = existingCoveredId ? String(existingCoveredId).trim() || null : null
+    } else if (raw === null) {
+      return toError(400, 'BAD_REQUEST', 'coveredNetworkProfileId is invalid.')
+    } else {
+      next = String(raw).trim() || null
+    }
+  }
+
+  if (!next || !isValidUuid(next)) {
+    return toError(400, 'BAD_REQUEST', 'coveredNetworkProfileId is required.')
+  }
+  const v = await validateCoveredNetworkProfileForPricePlan(supabase, enterpriseId, next, lifecycle)
+  if (!v.ok) return v
+  return { ok: true, value: next }
 }
 
 function parseUpstreamMessage(error: any) {
@@ -550,6 +336,8 @@ function validatePayload(
   currency: string
   billingCycleType: string
   firstCycleProration: string
+  prorationRounding: string
+  expiryBoundary: string | null
   monthlyFee: number | null
   deactivatedMonthlyFee: number | null
   oneTimeFee: number | null
@@ -559,37 +347,76 @@ function validatePayload(
   totalQuotaMb: number | null
   overageRatePerMb: number | null
   tiers: unknown[] | null
-  paygRates: unknown[] | null
-  meta: unknown
 }> {
   const requireCommonFields = options.requireCommonFields !== false
+  const numberFields = ['oneTimeFee', 'monthlyFee', 'deactivatedMonthlyFee', 'overageRatePerMb', 'ratePerMb'] as const
+  for (const fieldName of numberFields) {
+    if (hasInvalidNumberField(payload, fieldName)) return toError(400, 'BAD_REQUEST', `${fieldName} is invalid.`)
+  }
+  const integerFields = ['quotaMb', 'validityDays', 'totalQuotaMb', 'perSimQuotaMb'] as const
+  for (const fieldName of integerFields) {
+    if (hasInvalidIntegerField(payload, fieldName)) return toError(400, 'BAD_REQUEST', `${fieldName} is invalid.`)
+  }
+  if (payload?.commercialTerms !== undefined && payload?.commercialTerms !== null) {
+    return toError(
+      400,
+      'BAD_REQUEST',
+      'commercialTerms must not be set on a price plan; use package commercialTermsId.'
+    )
+  }
+  if (payload?.controlPolicy !== undefined && payload?.controlPolicy !== null) {
+    return toError(400, 'BAD_REQUEST', 'controlPolicy must not be set on a price plan; use package controlPolicyId.')
+  }
+  if (payload?.carrierService !== undefined && payload?.carrierService !== null) {
+    return toError(400, 'BAD_REQUEST', 'carrierService must not be set on a price plan; use package carrierServiceId.')
+  }
+  if (payload?.carrierServiceConfig !== undefined && payload?.carrierServiceConfig !== null) {
+    return toError(400, 'BAD_REQUEST', 'carrierServiceConfig must not be set on a price plan; use package carrierServiceId.')
+  }
+  const paygList = payload?.paygRates
+  if (Array.isArray(paygList) && paygList.length > 0) {
+    return toError(400, 'BAD_REQUEST', 'paygRates are not supported on price plans.')
+  }
   const name = String(payload?.name || '').trim()
   if (!name) return toError(400, 'BAD_REQUEST', 'name is required.')
   const rawType = String(payload?.price_plan_type ?? payload?.type ?? '').trim()
   const type = rawType === 'TIERED_PRICING' ? 'TIERED_VOLUME_PRICING' : rawType
   const allowedTypes = new Set(['ONE_TIME', 'SIM_DEPENDENT_BUNDLE', 'FIXED_BUNDLE', 'TIERED_VOLUME_PRICING'])
-  if (!allowedTypes.has(type)) return toError(400, 'BAD_REQUEST', 'price_plan_type is invalid.')
+  if (!allowedTypes.has(type)) {
+    return toError(
+      400,
+      'BAD_REQUEST',
+      `price_plan_type is invalid. Allowed Values: ${Array.from(allowedTypes).join(', ')}.`
+    )
+  }
+  const allowedServiceTypes = ['DATA', 'VOICE', 'SMS'] as const
   const serviceType = String(payload?.serviceType || '').trim()
   if (requireCommonFields && !serviceType) return toError(400, 'BAD_REQUEST', 'serviceType is required.')
-  if (serviceType && !['DATA', 'VOICE', 'SMS'].includes(serviceType)) {
-    return toError(400, 'BAD_REQUEST', 'serviceType is invalid.')
+  if (serviceType && !allowedServiceTypes.includes(serviceType as (typeof allowedServiceTypes)[number])) {
+    return toError(400, 'BAD_REQUEST', `serviceType is invalid. Allowed Values: ${allowedServiceTypes.join(', ')}.`)
   }
-  const currency = String(payload?.currency || '').trim()
+  const currency = String(payload?.currency || '').trim().toUpperCase()
   if (requireCommonFields && !currency) return toError(400, 'BAD_REQUEST', 'currency is required.')
+  if (currency && !isValidIso4217Currency(currency)) {
+    return toError(400, 'BAD_REQUEST', 'currency must be ISO 4217 code.')
+  }
+  const allowedBillingCycleTypes = ['CALENDAR_MONTH', 'CUSTOM_RANGE'] as const
   const billingCycleType = String(payload?.billingCycleType || '').trim()
   if (requireCommonFields && !billingCycleType) return toError(400, 'BAD_REQUEST', 'billingCycleType is required.')
-  if (billingCycleType && !['CALENDAR_MONTH', 'CUSTOM_RANGE'].includes(billingCycleType)) {
-    return toError(400, 'BAD_REQUEST', 'billingCycleType is invalid.')
+  if (billingCycleType && !allowedBillingCycleTypes.includes(billingCycleType as (typeof allowedBillingCycleTypes)[number])) {
+    return toError(400, 'BAD_REQUEST', `billingCycleType is invalid. Allowed Values: ${allowedBillingCycleTypes.join(', ')}.`)
   }
+  const allowedFirstCycleProration = ['NONE', 'DAILY_PRORATION'] as const
   const firstCycleProration = String(payload?.firstCycleProration || '').trim()
   if (requireCommonFields && !firstCycleProration) return toError(400, 'BAD_REQUEST', 'firstCycleProration is required.')
-  if (firstCycleProration && !['NONE', 'DAILY_PRORATION'].includes(firstCycleProration)) {
-    return toError(400, 'BAD_REQUEST', 'firstCycleProration is invalid.')
+  if (firstCycleProration && !allowedFirstCycleProration.includes(firstCycleProration as (typeof allowedFirstCycleProration)[number])) {
+    return toError(400, 'BAD_REQUEST', `firstCycleProration is invalid. Allowed Values: ${allowedFirstCycleProration.join(', ')}.`)
   }
+  const allowedProrationRounding = ['ROUND_HALF_UP'] as const
   const prorationRounding = String(payload?.prorationRounding || '').trim()
   if (requireCommonFields && !prorationRounding) return toError(400, 'BAD_REQUEST', 'prorationRounding is required.')
-  if (prorationRounding && !['ROUND_HALF_UP'].includes(prorationRounding)) {
-    return toError(400, 'BAD_REQUEST', 'prorationRounding is invalid.')
+  if (prorationRounding && !allowedProrationRounding.includes(prorationRounding as (typeof allowedProrationRounding)[number])) {
+    return toError(400, 'BAD_REQUEST', `prorationRounding is invalid. Allowed Values: ${allowedProrationRounding.join(', ')}.`)
   }
   const monthlyFee = toNumber(payload?.monthlyFee)
   const deactivatedMonthlyFee = toNumber(payload?.deactivatedMonthlyFee)
@@ -599,55 +426,69 @@ function validatePayload(
   const perSimQuotaMb = toInteger(payload?.perSimQuotaMb)
   const totalQuotaMb = toInteger(payload?.totalQuotaMb)
   const overageRatePerMb = toNumber(payload?.overageRatePerMb)
-  const commercialTermsNormalized = normalizeCommercialTerms(payload?.commercialTerms)
-  if (!commercialTermsNormalized.ok) return commercialTermsNormalized
-  const controlPolicyNormalized = normalizeControlPolicy(payload?.controlPolicy)
-  if (!controlPolicyNormalized.ok) return controlPolicyNormalized
-  const carrierServiceInput = payload?.carrierService ?? payload?.carrierServiceConfig
-  const carrierServiceNormalized = normalizeCarrierService(carrierServiceInput, serviceType || 'DATA')
-  if (!carrierServiceNormalized.ok) return carrierServiceNormalized
+  let expiryBoundary: string | null = null
   if (type === 'ONE_TIME') {
-    if (oneTimeFee === null || oneTimeFee < 0) return toError(400, 'BAD_REQUEST', 'oneTimeFee must be >= 0.')
-    if (quotaMb === null || quotaMb < 0) return toError(400, 'BAD_REQUEST', 'quotaMb must be >= 0.')
-    if (validityDays === null || validityDays < 1) return toError(400, 'BAD_REQUEST', 'validityDays must be > 0.')
+    if (oneTimeFee === null || oneTimeFee < 0) return toError(400, 'BAD_REQUEST', 'oneTimeFee is invalid.')
+    if (quotaMb === null || quotaMb < 0) return toError(400, 'BAD_REQUEST', 'quotaMb is invalid.')
+    if (validityDays === null || validityDays < 1) return toError(400, 'BAD_REQUEST', 'validityDays is invalid.')
+    const allowedExpiryBoundaries = ['CALENDAR_DAY_END', 'DURATION_EXCLUSIVE_END'] as const
     const boundary = String(payload?.expiryBoundary || '').trim()
-    if (!['CALENDAR_DAY_END', 'DURATION_EXCLUSIVE_END'].includes(boundary)) {
-      return toError(400, 'BAD_REQUEST', 'expiryBoundary is required for ONE_TIME.')
+    if (!allowedExpiryBoundaries.includes(boundary as (typeof allowedExpiryBoundaries)[number])) {
+      return toError(
+        400,
+        'BAD_REQUEST',
+        `expiryBoundary is invalid for ONE_TIME. Allowed Values: ${allowedExpiryBoundaries.join(', ')}.`
+      )
     }
+    expiryBoundary = boundary
   }
   if (type !== 'ONE_TIME') {
-    if (monthlyFee === null || monthlyFee < 0) return toError(400, 'BAD_REQUEST', 'monthlyFee must be >= 0.')
+    if (monthlyFee === null || monthlyFee < 0) return toError(400, 'BAD_REQUEST', 'monthlyFee is invalid.')
     if (deactivatedMonthlyFee === null || deactivatedMonthlyFee < 0) {
-      return toError(400, 'BAD_REQUEST', 'deactivatedMonthlyFee must be >= 0.')
+      return toError(400, 'BAD_REQUEST', 'deactivatedMonthlyFee is invalid.')
     }
-    if (monthlyFee !== null && deactivatedMonthlyFee !== null && deactivatedMonthlyFee >= monthlyFee) {
-      return toError(400, 'BAD_REQUEST', 'deactivatedMonthlyFee must be < monthlyFee.')
+    const bothFeesZero = monthlyFee === 0 && deactivatedMonthlyFee === 0
+    if (monthlyFee !== null && deactivatedMonthlyFee !== null && deactivatedMonthlyFee >= monthlyFee && !bothFeesZero) {
+      return toError(400, 'BAD_REQUEST', 'deactivatedMonthlyFee is invalid.')
     }
   }
   if (type === 'SIM_DEPENDENT_BUNDLE') {
     if (perSimQuotaMb === null || perSimQuotaMb < 0) {
-      return toError(400, 'BAD_REQUEST', 'perSimQuotaMb must be >= 0.')
+      return toError(400, 'BAD_REQUEST', 'perSimQuotaMb is invalid.')
     }
   }
   if (type === 'FIXED_BUNDLE') {
     if (totalQuotaMb === null || totalQuotaMb < 0) {
-      return toError(400, 'BAD_REQUEST', 'totalQuotaMb must be >= 0.')
+      return toError(400, 'BAD_REQUEST', 'totalQuotaMb is invalid.')
     }
   }
   if (type === 'TIERED_VOLUME_PRICING') {
     const tiers = Array.isArray(payload?.tiers) ? payload.tiers : []
-    if (!tiers.length) return toError(400, 'BAD_REQUEST', 'tiers must be provided.')
+    if (!tiers.length) return toError(400, 'BAD_REQUEST', 'tiers is required.')
+    let prevFromMb: number | null = null
+    let prevToMb: number | null = null
     for (const tier of tiers) {
+      if (hasInvalidIntegerField(tier, 'fromMb') || hasInvalidIntegerField(tier, 'toMb') || hasInvalidNumberField(tier, 'ratePerMb')) {
+        return toError(400, 'BAD_REQUEST', 'tiers is invalid.')
+      }
       const fromMb = toInteger((tier as { fromMb?: unknown }).fromMb)
       const toMb = toInteger((tier as { toMb?: unknown }).toMb)
       const ratePerMb = toNumber((tier as { ratePerMb?: unknown }).ratePerMb)
       if (fromMb === null || fromMb < 0 || toMb === null || toMb <= fromMb || ratePerMb === null || ratePerMb < 0) {
-        return toError(400, 'BAD_REQUEST', 'tiers must include fromMb < toMb and ratePerMb >= 0.')
+        return toError(400, 'BAD_REQUEST', 'tiers is invalid.')
       }
+      if (prevFromMb !== null && fromMb <= prevFromMb) {
+        return toError(400, 'BAD_REQUEST', 'tiers is invalid.')
+      }
+      if (prevToMb !== null && fromMb !== prevToMb) {
+        return toError(400, 'BAD_REQUEST', 'tiers is invalid.')
+      }
+      prevFromMb = fromMb
+      prevToMb = toMb
     }
   }
   if (overageRatePerMb !== null && overageRatePerMb < 0) {
-    return toError(400, 'BAD_REQUEST', 'overageRatePerMb must be >= 0.')
+    return toError(400, 'BAD_REQUEST', 'overageRatePerMb is invalid.')
   }
   return {
     ok: true,
@@ -658,6 +499,8 @@ function validatePayload(
       currency: currency || 'USD',
       billingCycleType: billingCycleType || 'CALENDAR_MONTH',
       firstCycleProration: firstCycleProration || 'NONE',
+      prorationRounding: prorationRounding || 'ROUND_HALF_UP',
+      expiryBoundary,
       monthlyFee,
       deactivatedMonthlyFee,
       oneTimeFee,
@@ -667,41 +510,332 @@ function validatePayload(
       totalQuotaMb,
       overageRatePerMb,
       tiers: Array.isArray(payload?.tiers) ? payload.tiers : null,
-      paygRates: Array.isArray(payload?.paygRates) ? payload.paygRates : null,
-      meta: buildMeta(payload, {
-        commercialTerms: commercialTermsNormalized.value,
-        controlPolicy: controlPolicyNormalized.value,
-        carrierService: carrierServiceNormalized.value,
-      }),
     },
   }
 }
 
-async function loadPricePlan(supabase: SupabaseClient, pricePlanId: string) {
+export async function loadPricePlan(supabase: SupabaseClient, pricePlanId: string) {
   const rows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,deprecated_at,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
+    `select=${PRICE_PLAN_PARENT_SELECT}&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
   )
-  return Array.isArray(rows) ? rows[0] : null
+  const parent = Array.isArray(rows) ? rows[0] : null
+  if (!parent) return null
+  const pType = String((parent as any).type ?? '').trim()
+  const child = await selectChildRowForPlan(supabase, pType, pricePlanId)
+  return mergeChildIntoParentRow(parent, child, pType)
 }
 
-async function loadLatestVersion(supabase: SupabaseClient, pricePlanId: string) {
+async function listLatestReferencingPackageIds(supabase: SupabaseClient, pricePlanId: string) {
   const rows = await supabase.select(
-    'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,deprecated_at,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
+    'packages',
+    `select=package_id&price_plan_id=eq.${encodeURIComponent(pricePlanId)}`
   )
-  return Array.isArray(rows) ? rows[0] : null
+  const list = Array.isArray(rows) ? rows : []
+  return Array.from(
+    new Set(list.map((row: any) => String((row as any)?.package_id ?? '').trim()).filter(Boolean))
+  ).sort((a, b) => a.localeCompare(b))
 }
 
-function mapVersionResponse(version: any) {
+const PRICE_PLAN_PARENT_SELECT =
+  'price_plan_id,enterprise_id,reseller_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,status,effective_from,deprecated_at,proration_rounding,covered_network_profile_id,created_at'
+
+function mergeChildIntoParentRow(parent: any, child: any, planType: string) {
+  const out = { ...parent }
+  const t = String(planType || '').trim()
+  if (!child) return out
+  if (t === 'FIXED_BUNDLE') {
+    out.monthly_fee = child.monthly_fee
+    out.deactivated_monthly_fee = child.deactivated_monthly_fee
+    out.total_quota_mb = child.total_quota_mb
+    out.overage_rate_per_mb = child.overage_rate_per_mb
+  } else if (t === 'SIM_DEPENDENT_BUNDLE') {
+    out.monthly_fee = child.monthly_fee
+    out.deactivated_monthly_fee = child.deactivated_monthly_fee
+    out.per_sim_quota_mb = child.per_sim_quota_mb
+    out.overage_rate_per_mb = child.overage_rate_per_mb
+  } else if (t === 'ONE_TIME') {
+    out.one_time_fee = child.one_time_fee
+    out.quota_mb = child.quota_mb
+    out.validity_days = child.validity_days
+    out.expiry_boundary = child.expiry_boundary
+  } else if (t === 'TIERED_VOLUME_PRICING') {
+    out.monthly_fee = child.monthly_fee
+    out.deactivated_monthly_fee = child.deactivated_monthly_fee
+    out.tiers = child.tiers
+    out.overage_rate_per_mb = child.overage_rate_per_mb
+  }
+  return out
+}
+
+async function selectChildRowForPlan(supabase: SupabaseClient, planType: string, pricePlanId: string) {
+  const t = String(planType || '').trim()
+  const q = `select=*&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
+  if (t === 'FIXED_BUNDLE') {
+    const r = await supabase.select('price_plan_fixed_bundle', q)
+    return Array.isArray(r) ? r[0] : null
+  }
+  if (t === 'SIM_DEPENDENT_BUNDLE') {
+    const r = await supabase.select('price_plan_sim_dependent_bundle', q)
+    return Array.isArray(r) ? r[0] : null
+  }
+  if (t === 'ONE_TIME') {
+    const r = await supabase.select('price_plan_one_time', q)
+    return Array.isArray(r) ? r[0] : null
+  }
+  if (t === 'TIERED_VOLUME_PRICING') {
+    const r = await supabase.select('price_plan_tiered_volume_pricing', q)
+    return Array.isArray(r) ? r[0] : null
+  }
+  return null
+}
+
+async function fetchChildMapsForPlanIds(supabase: SupabaseClient, ids: string[]) {
+  const empty = {
+    fb: new Map<string, any>(),
+    sdb: new Map<string, any>(),
+    ot: new Map<string, any>(),
+    tv: new Map<string, any>(),
+  }
+  if (!ids.length) return empty
+  const inList = ids.map((id) => encodeURIComponent(id)).join(',')
+  const q = `select=*&price_plan_id=in.(${inList})`
+  const [fbRows, sdbRows, otRows, tvRows] = await Promise.all([
+    supabase.select('price_plan_fixed_bundle', q),
+    supabase.select('price_plan_sim_dependent_bundle', q),
+    supabase.select('price_plan_one_time', q),
+    supabase.select('price_plan_tiered_volume_pricing', q),
+  ])
+  const toMap = (rows: unknown) =>
+    new Map<string, any>(
+      (Array.isArray(rows) ? rows : [])
+        .map((r: any) => [String(r?.price_plan_id ?? ''), r] as [string, any])
+        .filter((e): e is [string, any] => Boolean(e[0]))
+    )
+  return { fb: toMap(fbRows), sdb: toMap(sdbRows), ot: toMap(otRows), tv: toMap(tvRows) }
+}
+
+function mergeListRow(parent: any, maps: Awaited<ReturnType<typeof fetchChildMapsForPlanIds>>) {
+  const t = String(parent?.type ?? '').trim()
+  const pid = String(parent?.price_plan_id ?? '')
+  const child =
+    t === 'FIXED_BUNDLE'
+      ? maps.fb.get(pid)
+      : t === 'SIM_DEPENDENT_BUNDLE'
+        ? maps.sdb.get(pid)
+        : t === 'ONE_TIME'
+          ? maps.ot.get(pid)
+          : t === 'TIERED_VOLUME_PRICING'
+            ? maps.tv.get(pid)
+            : null
+  return mergeChildIntoParentRow(parent, child, t)
+}
+
+async function insertPricingExtensionRow(
+  supabase: SupabaseClient,
+  pricePlanId: string,
+  planType: string,
+  v: {
+    monthlyFee: number | null
+    deactivatedMonthlyFee: number | null
+    oneTimeFee: number | null
+    quotaMb: number | null
+    validityDays: number | null
+    perSimQuotaMb: number | null
+    totalQuotaMb: number | null
+    overageRatePerMb: number | null
+    tiers: unknown[] | null
+    expiryBoundary: string | null
+  }
+) {
+  const t = String(planType || '').trim()
+  if (t === 'FIXED_BUNDLE') {
+    await supabase.insert(
+      'price_plan_fixed_bundle',
+      {
+        price_plan_id: pricePlanId,
+        monthly_fee: v.monthlyFee ?? 0,
+        deactivated_monthly_fee: v.deactivatedMonthlyFee ?? 0,
+        total_quota_mb: v.totalQuotaMb,
+        overage_rate_per_mb: v.overageRatePerMb,
+      },
+      { returning: 'minimal' }
+    )
+  } else if (t === 'SIM_DEPENDENT_BUNDLE') {
+    await supabase.insert(
+      'price_plan_sim_dependent_bundle',
+      {
+        price_plan_id: pricePlanId,
+        monthly_fee: v.monthlyFee ?? 0,
+        deactivated_monthly_fee: v.deactivatedMonthlyFee ?? 0,
+        per_sim_quota_mb: v.perSimQuotaMb,
+        overage_rate_per_mb: v.overageRatePerMb,
+      },
+      { returning: 'minimal' }
+    )
+  } else if (t === 'ONE_TIME') {
+    await supabase.insert(
+      'price_plan_one_time',
+      {
+        price_plan_id: pricePlanId,
+        one_time_fee: v.oneTimeFee ?? 0,
+        quota_mb: v.quotaMb ?? 0,
+        validity_days: v.validityDays ?? 1,
+        expiry_boundary: v.expiryBoundary ?? 'CALENDAR_DAY_END',
+      },
+      { returning: 'minimal' }
+    )
+  } else if (t === 'TIERED_VOLUME_PRICING') {
+    await supabase.insert(
+      'price_plan_tiered_volume_pricing',
+      {
+        price_plan_id: pricePlanId,
+        monthly_fee: v.monthlyFee ?? 0,
+        deactivated_monthly_fee: v.deactivatedMonthlyFee ?? 0,
+        tiers: v.tiers ?? [],
+        overage_rate_per_mb: v.overageRatePerMb,
+      },
+      { returning: 'minimal' }
+    )
+  }
+}
+
+async function updatePricingExtensionRow(
+  supabase: SupabaseClient,
+  pricePlanId: string,
+  planType: string,
+  v: {
+    monthlyFee: number | null
+    deactivatedMonthlyFee: number | null
+    oneTimeFee: number | null
+    quotaMb: number | null
+    validityDays: number | null
+    perSimQuotaMb: number | null
+    totalQuotaMb: number | null
+    overageRatePerMb: number | null
+    tiers: unknown[] | null
+    expiryBoundary: string | null
+  }
+) {
+  const enc = encodeURIComponent(pricePlanId)
+  const t = String(planType || '').trim()
+  if (t === 'FIXED_BUNDLE') {
+    await supabase.update(
+      'price_plan_fixed_bundle',
+      `price_plan_id=eq.${enc}`,
+      {
+        monthly_fee: v.monthlyFee ?? 0,
+        deactivated_monthly_fee: v.deactivatedMonthlyFee ?? 0,
+        total_quota_mb: v.totalQuotaMb,
+        overage_rate_per_mb: v.overageRatePerMb,
+      },
+      { returning: 'minimal' }
+    )
+  } else if (t === 'SIM_DEPENDENT_BUNDLE') {
+    await supabase.update(
+      'price_plan_sim_dependent_bundle',
+      `price_plan_id=eq.${enc}`,
+      {
+        monthly_fee: v.monthlyFee ?? 0,
+        deactivated_monthly_fee: v.deactivatedMonthlyFee ?? 0,
+        per_sim_quota_mb: v.perSimQuotaMb,
+        overage_rate_per_mb: v.overageRatePerMb,
+      },
+      { returning: 'minimal' }
+    )
+  } else if (t === 'ONE_TIME') {
+    await supabase.update(
+      'price_plan_one_time',
+      `price_plan_id=eq.${enc}`,
+      {
+        one_time_fee: v.oneTimeFee ?? 0,
+        quota_mb: v.quotaMb ?? 0,
+        validity_days: v.validityDays ?? 1,
+        expiry_boundary: v.expiryBoundary ?? 'CALENDAR_DAY_END',
+      },
+      { returning: 'minimal' }
+    )
+  } else if (t === 'TIERED_VOLUME_PRICING') {
+    await supabase.update(
+      'price_plan_tiered_volume_pricing',
+      `price_plan_id=eq.${enc}`,
+      {
+        monthly_fee: v.monthlyFee ?? 0,
+        deactivated_monthly_fee: v.deactivatedMonthlyFee ?? 0,
+        tiers: v.tiers ?? [],
+        overage_rate_per_mb: v.overageRatePerMb,
+      },
+      { returning: 'minimal' }
+    )
+  }
+}
+
+/**
+ * Public snapshot — discriminated by `type` (aligned with Create request shapes).
+ * `price_plan_type` mirrors API discriminator (TIERED_PRICING alias for TIERED_VOLUME_PRICING).
+ */
+function mapPricePlanApiRow(version: any) {
   if (!version) return null
-  const meta = version.payg_rates?.meta || null
-  return {
+  const status = resolveVersionStatus(version)
+  const internalType = String(version.type ?? '').trim()
+  const apiPlanType = internalType === 'TIERED_VOLUME_PRICING' ? 'TIERED_PRICING' : internalType
+  const common: Record<string, unknown> = {
     pricePlanId: version.price_plan_id,
+    enterpriseId: version.enterprise_id ?? null,
+    resellerId: version.reseller_id ?? null,
     sourcePricePlanId: version.source_price_plan_id ?? null,
-    version: version.version,
-    status: resolveVersionStatus(version),
+    name: version.name ?? null,
+    type: internalType,
+    price_plan_type: apiPlanType,
+    serviceType: version.service_type ?? null,
+    currency: version.currency ?? null,
+    status,
+    createdAt: version.created_at ?? null,
     effectiveFrom: version.effective_from,
+    deprecatedAt: version.deprecated_at ?? null,
+    billingCycleType: version.billing_cycle_type ?? null,
+    firstCycleProration: version.first_cycle_proration ?? null,
+    prorationRounding: version.proration_rounding ?? null,
+    coveredNetworkProfileId: version.covered_network_profile_id ?? null,
+  }
+  if (internalType === 'ONE_TIME') {
+    return {
+      ...common,
+      oneTimeFee: version.one_time_fee,
+      quotaMb: version.quota_mb,
+      validityDays: version.validity_days,
+      expiryBoundary: version.expiry_boundary ?? null,
+    }
+  }
+  if (internalType === 'SIM_DEPENDENT_BUNDLE') {
+    return {
+      ...common,
+      monthlyFee: version.monthly_fee,
+      deactivatedMonthlyFee: version.deactivated_monthly_fee,
+      perSimQuotaMb: version.per_sim_quota_mb,
+      overageRatePerMb: version.overage_rate_per_mb,
+    }
+  }
+  if (internalType === 'FIXED_BUNDLE') {
+    return {
+      ...common,
+      monthlyFee: version.monthly_fee,
+      deactivatedMonthlyFee: version.deactivated_monthly_fee,
+      totalQuotaMb: version.total_quota_mb,
+      overageRatePerMb: version.overage_rate_per_mb,
+    }
+  }
+  if (internalType === 'TIERED_VOLUME_PRICING') {
+    return {
+      ...common,
+      monthlyFee: version.monthly_fee,
+      deactivatedMonthlyFee: version.deactivated_monthly_fee,
+      tiers: version.tiers ?? null,
+      overageRatePerMb: version.overage_rate_per_mb,
+    }
+  }
+  return {
+    ...common,
     monthlyFee: version.monthly_fee,
     deactivatedMonthlyFee: version.deactivated_monthly_fee,
     oneTimeFee: version.one_time_fee,
@@ -711,31 +845,28 @@ function mapVersionResponse(version: any) {
     totalQuotaMb: version.total_quota_mb,
     overageRatePerMb: version.overage_rate_per_mb,
     tiers: version.tiers ?? null,
-    paygRates: denormalizePaygRates(version.payg_rates),
-    commercialTerms: meta?.commercialTerms ?? null,
-    controlPolicy: meta?.controlPolicy ?? null,
-    carrierService: meta?.carrierService ?? null,
-    carrierServiceConfig: meta?.carrierService ?? null,
-    expiryBoundary: meta?.expiryBoundary ?? null,
-    prorationRounding: meta?.prorationRounding ?? null,
-    createdAt: version.created_at,
+    expiryBoundary: version.expiry_boundary ?? null,
   }
 }
 
 export async function createPricePlan({
   supabase,
   enterpriseId,
+  resellerId,
   payload,
   audit,
 }: {
   supabase: SupabaseClient
   enterpriseId: string
+  resellerId: string
   payload: unknown
   audit?: AuditContext
 }) {
   if (!isValidUuid(enterpriseId)) {
-    return toError(400, 'BAD_REQUEST', 'enterpriseId is required and must be a valid uuid.')
+    return toError(400, 'BAD_REQUEST', 'enterpriseId is invalid.')
   }
+  const scope = await assertEnterpriseBelongsToReseller(supabase, enterpriseId, resellerId)
+  if (!scope.ok) return scope
   const validated = validatePayload(payload, { requireCommonFields: true })
   if (!validated.ok) return validated
   const {
@@ -745,6 +876,8 @@ export async function createPricePlan({
     currency,
     billingCycleType,
     firstCycleProration,
+    prorationRounding,
+    expiryBoundary,
     monthlyFee,
     deactivatedMonthlyFee,
     oneTimeFee,
@@ -754,19 +887,23 @@ export async function createPricePlan({
     totalQuotaMb,
     overageRatePerMb,
     tiers,
-    paygRates,
-    meta,
   } = validated.value
-  const paygNormalize = normalizePaygRates(paygRates, meta)
-  if (!paygNormalize.ok) return toError(400, 'BAD_REQUEST', paygNormalize.message)
-  const carrierService = extractCarrierServiceMeta(meta)
-  const carrierValidate = await validateCarrierServiceReferences(supabase, serviceType, carrierService)
-  if (!carrierValidate.ok) return carrierValidate
+  const coveredResolved = await resolveCoveredNetworkProfileIdForWrite(
+    supabase,
+    enterpriseId,
+    type,
+    payload,
+    null,
+    'create',
+    { requirePublished: true }
+  )
+  if (!coveredResolved.ok) return coveredResolved
   try {
     const created = await supabase.insert(
       'price_plans',
       {
         enterprise_id: enterpriseId,
+        reseller_id: resellerId,
         name,
         type,
         service_type: serviceType,
@@ -775,17 +912,10 @@ export async function createPricePlan({
         first_cycle_proration: firstCycleProration,
         source_price_plan_id: null,
         version: 1,
+        status: 'DRAFT',
         effective_from: null,
-        monthly_fee: monthlyFee ?? 0,
-        deactivated_monthly_fee: deactivatedMonthlyFee ?? 0,
-        one_time_fee: oneTimeFee ?? null,
-        quota_mb: quotaMb ?? null,
-        validity_days: validityDays ?? null,
-        per_sim_quota_mb: perSimQuotaMb ?? null,
-        total_quota_mb: totalQuotaMb ?? null,
-        overage_rate_per_mb: overageRatePerMb ?? null,
-        tiers: tiers ?? null,
-        payg_rates: paygNormalize.value,
+        proration_rounding: prorationRounding,
+        covered_network_profile_id: coveredResolved.value,
       },
       { returning: 'representation' }
     )
@@ -793,6 +923,18 @@ export async function createPricePlan({
     if (!(plan as any)?.price_plan_id) {
       return toError(500, 'INTERNAL_ERROR', 'Failed to create price plan.')
     }
+    await insertPricingExtensionRow(supabase, String((plan as any).price_plan_id), type, {
+      monthlyFee,
+      deactivatedMonthlyFee,
+      oneTimeFee,
+      quotaMb,
+      validityDays,
+      perSimQuotaMb,
+      totalQuotaMb,
+      overageRatePerMb,
+      tiers,
+      expiryBoundary,
+    })
     if ((plan as any)?.price_plan_id) {
       await writeAuditLog(supabase, {
         actor_user_id: audit?.actorUserId ?? null,
@@ -805,7 +947,6 @@ export async function createPricePlan({
         source_ip: audit?.sourceIp ?? null,
         after_data: {
           pricePlanId: (plan as any).price_plan_id,
-          version: (plan as any)?.version ?? 1,
         },
       })
     }
@@ -813,7 +954,6 @@ export async function createPricePlan({
       ok: true,
       value: {
         pricePlanId: (plan as any).price_plan_id,
-        version: (plan as any)?.version ?? 1,
         status: 'DRAFT',
         createdAt: (plan as any).created_at,
       },
@@ -822,16 +962,11 @@ export async function createPricePlan({
     return mapUpstreamFailure(error)
   }
 }
-        total_quota_mb: totalQuotaMb ?? null,
-        overage_rate_per_mb: overageRatePerMb ?? null,
-        tiers: tiers ?? null,
-        payg_rates: paygNormalize.value,
-      },
-      { returning: 'representation' }
-    )
+
 export async function listPricePlans({
   supabase,
   enterpriseId,
+  resellerId,
   type,
   status,
   page,
@@ -839,75 +974,99 @@ export async function listPricePlans({
 }: {
   supabase: SupabaseClient
   enterpriseId: string
+  resellerId: string
   type?: string | null
   status?: string | null
   page?: number | string | null
   pageSize?: number | string | null
-}): Promise<ServiceResult<{ items: unknown[]; total: number }>> {
+}): Promise<ServiceResult<{ items: unknown[]; total: number; page: number; pageSize: number }>> {
   if (!isValidUuid(enterpriseId)) {
-    return toError(400, 'BAD_REQUEST', 'enterpriseId is required and must be a valid uuid.')
+    return toError(400, 'BAD_REQUEST', 'enterpriseId is invalid.')
+  }
+  const listScope = await assertEnterpriseBelongsToReseller(supabase, enterpriseId, resellerId)
+  if (!listScope.ok) return listScope
+  const statusFilter = status ? String(status).trim().toUpperCase() : null
+  if (
+    statusFilter &&
+    statusFilter !== 'DRAFT' &&
+    statusFilter !== 'PUBLISHED' &&
+    statusFilter !== 'DEPRECATED'
+  ) {
+    return toError(400, 'BAD_REQUEST', 'status is invalid.')
+  }
+  const typeFilterRaw = type ? String(type).trim().toUpperCase() : null
+  const typeFilter =
+    typeFilterRaw === 'TIERED_PRICING' ? 'TIERED_VOLUME_PRICING' : typeFilterRaw
+  const allowedListTypes = new Set([
+    'ONE_TIME',
+    'SIM_DEPENDENT_BUNDLE',
+    'FIXED_BUNDLE',
+    'TIERED_VOLUME_PRICING',
+  ])
+  if (typeFilter && !allowedListTypes.has(typeFilter)) {
+    return toError(
+      400,
+      'BAD_REQUEST',
+      'type is invalid.'
+    )
   }
   const planRows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,deprecated_at,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&enterprise_id=eq.${encodeURIComponent(enterpriseId)}${type ? `&type=eq.${encodeURIComponent(type)}` : ''}&order=created_at.desc`
+    `select=${PRICE_PLAN_PARENT_SELECT}&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&reseller_id=eq.${encodeURIComponent(resellerId)}${typeFilter ? `&type=eq.${encodeURIComponent(typeFilter)}` : ''}${statusFilter ? `&status=eq.${encodeURIComponent(statusFilter)}` : ''}&order=created_at.desc`
   )
   const plans = Array.isArray(planRows) ? planRows : []
-  let items = plans.map((plan: any) => {
-    const statusValue = resolveVersionStatus(plan)
-    return {
-      pricePlanId: plan.price_plan_id,
-      name: plan.name,
-      type: plan.type,
-      serviceType: plan.service_type,
-      currency: plan.currency,
-      billingCycleType: plan.billing_cycle_type,
-      firstCycleProration: plan.first_cycle_proration,
-      status: statusValue,
-      latestVersion: mapVersionResponse(plan),
-      createdAt: plan.created_at,
-    }
-  })
-  if (status) items = items.filter((it) => String((it as any).status) === String(status))
-  const p = Number(page) || 1
-  const ps = Number(pageSize) || 20
-  const start = (p - 1) * ps
+  const ids = plans.map((p: any) => String(p?.price_plan_id ?? '')).filter(Boolean)
+  const maps = await fetchChildMapsForPlanIds(supabase, ids)
+  let items = plans
+    .map((plan: any) => mapPricePlanApiRow(mergeListRow(plan, maps)))
+    .filter(Boolean) as Record<string, unknown>[]
+  const pagination = parsePagination({ page, pageSize }, { defaultPageSize: 20, maxPageSize: 500 })
   const total = items.length
-  items = items.slice(start, start + ps)
-  return { ok: true, value: { items, total } }
+  const pagedItems = items.slice(pagination.offset, pagination.offset + pagination.pageSize)
+  return { ok: true, value: buildPaginationResponse(pagedItems, total, pagination.page, pagination.pageSize) }
 }
 
 export async function getPricePlanDetail({ supabase, pricePlanId }: { supabase: SupabaseClient; pricePlanId: string }) {
   if (!isValidUuid(pricePlanId)) {
-    return toError(400, 'BAD_REQUEST', 'pricePlanId must be a valid uuid.')
+    return toError(400, 'BAD_REQUEST', 'pricePlanId is invalid.')
   }
   const plan = await loadPricePlan(supabase, pricePlanId)
   if (!plan) return toError(404, 'NOT_FOUND', 'Price plan not found.')
-  // In snapshot model, the plan itself contains the version data
-  const cloneRows = await supabase.select(
-    'price_plans',
-    `select=price_plan_id,enterprise_id,name,type,service_type,currency,billing_cycle_type,first_cycle_proration,source_price_plan_id,version,effective_from,deprecated_at,monthly_fee,deactivated_monthly_fee,one_time_fee,quota_mb,validity_days,per_sim_quota_mb,total_quota_mb,overage_rate_per_mb,tiers,payg_rates,created_at&source_price_plan_id=eq.${encodeURIComponent(pricePlanId)}&order=version.desc`
-  )
-  const clones = Array.isArray(cloneRows) ? cloneRows : []
-  const allSnapshots = [plan, ...clones]
   return {
     ok: true,
-    value: {
-      pricePlanId: (plan as any).price_plan_id,
-      enterpriseId: (plan as any).enterprise_id,
-      name: (plan as any).name,
-      type: (plan as any).type,
-      serviceType: (plan as any).service_type,
-      currency: (plan as any).currency,
-      billingCycleType: (plan as any).billing_cycle_type,
-      firstCycleProration: (plan as any).first_cycle_proration,
-      createdAt: (plan as any).created_at,
-      currentVersion: mapVersionResponse(plan),
-      versions: allSnapshots.map(mapVersionResponse),
-    },
+    value: mapPricePlanApiRow(plan),
   }
 }
 
-export async function createPricePlanVersion({
+/**
+ * Batch-resolve {@link mapPricePlanApiRow} snapshots for many `price_plan_id` (parent + 1:1 child rows).
+ * Used by package list to embed `PricePlanSnapshot` without N+1 round-trips.
+ */
+export async function batchMapPricePlanSnapshotsByIds(
+  supabase: SupabaseClient,
+  pricePlanIds: string[]
+): Promise<Map<string, Record<string, unknown> | null>> {
+  const out = new Map<string, Record<string, unknown> | null>()
+  const unique = [...new Set(pricePlanIds.map((x) => String(x).trim()).filter(Boolean))]
+  for (const id of unique) out.set(id, null)
+  if (!unique.length) return out
+  const inList = unique.map((id) => encodeURIComponent(id)).join(',')
+  const planRows = await supabase.select(
+    'price_plans',
+    `select=${PRICE_PLAN_PARENT_SELECT}&price_plan_id=in.(${inList})`
+  )
+  const plans = Array.isArray(planRows) ? planRows : []
+  const maps = await fetchChildMapsForPlanIds(supabase, unique)
+  for (const p of plans) {
+    const pid = p?.price_plan_id != null ? String((p as any).price_plan_id).trim() : ''
+    if (!pid) continue
+    const merged = mergeListRow(p, maps)
+    out.set(pid, mapPricePlanApiRow(merged))
+  }
+  return out
+}
+
+export async function updatePricePlan({
   supabase,
   pricePlanId,
   payload,
@@ -919,35 +1078,49 @@ export async function createPricePlanVersion({
   audit?: AuditContext
 }) {
   if (!isValidUuid(pricePlanId)) {
-    return toError(400, 'BAD_REQUEST', 'pricePlanId must be a valid uuid.')
+    return toError(400, 'BAD_REQUEST', 'pricePlanId is invalid.')
   }
   const plan = await loadPricePlan(supabase, pricePlanId)
   if (!plan) return toError(404, 'NOT_FOUND', 'Price plan not found.')
+  if (resolveVersionStatus(plan as any) !== 'DRAFT') {
+    return toError(409, 'INVALID_STATUS', 'Only DRAFT price plans can be updated.')
+  }
   const payloadTypeRaw = String((payload as any)?.price_plan_type ?? (payload as any)?.type ?? '').trim()
   if (payloadTypeRaw) {
     const payloadType = payloadTypeRaw === 'TIERED_PRICING' ? 'TIERED_VOLUME_PRICING' : payloadTypeRaw
     const planType = String((plan as any).type ?? '').trim()
     if (payloadType !== planType) {
-      return toError(400, 'BAD_REQUEST', 'price_plan_type must match the existing price plan type.')
+      return toError(
+        400,
+        'BAD_REQUEST',
+        `price_plan_type must match the existing price plan type. Allowed Values: ${planType}.`
+      )
+    }
+  }
+  if ((payload as any)?.currency !== undefined) {
+    const payloadCurrency = String((payload as any)?.currency ?? '').trim().toUpperCase()
+    if (!isValidIso4217Currency(payloadCurrency)) {
+      return toError(400, 'BAD_REQUEST', 'currency must be ISO 4217 code.')
     }
   }
   const validated = validatePayload(
     {
       ...(payload as any),
-      name: (plan as any).name,
+      name: String((payload as any)?.name ?? '').trim() || (plan as any).name,
       type: (plan as any).type,
       serviceType: (plan as any).service_type,
       currency: (plan as any).currency,
       billingCycleType: (plan as any).billing_cycle_type,
       firstCycleProration: (plan as any).first_cycle_proration,
-      prorationRounding: (payload as any)?.prorationRounding ?? 'ROUND_HALF_UP',
+      prorationRounding:
+        (payload as any)?.prorationRounding ?? (plan as any).proration_rounding ?? 'ROUND_HALF_UP',
+      expiryBoundary: (payload as any)?.expiryBoundary ?? (plan as any).expiry_boundary,
     },
     { requireCommonFields: false }
   )
   if (!validated.ok) return validated
-  const latest = await loadLatestVersion(supabase, pricePlanId)
-  const nextVersion = ((latest as any)?.version ?? 0) + 1
   const {
+    name: nextName,
     monthlyFee,
     deactivatedMonthlyFee,
     oneTimeFee,
@@ -957,62 +1130,180 @@ export async function createPricePlanVersion({
     totalQuotaMb,
     overageRatePerMb,
     tiers,
-    paygRates,
-    meta,
+    prorationRounding: nextProrationRounding,
+    expiryBoundary: nextExpiryBoundary,
   } = validated.value
-  const paygNormalize = normalizePaygRates(paygRates, meta)
-  if (!paygNormalize.ok) return toError(400, 'BAD_REQUEST', paygNormalize.message)
-  const carrierService = extractCarrierServiceMeta(meta)
-  const carrierValidate = await validateCarrierServiceReferences(supabase, String((plan as any).service_type ?? ''), carrierService)
-  if (!carrierValidate.ok) return carrierValidate
-  // Snapshot model: clone creates a new price_plan row with source_price_plan_id
-  const rows = await supabase.insert(
-    'price_plans',
-    {
-      enterprise_id: (plan as any).enterprise_id,
-      name: (plan as any).name,
-      type: (plan as any).type,
-      service_type: (plan as any).service_type,
-      currency: (plan as any).currency,
-      billing_cycle_type: (plan as any).billing_cycle_type,
-      first_cycle_proration: (plan as any).first_cycle_proration,
-      source_price_plan_id: pricePlanId,
-      version: nextVersion,
-      effective_from: null,
-      monthly_fee: monthlyFee ?? 0,
-      deactivated_monthly_fee: deactivatedMonthlyFee ?? 0,
-      one_time_fee: oneTimeFee ?? null,
-      quota_mb: quotaMb ?? null,
-      validity_days: validityDays ?? null,
-      per_sim_quota_mb: perSimQuotaMb ?? null,
-      total_quota_mb: totalQuotaMb ?? null,
-      overage_rate_per_mb: overageRatePerMb ?? null,
-      tiers: tiers ?? null,
-      payg_rates: paygNormalize.value,
-    },
-    { returning: 'representation' }
+  const coveredResolved = await resolveCoveredNetworkProfileIdForWrite(
+    supabase,
+    String((plan as any).enterprise_id ?? ''),
+    String((plan as any).type ?? ''),
+    payload,
+    (plan as any).covered_network_profile_id ?? null,
+    'update',
+    { requirePublished: true }
   )
-  const version = Array.isArray(rows) ? rows[0] : null
-  if (!(version as any)?.price_plan_id) {
-    return toError(500, 'INTERNAL_ERROR', 'Failed to create price plan snapshot.')
+  if (!coveredResolved.ok) return coveredResolved
+  try {
+    const rows = await supabase.update(
+      'price_plans',
+      `price_plan_id=eq.${encodeURIComponent(pricePlanId)}`,
+      {
+        name: nextName,
+        proration_rounding: nextProrationRounding,
+        covered_network_profile_id: coveredResolved.value,
+      },
+      { returning: 'representation' }
+    )
+    const version = Array.isArray(rows) ? rows[0] : null
+    if (!(version as any)?.price_plan_id) {
+      return toError(500, 'INTERNAL_ERROR', 'Failed to update price plan.')
+    }
+    await updatePricingExtensionRow(supabase, pricePlanId, String((plan as any).type ?? ''), {
+      monthlyFee,
+      deactivatedMonthlyFee,
+      oneTimeFee,
+      quotaMb,
+      validityDays,
+      perSimQuotaMb,
+      totalQuotaMb,
+      overageRatePerMb,
+      tiers,
+      expiryBoundary: nextExpiryBoundary,
+    })
+    await writeAuditLog(supabase, {
+      actor_user_id: audit?.actorUserId ?? null,
+      actor_role: audit?.actorRole ?? null,
+      tenant_id: (plan as any).enterprise_id ?? null,
+      action: 'PRICE_PLAN_UPDATED',
+      target_type: 'PRICE_PLAN',
+      target_id: pricePlanId,
+      request_id: audit?.requestId ?? null,
+      source_ip: audit?.sourceIp ?? null,
+      after_data: { pricePlanId },
+    })
+    const merged = await loadPricePlan(supabase, pricePlanId)
+    if (!merged) return toError(500, 'INTERNAL_ERROR', 'Failed to load price plan after update.')
+    return { ok: true, value: mapPricePlanApiRow(merged) }
+  } catch (error) {
+    return mapUpstreamFailure(error)
   }
-  await writeAuditLog(supabase, {
-    actor_user_id: audit?.actorUserId ?? null,
-    actor_role: audit?.actorRole ?? null,
-    tenant_id: (plan as any).enterprise_id ?? null,
-    action: 'PRICE_PLAN_VERSION_CREATED',
-    target_type: 'PRICE_PLAN',
-    target_id: (version as any).price_plan_id,
-    request_id: audit?.requestId ?? null,
-    source_ip: audit?.sourceIp ?? null,
-    after_data: {
-      pricePlanId: (version as any).price_plan_id,
-      sourcePricePlanId: pricePlanId,
-      version: (version as any).version ?? nextVersion,
-    },
-  })
-  return {
-    ok: true,
-    value: mapVersionResponse(version),
+}
+
+export async function publishPricePlan({
+  supabase,
+  pricePlanId,
+  audit,
+}: {
+  supabase: SupabaseClient
+  pricePlanId: string
+  audit?: AuditContext
+}) {
+  if (!isValidUuid(pricePlanId)) {
+    return toError(400, 'BAD_REQUEST', 'pricePlanId is invalid.')
+  }
+  const plan = await loadPricePlan(supabase, pricePlanId)
+  if (!plan) return toError(404, 'NOT_FOUND', 'Price plan not found.')
+  if (resolveVersionStatus(plan as any) !== 'DRAFT') {
+    return toError(409, 'INVALID_STATUS', 'Only DRAFT price plans can be published.')
+  }
+  const planType = String((plan as any).type ?? '').trim()
+  const enterpriseId = String((plan as any).enterprise_id ?? '').trim()
+  const coveredId = String((plan as any).covered_network_profile_id ?? '').trim() || null
+  if (pricePlanTypeUsesCoveredNetwork(planType)) {
+    if (!coveredId) {
+      return toError(409, 'INVALID_STATUS', 'coveredNetworkProfileId must be set before publishing the price plan.')
+    }
+    const coveredCheck = await validateCoveredNetworkProfileForPricePlan(
+      supabase,
+      enterpriseId,
+      coveredId,
+      { requirePublished: true }
+    )
+    if (!coveredCheck.ok) return coveredCheck
+  }
+  const nowIso = new Date().toISOString()
+  try {
+    const rows = await supabase.update(
+      'price_plans',
+      `price_plan_id=eq.${encodeURIComponent(pricePlanId)}`,
+      { effective_from: nowIso, status: 'PUBLISHED' },
+      { returning: 'representation' }
+    )
+    const version = Array.isArray(rows) ? rows[0] : null
+    if (!(version as any)?.price_plan_id) {
+      return toError(500, 'INTERNAL_ERROR', 'Failed to publish price plan.')
+    }
+    await writeAuditLog(supabase, {
+      actor_user_id: audit?.actorUserId ?? null,
+      actor_role: audit?.actorRole ?? null,
+      tenant_id: (plan as any).enterprise_id ?? null,
+      action: 'PRICE_PLAN_PUBLISHED',
+      target_type: 'PRICE_PLAN',
+      target_id: pricePlanId,
+      request_id: audit?.requestId ?? null,
+      source_ip: audit?.sourceIp ?? null,
+      after_data: { pricePlanId, effectiveFrom: nowIso },
+    })
+    const merged = await loadPricePlan(supabase, pricePlanId)
+    if (!merged) return toError(500, 'INTERNAL_ERROR', 'Failed to load price plan after publish.')
+    return { ok: true, value: mapPricePlanApiRow(merged) }
+  } catch (error) {
+    return mapUpstreamFailure(error)
+  }
+}
+
+export async function deprecatePricePlan({
+  supabase,
+  pricePlanId,
+  audit,
+}: {
+  supabase: SupabaseClient
+  pricePlanId: string
+  audit?: AuditContext
+}) {
+  if (!isValidUuid(pricePlanId)) {
+    return toError(400, 'BAD_REQUEST', 'pricePlanId is invalid.')
+  }
+  const plan = await loadPricePlan(supabase, pricePlanId)
+  if (!plan) return toError(404, 'NOT_FOUND', 'Price plan not found.')
+  if (resolveVersionStatus(plan as any) !== 'PUBLISHED') {
+    return toError(409, 'INVALID_STATUS', 'Only PUBLISHED price plans can be deprecated.')
+  }
+  const referencingPackageIds = await listLatestReferencingPackageIds(supabase, pricePlanId)
+  if (referencingPackageIds.length) {
+    return toError(
+      409,
+      'RESOURCE_IN_USE',
+      `Price plan is referenced by packageId(s): ${referencingPackageIds.join(', ')}.`
+    )
+  }
+  const nowIso = new Date().toISOString()
+  try {
+    const rows = await supabase.update(
+      'price_plans',
+      `price_plan_id=eq.${encodeURIComponent(pricePlanId)}`,
+      { deprecated_at: nowIso, status: 'DEPRECATED' },
+      { returning: 'representation' }
+    )
+    const version = Array.isArray(rows) ? rows[0] : null
+    if (!(version as any)?.price_plan_id) {
+      return toError(500, 'INTERNAL_ERROR', 'Failed to deprecate price plan.')
+    }
+    await writeAuditLog(supabase, {
+      actor_user_id: audit?.actorUserId ?? null,
+      actor_role: audit?.actorRole ?? null,
+      tenant_id: (plan as any).enterprise_id ?? null,
+      action: 'PRICE_PLAN_DEPRECATED',
+      target_type: 'PRICE_PLAN',
+      target_id: pricePlanId,
+      request_id: audit?.requestId ?? null,
+      source_ip: audit?.sourceIp ?? null,
+      after_data: { pricePlanId, deprecatedAt: nowIso },
+    })
+    const merged = await loadPricePlan(supabase, pricePlanId)
+    if (!merged) return toError(500, 'INTERNAL_ERROR', 'Failed to load price plan after deprecate.')
+    return { ok: true, value: mapPricePlanApiRow(merged) }
+  } catch (error) {
+    return mapUpstreamFailure(error)
   }
 }

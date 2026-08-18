@@ -3,6 +3,11 @@
 !.env.example
 node_modules/
 gen/
+dist/
+
+# OS / IDE
+.DS_Store
+.cursor/
 
 # IDE / editor plugins
 .specify/
