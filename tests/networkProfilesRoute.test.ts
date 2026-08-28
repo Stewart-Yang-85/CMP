@@ -202,7 +202,7 @@ function registerRoutes(captured: {
 }
 
 describe('NetworkProfiles routes', () => {
-  it('creates roaming profile under token reseller when reseller token omits resellerId', async () => {
+  it('creates roaming profile for reseller token without resellerId (APN-aligned)', async () => {
     const captured: { error?: string; inserts?: Array<{ table: string; row: Record<string, unknown> }> } = {}
     const handler = registerRoutes(captured).get('POST /v1/roaming-profiles')!
     const res = createMockRes()
@@ -223,11 +223,12 @@ describe('NetworkProfiles routes', () => {
     expect(captured.error).toBeUndefined()
     const inserted = captured.inserts?.find((entry) => entry.table === 'roaming_profiles')
     expect(inserted?.row.reseller_id).toBeUndefined()
+    expect(inserted?.row.supplier_id).toBe(supplierId)
     const audit = captured.inserts?.find((entry) => entry.table === 'audit_logs')
-    expect((audit?.row.after_data as { resellerId?: string } | undefined)?.resellerId).toBe(resellerId)
+    expect((audit?.row.after_data as { resellerId?: string } | undefined)?.resellerId).toBeUndefined()
   })
 
-  it('rejects platform roaming create when resellerId is omitted', async () => {
+  it('creates roaming profile for platform without resellerId', async () => {
     const captured: { error?: string; inserts?: Array<{ table: string; row: Record<string, unknown> }> } = {}
     const handler = registerRoutes(captured).get('POST /v1/roaming-profiles')!
     const res = createMockRes()
@@ -245,11 +246,13 @@ describe('NetworkProfiles routes', () => {
       res
     )
 
-    expect(captured.error).toBe('400:BAD_REQUEST:resellerId is required.')
-    expect(captured.inserts ?? []).toHaveLength(0)
+    expect(captured.error).toBeUndefined()
+    const inserted = captured.inserts?.find((entry) => entry.table === 'roaming_profiles')
+    expect(inserted?.row.supplier_id).toBe(supplierId)
+    expect(inserted?.row.reseller_id).toBeUndefined()
   })
 
-  it('rejects platform roaming create when resellerId is not found', async () => {
+  it('ignores body resellerId on roaming create (not persisted)', async () => {
     const captured: { error?: string; inserts?: Array<{ table: string; row: Record<string, unknown> }> } = {}
     const handler = registerRoutes(captured).get('POST /v1/roaming-profiles')!
     const res = createMockRes()
@@ -257,29 +260,6 @@ describe('NetworkProfiles routes', () => {
     await handler(
       {
         cmpAuth: { roleScope: 'platform', role: 'platform_admin' },
-        body: {
-          name: 'Roaming A',
-          resellerId: missingResellerId,
-          supplierId,
-          operatorId,
-          mccmncList: [{ mcc: '460', mnc: '00', ratePerMb: 0.001 }],
-        },
-      },
-      res
-    )
-
-    expect(captured.error).toBe('404:RESOURCE_NOT_FOUND:resellerId is not found.')
-    expect(captured.inserts ?? []).toHaveLength(0)
-  })
-
-  it('rejects reseller roaming create when resellerId does not match token', async () => {
-    const captured: { error?: string; inserts?: Array<{ table: string; row: Record<string, unknown> }> } = {}
-    const handler = registerRoutes(captured).get('POST /v1/roaming-profiles')!
-    const res = createMockRes()
-
-    await handler(
-      {
-        cmpAuth: { roleScope: 'reseller', role: 'reseller_admin', resellerId },
         body: {
           name: 'Roaming A',
           resellerId: otherResellerId,
@@ -291,11 +271,12 @@ describe('NetworkProfiles routes', () => {
       res
     )
 
-    expect(captured.error).toBe('403:FORBIDDEN:resellerId does not match authenticated reseller.')
-    expect(captured.inserts ?? []).toHaveLength(0)
+    expect(captured.error).toBeUndefined()
+    const inserted = captured.inserts?.find((entry) => entry.table === 'roaming_profiles')
+    expect(inserted?.row.reseller_id).toBeUndefined()
   })
 
-  it('imports roaming CSV under token reseller when reseller token omits resellerId', async () => {
+  it('imports roaming CSV for reseller token without resellerId', async () => {
     const captured: {
       error?: string
       multipartFields?: Record<string, unknown>
@@ -317,11 +298,13 @@ describe('NetworkProfiles routes', () => {
     )
 
     expect(captured.error).toBeUndefined()
+    const inserted = captured.inserts?.find((entry) => entry.table === 'roaming_profiles')
+    expect(inserted?.row.supplier_id).toBe(supplierId)
     const audit = captured.inserts?.find((entry) => entry.table === 'audit_logs')
-    expect((audit?.row.after_data as { resellerId?: string } | undefined)?.resellerId).toBe(resellerId)
+    expect((audit?.row.after_data as { resellerId?: string } | undefined)?.resellerId).toBeUndefined()
   })
 
-  it('rejects platform roaming CSV import when resellerId is omitted', async () => {
+  it('imports roaming CSV for platform without resellerId', async () => {
     const captured: {
       error?: string
       multipartFields?: Record<string, unknown>
@@ -342,33 +325,9 @@ describe('NetworkProfiles routes', () => {
       res
     )
 
-    expect(captured.error).toBe('400:BAD_REQUEST:resellerId is required.')
-    expect(captured.inserts ?? []).toHaveLength(0)
-  })
-
-  it('rejects reseller roaming CSV import when resellerId does not match token', async () => {
-    const captured: {
-      error?: string
-      multipartFields?: Record<string, unknown>
-      multipartFiles?: Record<string, { filename?: string; content: string }>
-      inserts?: Array<{ table: string; row: Record<string, unknown> }>
-    } = {
-      multipartFields: { name: 'Roaming CSV', resellerId: otherResellerId, supplierId, operatorId },
-      multipartFiles: { file: { filename: 'rates.csv', content: 'mcc,mnc,ratePerMb\n460,00,0.001\n' } },
-    }
-    const handler = registerRoutes(captured).get('POST /v1/roaming-profiles/import-csv')!
-    const res = createMockRes()
-
-    await handler(
-      {
-        cmpAuth: { roleScope: 'reseller', role: 'reseller_admin', resellerId },
-        headers: { 'content-type': 'multipart/form-data; boundary=----test' },
-      },
-      res
-    )
-
-    expect(captured.error).toBe('403:FORBIDDEN:resellerId does not match authenticated reseller.')
-    expect(captured.inserts ?? []).toHaveLength(0)
+    expect(captured.error).toBeUndefined()
+    const inserted = captured.inserts?.find((entry) => entry.table === 'roaming_profiles')
+    expect(inserted?.row.supplier_id).toBe(supplierId)
   })
 
   it('lists reseller APN profiles without supplier/operator by reseller supplier scope', async () => {

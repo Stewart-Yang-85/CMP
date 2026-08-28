@@ -190,6 +190,39 @@ function mapBillLifecycleFields(bill: Record<string, unknown>) {
   }
 }
 
+async function loadEnterpriseNameMap(
+  supabase: BillScopeSupabase,
+  enterpriseIds: Array<string | null | undefined>
+): Promise<Map<string, string | null>> {
+  const ids = Array.from(
+    new Set(
+      enterpriseIds
+        .map((id) => (id == null ? '' : String(id).trim()))
+        .filter(Boolean)
+    )
+  )
+  const map = new Map<string, string | null>()
+  if (!ids.length) return map
+  const rows = await supabase.select(
+    'tenants',
+    `select=tenant_id,name&tenant_id=in.(${ids.map((id) => encodeURIComponent(id)).join(',')})`
+  )
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const id = (row as { tenant_id?: string })?.tenant_id
+    if (!id) continue
+    map.set(String(id), (row as { name?: string | null }).name ?? null)
+  }
+  return map
+}
+
+function resolveEnterpriseName(
+  enterpriseId: string | null | undefined,
+  enterpriseNameMap: Map<string, string | null>
+): string | null {
+  if (!enterpriseId) return null
+  return enterpriseNameMap.get(String(enterpriseId)) ?? null
+}
+
 /**
  * Load a bill row after platform / reseller / customer tenant scope checks.
  * Returns null when an error response was sent.
@@ -272,9 +305,11 @@ async function loadBillLineItems(supabase: SupabaseClient, billId: string) {
 export function buildBillDetail({
   bill,
   lineItems,
+  enterpriseName = null,
 }: {
   bill: Record<string, unknown>
   lineItems: Record<string, unknown>[]
+  enterpriseName?: string | null
 }) {
   const simItems = lineItems.filter((it) => String(it.item_type || '') === 'SIM_TOTAL')
   let adjustmentCreditTotal = 0
@@ -324,6 +359,7 @@ export function buildBillDetail({
     currency: bill.currency,
     totalAmount: Number(bill.total_amount ?? bill.totalAmount ?? 0),
     enterpriseId: bill.enterprise_id ?? bill.enterpriseId ?? null,
+    enterpriseName: enterpriseName ?? bill.enterprise_name ?? bill.enterpriseName ?? null,
     l1Summary: {
       monthlyFeeTotal: Number(l1Summary.monthlyFeeTotal.toFixed(2)),
       usageChargeTotal: Number(l1Summary.usageChargeTotal.toFixed(2)),
@@ -342,6 +378,7 @@ export function buildBillDetailCsv(detail: ReturnType<typeof buildBillDetail>) {
   }
   pushField('bill', 'billId', detail.billId)
   pushField('bill', 'enterpriseId', detail.enterpriseId)
+  pushField('bill', 'enterpriseName', detail.enterpriseName)
   pushField('bill', 'period', detail.period)
   pushField('bill', 'status', detail.status)
   pushField('bill', 'currency', detail.currency)
@@ -462,7 +499,12 @@ function sendBillCsv(reply: FastifyReply, billId: string, filename: string, csv:
   return reply.send(csv)
 }
 
-function mapBillListItem(b: Record<string, unknown>, includeResellerId: boolean) {
+function mapBillListItem(
+  b: Record<string, unknown>,
+  includeResellerId: boolean,
+  enterpriseNameMap: Map<string, string | null>
+) {
+  const enterpriseId = b.enterprise_id != null ? String(b.enterprise_id) : null
   return {
     billId: b.bill_id,
     period: String(b.period_start).slice(0, 7),
@@ -470,7 +512,8 @@ function mapBillListItem(b: Record<string, unknown>, includeResellerId: boolean)
     dueDate: b.due_date,
     currency: b.currency,
     totalAmount: Number(b.total_amount),
-    enterpriseId: b.enterprise_id,
+    enterpriseId,
+    enterpriseName: resolveEnterpriseName(enterpriseId, enterpriseNameMap),
     ...(includeResellerId ? { resellerId: b.reseller_id ?? null } : {}),
   }
 }
@@ -560,6 +603,7 @@ type BillListQueryResult = {
   pageSize: number
   filterPairs: string[]
   includeResellerId: boolean
+  enterpriseNameMap: Map<string, string | null>
 }
 
 async function runBillListQuery(
@@ -601,6 +645,10 @@ async function runBillListQuery(
     const qs = `select=bill_id,enterprise_id,period_start,period_end,status,currency,total_amount,due_date&${filters.join('&')}&order=${sortBy}.${sortOrder}&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
     const { data, total } = await supabase.selectWithCount('bills', qs)
     const rows = Array.isArray(data) ? (data as Record<string, unknown>[]) : []
+    const enterpriseNameMap = await loadEnterpriseNameMap(
+      supabase,
+      rows.map((r) => r.enterprise_id as string | null | undefined)
+    )
     return {
       rows,
       total: typeof total === 'number' ? total : rows.length,
@@ -608,6 +656,7 @@ async function runBillListQuery(
       pageSize,
       filterPairs,
       includeResellerId: false,
+      enterpriseNameMap,
     }
   }
 
@@ -629,7 +678,15 @@ async function runBillListQuery(
     ? await filtersForResellerTenant(supabase, scopedResellerId)
     : { filters: [] as string[] }
   if (scoped.empty) {
-    return { rows: [], total: 0, page, pageSize, filterPairs, includeResellerId: true }
+    return {
+      rows: [],
+      total: 0,
+      page,
+      pageSize,
+      filterPairs,
+      includeResellerId: true,
+      enterpriseNameMap: new Map(),
+    }
   }
 
   const filters = [...scoped.filters]
@@ -638,6 +695,10 @@ async function runBillListQuery(
   const qs = `select=bill_id,enterprise_id,period_start,period_end,status,currency,total_amount,due_date,reseller_id&${filters.join('&')}&order=${sortBy}.${sortOrder}&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
   const { data, total } = await supabase.selectWithCount('bills', qs)
   const rows = Array.isArray(data) ? (data as Record<string, unknown>[]) : []
+  const enterpriseNameMap = await loadEnterpriseNameMap(
+    supabase,
+    rows.map((r) => r.enterprise_id as string | null | undefined)
+  )
   return {
     rows,
     total: typeof total === 'number' ? total : rows.length,
@@ -645,13 +706,14 @@ async function runBillListQuery(
     pageSize,
     filterPairs,
     includeResellerId: true,
+    enterpriseNameMap,
   }
 }
 
 function buildBillsListCsv(items: ReturnType<typeof mapBillListItem>[], includeResellerId: boolean) {
   const headers = includeResellerId
-    ? ['billId', 'period', 'status', 'dueDate', 'currency', 'totalAmount', 'enterpriseId', 'resellerId']
-    : ['billId', 'period', 'status', 'dueDate', 'currency', 'totalAmount', 'enterpriseId']
+    ? ['billId', 'period', 'status', 'dueDate', 'currency', 'totalAmount', 'enterpriseId', 'enterpriseName', 'resellerId']
+    : ['billId', 'period', 'status', 'dueDate', 'currency', 'totalAmount', 'enterpriseId', 'enterpriseName']
   const lines = [headers.join(',')]
   for (const item of items) {
     const row = includeResellerId
@@ -663,9 +725,19 @@ function buildBillsListCsv(items: ReturnType<typeof mapBillListItem>[], includeR
           item.currency,
           item.totalAmount,
           item.enterpriseId,
+          item.enterpriseName,
           item.resellerId ?? '',
         ]
-      : [item.billId, item.period, item.status, item.dueDate, item.currency, item.totalAmount, item.enterpriseId]
+      : [
+          item.billId,
+          item.period,
+          item.status,
+          item.dueDate,
+          item.currency,
+          item.totalAmount,
+          item.enterpriseId,
+          item.enterpriseName,
+        ]
     lines.push(row.map(escapeCsv).join(','))
   }
   return `${lines.join('\n')}\n`
@@ -701,7 +773,9 @@ export function registerBillRoutes({
         isValidUuid,
       })
       if (!result) return
-      const items = result.rows.map((b) => mapBillListItem(b, result.includeResellerId))
+      const items = result.rows.map((b) =>
+        mapBillListItem(b, result.includeResellerId, result.enterpriseNameMap)
+      )
       setXFilters(reply, result.filterPairs.join(';'))
       return reply.send(buildPaginationResponse(items, result.total, result.page, result.pageSize))
     }
@@ -725,7 +799,9 @@ export function registerBillRoutes({
         'csv'
       )
       if (!result) return
-      const items = result.rows.map((b) => mapBillListItem(b, result.includeResellerId))
+      const items = result.rows.map((b) =>
+        mapBillListItem(b, result.includeResellerId, result.enterpriseNameMap)
+      )
       const csv = buildBillsListCsv(items, result.includeResellerId)
       return sendBillCsv(reply, 'list', 'bills.csv', csv, result.filterPairs.join(';'))
     }
@@ -741,7 +817,19 @@ export function registerBillRoutes({
       if (!bill) return
       const lineItemsRaw = await loadBillLineItems(supabase, billId)
       const lineItems = Array.isArray(lineItemsRaw) ? (lineItemsRaw as Record<string, unknown>[]) : []
-      return reply.send(buildBillDetail({ bill, lineItems }))
+      const enterpriseNameMap = await loadEnterpriseNameMap(supabase, [
+        bill.enterprise_id as string | null | undefined,
+      ])
+      return reply.send(
+        buildBillDetail({
+          bill,
+          lineItems,
+          enterpriseName: resolveEnterpriseName(
+            bill.enterprise_id as string | null | undefined,
+            enterpriseNameMap
+          ),
+        })
+      )
     }
   )
 
@@ -755,7 +843,17 @@ export function registerBillRoutes({
       if (!bill) return
       const lineItemsRaw = await loadBillLineItems(supabase, billId)
       const lineItems = Array.isArray(lineItemsRaw) ? (lineItemsRaw as Record<string, unknown>[]) : []
-      const detail = buildBillDetail({ bill, lineItems })
+      const enterpriseNameMap = await loadEnterpriseNameMap(supabase, [
+        bill.enterprise_id as string | null | undefined,
+      ])
+      const detail = buildBillDetail({
+        bill,
+        lineItems,
+        enterpriseName: resolveEnterpriseName(
+          bill.enterprise_id as string | null | undefined,
+          enterpriseNameMap
+        ),
+      })
       const csv = buildBillDetailCsv(detail)
       return sendBillCsv(reply, billId, `bill-${billId}-summary.csv`, csv, `billId=${billId}`)
     }

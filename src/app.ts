@@ -2454,15 +2454,36 @@ function registerEnterpriseRoutes({
   })
 
   app.get(`${prefix}/enterprises/:enterpriseId/overdue-summary`, async (req: any, res: any) => {
-    const auth = ensureResellerSales(req, res)
-    if (!auth) return
+    const authCtx = getAuthContext(req)
+    const roleScope = getRoleScope(req)
+    const role = authCtx.role ? String(authCtx.role) : null
+    const isCustomerScope =
+      roleScope === 'customer' || roleScope === 'department' || role === 'customer_m2m'
+
+    let auth: { scope?: string | null } | null = null
+    if (isCustomerScope) {
+      if (!authCtx.roleScope && !authCtx.role) {
+        return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required.')
+      }
+      auth = { scope: roleScope === 'department' ? 'department' : 'customer' }
+    } else {
+      auth = ensureResellerSales(req, res)
+      if (!auth) return
+    }
+
     const enterpriseIdParam = String(req.params.enterpriseId || '').trim()
     if (!isValidUuid(enterpriseIdParam)) {
       return sendError(res, 400, 'BAD_REQUEST', 'enterpriseId must be a valid uuid.')
     }
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     let enterpriseId = enterpriseIdParam
-    if (auth.scope === 'reseller') {
+    if (isCustomerScope) {
+      const tokenEnterpriseId = getEnterpriseIdFromReq(req)
+      if (!tokenEnterpriseId || String(tokenEnterpriseId) !== enterpriseIdParam) {
+        return sendError(res, 403, 'FORBIDDEN', 'Enterprise scope required.')
+      }
+      enterpriseId = tokenEnterpriseId
+    } else if (auth.scope === 'reseller') {
       const resolved = await resolveEnterpriseForReseller(req, res, supabase, enterpriseIdParam)
       if (!resolved) return
       enterpriseId = resolved

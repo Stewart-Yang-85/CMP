@@ -335,8 +335,11 @@ describe('runAlertEvaluation', () => {
     expect((silent?.metadata as any)?.status).toBe('DEACTIVATED')
     expect((silent?.metadata as any)?.deactivatedSince).toBe('2026-06-17T00:00:00.000Z')
     const roaming = supabase.alerts.find((row) => row.alert_type === 'UNEXPECTED_ROAMING')
+    expect(roaming?.threshold).toBe(20)
     expect(roaming?.current_value).toBe(25)
     expect((roaming?.metadata as any)?.outOfProfileMb).toBe(25)
+    expect((roaming?.metadata as any)?.thresholdMb).toBe(20)
+    expect((roaming?.metadata as any)?.thresholdUnit).toBe('MB')
     expect((roaming?.metadata as any)?.packageIds).toEqual(['pkg-one-time'])
     expect((roaming?.metadata as any)?.visitedMccMncs).toEqual(['46002'])
     const cdr = supabase.alerts.find((row) => row.alert_type === 'CDR_DELAY')
@@ -356,6 +359,46 @@ describe('runAlertEvaluation', () => {
     expect((upstream?.metadata as any)?.integrationId).toBe('integration-1')
     expect((upstream?.metadata as any)?.probeApi).toBe('TOKEN')
     expect((upstream?.metadata as any)?.thresholdUnit).toBe('ATTEMPTS')
+  })
+
+  it('skips UNEXPECTED_ROAMING when out-of-profile MB is below the 20 MB default threshold', async () => {
+    const supabase = createEvaluatorSupabase()
+    const originalSelect = supabase.select
+    supabase.select = async (table: string) => {
+      if (table === 'usage_package_daily_summary') {
+        return [{
+          reseller_id: resellerId,
+          enterprise_id: enterpriseId,
+          sim_id: 'sim-usage',
+          usage_day: '2026-06-18',
+          subscription_id: 'sub-usage',
+          package_id: 'pkg-one-time',
+          price_plan_id: 'price-one-time',
+          price_plan_type: 'ONE_TIME',
+          in_profile_mb: 90,
+          out_of_profile_mb: 10,
+        }]
+      }
+      return originalSelect.call(supabase, table)
+    }
+
+    const result = await runAlertEvaluation({
+      supabase: supabase as any,
+      now: '2026-06-18T12:00:00.000Z',
+      options: {
+        configCacheSeconds: 0,
+        windowMinutes: 60,
+        suppressMinutes: 0,
+        poolUsageHighThresholdPercent: 80,
+        outOfProfileSurgeThresholdPercent: 20,
+        silentSimThresholdHours: 1,
+        cdrDelayThresholdHours: 1,
+        upstreamDisconnectThresholdAttempts: 3,
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    expect(supabase.alerts.some((row) => row.alert_type === 'UNEXPECTED_ROAMING')).toBe(false)
   })
 
   it('falls back to default thresholds when legacy config_parameters table is missing', async () => {

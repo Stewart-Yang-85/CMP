@@ -42,6 +42,8 @@ reseller_id + alert_type + window_start + sim_id
 
 If `reseller_id` or `sim_id` is absent, the dedupe key uses `IS NULL` semantics for that dimension. When a matching row exists, the system updates the existing row (`status=OPEN`, `last_seen_at`, `current_value`, `metadata`, etc.) instead of inserting a new row.
 
+**`ALERT_MERGED` / audit `ALERT_MERGE`** are emitted only when the merge is **material**: `status` changes and/or `current_value` changes. Routine refreshes that only bump `last_seen_at` / `window_end` (same OPEN status and same metric) MUST NOT write a new `events` row.
+
 Optional suppression windows MAY skip a repeated alert for the same scope + subject + alert type while `suppressed_until` or the configured suppress interval is still active.
 
 ### Event Emission
@@ -115,19 +117,19 @@ Operational meaning: a sold or allocated SIM has stayed deactivated for too long
 
 ### `UNEXPECTED_ROAMING`
 
-SIM has out-of-profile roaming usage in the current billing period, meaning usage was observed on a visited network not covered by the subscribed package profile.
+SIM has out-of-profile roaming usage in the current billing period that reaches or exceeds a configured absolute MB threshold (default **20 MB**).
 
 | Attribute | Value |
 |-----------|-------|
 | Default severity | `P1` |
 | Scope | SIM-level (`customer_id` and `sim_id` set) |
 | Data source | Current-period `usage_package_daily_summary.out_of_profile_mb`; optional `visited_mccmnc` for metadata |
-| Trigger | `out_of_profile_mb > 0` for a SIM in the current billing period |
-| Threshold | Not applicable |
+| Trigger | Current-period SIM `out_of_profile_mb >= threshold` (absolute volume) |
+| Threshold | Absolute data volume; default seed `threshold_value=20`, `threshold_unit=MB` (KB/GB also accepted and converted to MB for comparison) |
 | `current_value` | Current-period out-of-profile MB for the SIM |
-| Suggested metadata | `message`, `outOfProfileMb`, `packageIds`, `pricePlanIds`, `usageDays`, `visitedMccMncs` |
+| Suggested metadata | `message`, `outOfProfileMb`, `thresholdMb`, `thresholdUnit`, `packageIds`, `pricePlanIds`, `usageDays`, `visitedMccMncs` |
 
-Operational meaning: the SIM is consuming data on a network that the subscribed product package does not cover. Check CoveredNetworkProfile/RoamingProfile coverage, customer travel pattern, package fit, OOP cost exposure, and whether the customer should switch package or add coverage.
+Operational meaning: the SIM is consuming meaningful data on a network that the subscribed product package does not cover. Check CoveredNetworkProfile/RoamingProfile coverage, customer travel pattern, package fit, OOP cost exposure, and whether the customer should switch package or add coverage.
 
 ### `CDR_DELAY`
 

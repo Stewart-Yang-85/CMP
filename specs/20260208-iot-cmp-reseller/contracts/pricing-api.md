@@ -216,7 +216,7 @@ GET /v1/roaming-profiles/{roamingProfileId}
 - 同一快照内同一 `mcc-*` 仅允许一条
 
 **CSV 批量创建（`POST /v1/roaming-profiles:import-csv`）**:
-- `multipart/form-data`：`name`、`resellerId`、`supplierId`、`operatorId`、`file`（与 **POST /roaming-profiles** 元数据一致）
+- `multipart/form-data`：`name`、`supplierId`、`operatorId`、`file`（与 **POST /roaming-profiles** 元数据一致；**无** `resellerId`，归属同 APN：`supplier` + `operator`）
 - CSV 列：`mcc`、`mnc`、`ratePerMb` 必填；`country`、`network` 可选；最多 10,000 行；含逗号的字段须引号包裹
 - 成功 **201**，响应含 `roamingProfileId` 与 **`rowCount`**
 
@@ -310,6 +310,7 @@ POST /v1/enterprises/{enterpriseId}/packages
 **业务规则**:
 - 产品包由四模块组成：`Carrier Service + Price Plan + Commercial Terms + Control Policy`
 - 创建/更新时引用快照 ID，不允许引用未发布快照
+- **连通性兼容（MUST）**：`pricePlanId`（经其 **CoveredNetworkProfile** 的 `supplierId`/`operatorId`）与 `carrierServiceId`（模块行上的 `supplier_id`/`operator_id`）**必须一致**；否则 **400**。`commercialTermsId` / `controlPolicyId` 仅要求与 Package 的 **reseller** 一致。
 - 产品包变更次月生效
 - 模块创建依赖顺序：
   1. APN Profile、Roaming Profile；若资费类型需要 **in-profile** 覆盖，则创建 **CoveredNetworkProfile** 并 **publish**

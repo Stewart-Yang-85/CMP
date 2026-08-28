@@ -510,21 +510,44 @@ export async function listAdjustmentNotes({
     `select=note_id,enterprise_id,note_type,status,total_amount,currency,reason,source_bill_id,idempotency_key,created_at${filterQs}&order=created_at.desc&limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`
   )
   const rows = Array.isArray(data) ? (data as Record<string, any>[]) : []
+  const enterpriseIds = Array.from(
+    new Set(
+      rows
+        .map((n) => (n.enterprise_id != null ? String(n.enterprise_id).trim() : ''))
+        .filter(Boolean)
+    )
+  )
+  const enterpriseNameMap = new Map<string, string | null>()
+  if (enterpriseIds.length) {
+    const tenantRows = await supabase.select(
+      'tenants',
+      `select=tenant_id,name&tenant_id=in.(${enterpriseIds.map((id) => encodeURIComponent(id)).join(',')})`
+    )
+    for (const row of Array.isArray(tenantRows) ? tenantRows : []) {
+      const id = (row as { tenant_id?: string })?.tenant_id
+      if (!id) continue
+      enterpriseNameMap.set(String(id), (row as { name?: string | null }).name ?? null)
+    }
+  }
   return {
     ok: true,
     value: {
-      items: rows.map((n) => ({
-        adjustmentNoteId: n.note_id,
-        billId: n.source_bill_id ? String(n.source_bill_id) : null,
-        enterpriseId: n.enterprise_id,
-        type: n.note_type,
-        status: n.status,
-        totalAmount: Number(n.total_amount ?? 0),
-        currency: n.currency ?? null,
-        reason: n.reason != null ? String(n.reason) : null,
-        idempotencyKey: n.idempotency_key != null ? String(n.idempotency_key) : null,
-        createdAt: n.created_at ?? null,
-      })),
+      items: rows.map((n) => {
+        const enterpriseId = n.enterprise_id != null ? String(n.enterprise_id) : null
+        return {
+          adjustmentNoteId: n.note_id,
+          billId: n.source_bill_id ? String(n.source_bill_id) : null,
+          enterpriseId,
+          enterpriseName: enterpriseId ? enterpriseNameMap.get(enterpriseId) ?? null : null,
+          type: n.note_type,
+          status: n.status,
+          totalAmount: Number(n.total_amount ?? 0),
+          currency: n.currency ?? null,
+          reason: n.reason != null ? String(n.reason) : null,
+          idempotencyKey: n.idempotency_key != null ? String(n.idempotency_key) : null,
+          createdAt: n.created_at ?? null,
+        }
+      }),
       total: typeof total === 'number' ? total : rows.length,
       page: currentPage,
       pageSize: limit,

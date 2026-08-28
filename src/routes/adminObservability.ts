@@ -111,7 +111,8 @@ export function registerAdminObservabilityRoutes({
   const { createSupabaseRestClient, getTraceId, sendError, requireAdminAccess, isValidUuid } = deps
 
   async function resolveAuditQuery(req: any, res: any, paginationOptions: { defaultPageSize: number; maxPageSize: number }) {
-    const tenantId = req.query?.tenantId ? String(req.query.tenantId).trim() : null
+    const enterpriseId = req.query?.enterpriseId ? String(req.query.enterpriseId).trim() : null
+    const resellerId = req.query?.resellerId ? String(req.query.resellerId).trim() : null
     const action = req.query?.action ? String(req.query.action) : null
     const targetType = req.query?.targetType ? String(req.query.targetType) : null
     const targetId = req.query?.targetId ? String(req.query.targetId) : null
@@ -145,25 +146,65 @@ export function registerAdminObservabilityRoutes({
       { defaultPage: 1, defaultPageSize: paginationOptions.defaultPageSize, maxPageSize: paginationOptions.maxPageSize }
     )
 
-    if (tenantId) {
-      if (!isValidUuid(tenantId)) {
-        sendError(res, 400, 'VALIDATION_ERROR', 'tenantId must be a valid uuid.')
+    const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
+
+    let enterpriseParentId: string | null = null
+    if (enterpriseId) {
+      if (!isValidUuid(enterpriseId)) {
+        sendError(res, 400, 'VALIDATION_ERROR', 'enterpriseId must be a valid uuid.')
         return null
       }
-      const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
-      const tenantRows = await supabase.select(
+      const enterpriseRows = await supabase.select(
         'tenants',
-        `select=tenant_id&tenant_id=eq.${encodeURIComponent(tenantId)}&limit=1`
+        `select=tenant_id,parent_id&tenant_id=eq.${encodeURIComponent(enterpriseId)}&tenant_type=eq.ENTERPRISE&limit=1`
       )
-      const tenant = Array.isArray(tenantRows) ? tenantRows[0] : null
-      if (!tenant) {
-        sendError(res, 404, 'RESOURCE_NOT_FOUND', `tenant ${tenantId} not found.`)
+      const enterprise = Array.isArray(enterpriseRows) ? enterpriseRows[0] : null
+      if (!enterprise) {
+        sendError(res, 404, 'RESOURCE_NOT_FOUND', `enterprise ${enterpriseId} not found.`)
+        return null
+      }
+      enterpriseParentId = enterprise.parent_id ? String(enterprise.parent_id) : null
+    }
+
+    if (resellerId) {
+      if (!isValidUuid(resellerId)) {
+        sendError(res, 400, 'VALIDATION_ERROR', 'resellerId must be a valid uuid.')
+        return null
+      }
+      const resellerRows = await supabase.select(
+        'tenants',
+        `select=tenant_id&tenant_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.RESELLER&limit=1`
+      )
+      const reseller = Array.isArray(resellerRows) ? resellerRows[0] : null
+      if (!reseller) {
+        sendError(res, 404, 'RESOURCE_NOT_FOUND', `reseller ${resellerId} not found.`)
         return null
       }
     }
 
+    if (enterpriseId && resellerId && enterpriseParentId !== resellerId) {
+      sendError(res, 400, 'VALIDATION_ERROR', 'enterpriseId does not belong to the given resellerId.')
+      return null
+    }
+
+    // audit_logs.tenant_id is a single scope key (reseller or enterprise). Map query params → filter.
+    let tenantScopeFilter: string | null = null
+    if (enterpriseId) {
+      tenantScopeFilter = `tenant_id=eq.${encodeURIComponent(enterpriseId)}`
+    } else if (resellerId) {
+      const childRows = await supabase.select(
+        'tenants',
+        `select=tenant_id&parent_id=eq.${encodeURIComponent(resellerId)}&tenant_type=eq.ENTERPRISE&limit=1000`
+      )
+      const childIds = Array.isArray(childRows)
+        ? childRows.map((r: any) => String(r.tenant_id)).filter(Boolean)
+        : []
+      const scopeIds = [resellerId, ...childIds]
+      tenantScopeFilter = `tenant_id=in.(${scopeIds.map((id) => encodeURIComponent(id)).join(',')})`
+    }
+
     const filters: string[] = []
-    if (tenantId) filters.push(`tenant_id=eq.${encodeURIComponent(tenantId)}`)
+    if (tenantScopeFilter) filters.push(tenantScopeFilter)
     if (action) filters.push(`action=eq.${encodeURIComponent(action)}`)
     if (targetType) filters.push(`target_type=eq.${encodeURIComponent(targetType)}`)
     if (targetId) filters.push(`target_id=eq.${encodeURIComponent(targetId)}`)
@@ -175,7 +216,8 @@ export function registerAdminObservabilityRoutes({
     const filterQs = filters.length ? `&${filters.join('&')}` : ''
 
     const filterPairs: string[] = []
-    if (tenantId) filterPairs.push(`tenantId=${tenantId}`)
+    if (enterpriseId) filterPairs.push(`enterpriseId=${enterpriseId}`)
+    if (resellerId) filterPairs.push(`resellerId=${resellerId}`)
     if (action) filterPairs.push(`action=${action}`)
     if (targetType) filterPairs.push(`targetType=${targetType}`)
     if (targetId) filterPairs.push(`targetId=${targetId}`)

@@ -4,6 +4,8 @@
 
 **向下游推送**：当本系统产生事件（如 `SIM_STATUS_CHANGED`、`JOB_FINISHED`、`BILL_PUBLISHED` 等）且客户配置了 **`webhook_subscriptions`** 时，系统会创建 **`webhook_deliveries`** 记录，并通过异步任务向客户提供的 **HTTPS URL** 投递 JSON 负载，请求头含 **`X-Webhook-Signature`**（HMAC-SHA256）等。
 
+**方案 A（订阅模型）**：每条 `webhook_subscriptions` 绑定 **恰好一个** `event_types` 元素与一个 URL；投递时按事件类型匹配订阅并打到对应 URL。同一企业（或 reseller 级）下，每个事件类型至多一条 live 订阅。
+
 **与上游同步的区别**：
 
 - **`SIM_STATUS_CHANGE`（job）**：受理后写 `*ing`，Worker **调用上游供应商**；**稳态改库后**发 `SIM_STATUS_CHANGED`，Job 终态发 **`JOB_FINISHED`**（见 [jobs-sim-status-change.md](./jobs-sim-status-change.md)、[integration-api.md](../contracts/integration-api.md)）。

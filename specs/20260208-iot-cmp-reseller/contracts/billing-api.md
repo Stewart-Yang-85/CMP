@@ -460,6 +460,7 @@ GET /v1/adjustment-notes?billId={}&type={}&status={}&page={}&pageSize={}
       "adjustmentNoteId": "uuid",
       "billId": "uuid",
       "enterpriseId": "uuid",
+      "enterpriseName": "Acme IoT",
       "type": "CREDIT",
       "status": "DRAFT",
       "totalAmount": 200.00,
@@ -609,7 +610,10 @@ totalQuotaMb = activatedSimCount(高水位) × perSimQuotaMb
 GET /v1/enterprises/{enterpriseId}/overdue-summary
 ```
 
-**权限**: platform / platform_admin；或代理商管理员、代理商销售、代理商销售主管（企业必须在代理商范围内）
+**权限**:
+- **platform** / **platform_admin**（JWT 或 admin API key）
+- 代理商 **reseller_admin** / **reseller_sales** / **reseller_sales_director**（企业必须在代理商范围内）
+- **customer** / **department** JWT，或企业 **ApiKeyAuth**（`X-API-Key` / `customer_m2m`）：path **`enterpriseId`** 必须与 token 绑定企业一致
 
 **说明**: 该接口仅返回企业级欠费汇总和风险提示，不发送邮件/短信，不自动变更企业状态，不自动停复机。
 

@@ -1288,7 +1288,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
         'supplier_id', 'operator_id',
         ...(hasSimResellerColumn ? ['reseller_id'] : []),
         ...(hasSimImeiLockColumn ? ['imei_lock_enabled'] : []),
-        'enterprise_id', 'department_id', 'form_factor', 'upstream_status', 'upstream_status_updated_at', 'created_at',
+        'enterprise_id', 'department_id', 'form_factor', 'upstream_status', 'upstream_status_updated_at', 'remark', 'created_at',
         'suppliers(name)', 'operators(name)',
       ].join(',')
       const { data, total } = await supabase.selectWithCount(
@@ -1363,6 +1363,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
         imeiLocked: hasSimImeiLockColumn
           ? Boolean(r.imei_lock_enabled)
           : Boolean(r.bound_imei),
+        remark: r.remark ?? null,
         }
       })
 
@@ -1445,7 +1446,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
 
       const simSelectFields = [
         'sim_id', 'iccid', 'primary_imsi', 'status', 'apn', 'activation_date', 'bound_imei', 'activation_code',
-        'operator_id', 'enterprise_id', 'department_id', 'form_factor', 'created_at',
+        'operator_id', 'enterprise_id', 'department_id', 'form_factor', 'remark', 'created_at',
         ...(hasSimImeiLockColumn ? ['imei_lock_enabled'] : []),
       ].join(',')
       const { data, total } = await supabase.selectWithCount(
@@ -1495,6 +1496,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
           imei: r.bound_imei ?? null,
           imeiLockEnabled: hasSimImeiLockColumn ? Boolean(r.imei_lock_enabled) : Boolean(r.bound_imei),
           imeiLocked: hasSimImeiLockColumn ? Boolean(r.imei_lock_enabled) : Boolean(r.bound_imei),
+          remark: (r.remark as string | null | undefined) ?? null,
         }
       })
 
@@ -1568,6 +1570,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
     'totalUsageBytes',
     'imeiLockEnabled',
     'imei',
+    'remark',
   ]
 
   const sendChannelSimCsvHeadersOnly = (reply: FastifyReply, filterPairs: string[]) => {
@@ -1955,7 +1958,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
 
     const simSelectFields = [
       'sim_id', 'iccid', 'primary_imsi', 'status', 'lifecycle_sub_status', 'apn', 'activation_date', 'bound_imei',
-      'activation_code', 'operator_id', 'enterprise_id', 'department_id', 'form_factor', 'created_at',
+      'activation_code', 'operator_id', 'enterprise_id', 'department_id', 'form_factor', 'remark', 'created_at',
       ...(hasSimImeiLockColumn ? ['imei_lock_enabled'] : []),
     ].join(',')
     const { data } = await supabase.selectWithCount(
@@ -2005,6 +2008,7 @@ export function registerSimPhase4Routes({ app, prefix, deps }: { app: FastifyIns
           escapeCsv(''),
           escapeCsv(hasSimImeiLockColumn ? String(Boolean(r.imei_lock_enabled)) : String(Boolean(r.bound_imei))),
           escapeCsv(r.bound_imei ?? ''),
+          escapeCsv((r.remark as string | null | undefined) ?? ''),
         ].join(',')
       )
     }

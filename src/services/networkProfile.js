@@ -448,7 +448,6 @@ export async function createApnProfile({ supabase, payload, audit, }) {
 }
 export async function createRoamingProfile({ supabase, payload, audit, }) {
     const name = String(payload?.name || '').trim();
-    const resellerId = payload?.resellerId ? String(payload.resellerId).trim() : null;
     const supplierId = payload?.supplierId ? String(payload.supplierId).trim() : null;
     let operatorId = null;
     if (payload?.operatorId !== undefined && payload?.operatorId !== null) {
@@ -460,9 +459,6 @@ export async function createRoamingProfile({ supabase, payload, audit, }) {
     const list = Array.isArray(payload?.mccmncList) ? payload.mccmncList : [];
     if (!name)
         return toError(400, 'BAD_REQUEST', 'name is required.');
-    if (resellerId && !isValidUuid(resellerId)) {
-        return toError(400, 'BAD_REQUEST', 'resellerId must be a valid uuid.');
-    }
     if (!supplierId || !isValidUuid(supplierId)) {
         return toError(400, 'BAD_REQUEST', 'supplierId must be a valid uuid.');
     }
@@ -509,7 +505,6 @@ export async function createRoamingProfile({ supabase, payload, audit, }) {
             roamingProfileId: profile.roaming_profile_id,
             status: 'DRAFT',
             name,
-            resellerId,
             supplierId,
             operatorId: resolvedOperatorId,
             carrierId: resolvedOperatorId,

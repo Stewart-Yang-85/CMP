@@ -698,7 +698,8 @@ V1.1 以**物理 SIM** 管理为主线，围绕 `sims` 表提供入库、查询�
     - `INVALID_STATUS`：对非 DRAFT 快照执行更新，或对非 DRAFT/非合法状态执行发布
     - `RESOURCE_LOCKED`：目标快照已发布或已进入不可写状态，不允许修改 entries
   - 示例请求（创建 Roaming Profile 草稿）：
-    - `{"name":"SEA roaming","resellerId":"<uuid>","supplierId":"<uuid>","operatorId":"<uuid>","mccmncList":[{"mcc":"460","mnc":"00","ratePerMb":0.0008},{"mcc":"460","mnc":"*","ratePerMb":0.0012}]}`
+    - `{"name":"SEA roaming","supplierId":"<uuid>","operatorId":"<uuid>","mccmncList":[{"mcc":"460","mnc":"00","ratePerMb":0.0008},{"mcc":"460","mnc":"*","ratePerMb":0.0012}]}`
+    - 归属与 APN 相同：`supplierId` + `operatorId`（**无** body `resellerId`；reseller JWT 范围由 `reseller_suppliers` 约束）
   - 改版流程示例：`GET /v1/roaming-profiles/{roamingProfileId}:export-csv` 导出后编辑 CSV，再调用 `POST /v1/roaming-profiles:import-csv` 创建新的 `DRAFT` 快照；`POST /v1/roaming-profiles/{id}/clone` 在 V1.1 中返回 `410 Gone`。
 
 - APN / Control Policy / Price Plan 快照条文补充（speckit）：
@@ -1513,7 +1514,7 @@ billing:generate → ratingTotal = 8,000，netAdjustment = −200
 
 **`SILENT_SIM` 长期停机语义**：该告警 **不** 表示 `ACTIVATED` SIM 长时间无 CDR / 无流量。由于核心网为已激活 SIM 建立 PDN Connection 等控制面过程也可能产生 CDR 或少量流量，使用“已激活但无活动”作为商业告警口径意义较弱。V1.1 将 `SILENT_SIM` 定义为：SIM 已销售/分配给企业后，长期停留在 `DEACTIVATED` 状态，未进入可创造收入的活跃使用状态。默认阈值为 `threshold_value=4320`、`threshold_unit=HOURS`（约 180 天 / 6 个月）；判断依据优先使用 SIM 最近状态变更时间（如 `last_status_change_at`），缺失时才退回创建/激活等可用时间字段。metadata 应记录 `simId`、`status=DEACTIVATED`、`deactivatedSince`、`inactiveHours` 与阈值。
 
-**`UNEXPECTED_ROAMING` 未覆盖漫游发现语义**：该告警 **不** 表示“SIM 是否离开归属运营商本地网络”。运营商发行的 SIM 只要在非本地网络使用就处于 roaming，但 roaming 本身并不一定异常。V1.1 将 `UNEXPECTED_ROAMING` 定义为：当前计费周期内，某 SIM 在订阅产品包 / CoveredNetworkProfile 未覆盖的拜访地网络上产生了 out-of-profile roaming 用量。该告警是 SIM-level 的“事件发现型”告警，只要当前账期 `usage_package_daily_summary.out_of_profile_mb > 0` 即可触发；`OUT_OF_PROFILE_SURGE` 则是“用量规模型”告警，只有 out-of-profile 用量达到产品包配额百分比阈值（例如 20%）才触发。metadata 应记录 `outOfProfileMb`、`packageIds`、`pricePlanIds`、`usageDays` 与可用的 `visitedMccMncs`。
+**`UNEXPECTED_ROAMING` 未覆盖漫游用量阈值语义**：该告警 **不** 表示“SIM 是否离开归属运营商本地网络”。运营商发行的 SIM 只要在非本地网络使用就处于 roaming，但 roaming 本身并不一定异常。V1.1 将 `UNEXPECTED_ROAMING` 定义为：当前计费周期内，某 SIM 在订阅产品包 / CoveredNetworkProfile 未覆盖的拜访地网络上产生了 out-of-profile roaming 用量，且累计 OOP 用量达到配置的绝对阈值。默认阈值为 `threshold_value=20`、`threshold_unit=MB`（亦支持 `KB`/`GB`，评估时换算为 MB 比较）。`OUT_OF_PROFILE_SURGE` 则是“用量规模型”告警，按产品包配额百分比判断。metadata 应记录 `outOfProfileMb`、`thresholdMb`、`thresholdUnit`、`packageIds`、`pricePlanIds`、`usageDays` 与可用的 `visitedMccMncs`。
 
 **`CDR_DELAY` reseller 归属语义**：该告警是 Reseller-level 数据管道告警，不绑定 Enterprise 或 SIM。CDR 接收与 Integration 模块一致，应按 `resellerId + supplierId + operatorId` 的集成实例接收文件（每个 `supplierId` 至多绑定一个 Reseller，见 **FR-042a**）。触发条件仍为 `cdr_files.received_at <= now - thresholdHours` 且 `cdr_files.ingested_at IS NULL`。告警归属优先来自 CDR 文件接收集成写入的 `cdr_files.reseller_id`；若文件级归属缺失，则使用文件接收后尽早解析出的轻量索引 `cdr_file_sim_refs(cdr_file_id, iccid, sim_id, reseller_id, enterprise_id)`，通过 `reseller_id` 或 `enterprise_id -> tenants.parent_id` 解析 Reseller。metadata 应记录 `delayedFiles`、`cdrFileIds`、`affectedIccidCount`、`sampleIccids`、`supplierIds`、`operatorIds` 与 `thresholdUnit`；`currentValue` 表示该 Reseller 当前命中的延迟 CDR 文件数。
 

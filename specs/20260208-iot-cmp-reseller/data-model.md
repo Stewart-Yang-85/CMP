@@ -699,21 +699,21 @@ rating_results ──derived──> usage_package_daily_summary
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
 | roaming_profile_id | uuid | PK, default gen_random_uuid() | Roaming Profile 快照 ID |
-| reseller_id | uuid | NOT NULL, FK→resellers | 代理商 |
-| supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
+| supplier_id | uuid | NOT NULL, FK→suppliers | 供应商（连通性目录归属键） |
 | operator_id | uuid | NOT NULL, FK→operators | 运营商 |
 | name | text | NOT NULL | 展示名称（允许重复） |
-| coverage_mode | text | NOT NULL, default `LIST`; CHECK `LIST` / `NONE` | `LIST` 表示 entries 定义套内覆盖；`NONE` 表示显式不覆盖任何 MCC/MNC，用于 Default Fallback Package |
+| mccmnc_list | jsonb | NOT NULL | OOP 费率条目（含 mcc/mnc/ratePerMb 等） |
 | status | text | NOT NULL, default 'DRAFT' | DRAFT / PUBLISHED / DEPRECATED |
 | published_at | timestamptz | — | 发布时间 |
 | effective_from | timestamptz | — | 业务生效时间（通常次月 1 日 UTC） |
 | deprecated_at | timestamptz | — | 废弃时间（`DEPRECATED` 时） |
 | source_roaming_profile_id | uuid | FK→roaming_profiles | 可选；历史/遗留 lineage，**非**主修订流程 |
-| created_by | uuid | — | 创建者 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
 
-**索引**: `idx_roaming_profiles_reseller_status(reseller_id, status)`、`idx_roaming_profiles_reseller_published(reseller_id, published_at desc)`
+> **归属**：连通性目录，**无** `reseller_id` 列；代理商可见性经 `reseller_suppliers(supplier_id)` 推导（与 `apn_profiles` 一致）。
+
+**索引**: `idx_roaming_profiles_supplier_status(supplier_id, status)` 等（以实际迁移为准）
 
 #### `roaming_profile_entries`
 | 列 | 类型 | 约束 | 说明 |
@@ -771,8 +771,7 @@ rating_results ──derived──> usage_package_daily_summary
 | 列 | 类型 | 约束 | 说明 |
 |----|------|------|------|
 | apn_profile_id | uuid | PK, default gen_random_uuid() | APN Profile 快照 ID |
-| reseller_id | uuid | NOT NULL, FK→resellers | 代理商 |
-| supplier_id | uuid | NOT NULL, FK→suppliers | 供应商 |
+| supplier_id | uuid | NOT NULL, FK→suppliers | 供应商（连通性目录归属键） |
 | operator_id | uuid | NOT NULL, FK→operators | 运营商 |
 | name | text | NOT NULL | 展示名称（允许重复） |
 | apn | text | NOT NULL | APN |
@@ -784,11 +783,12 @@ rating_results ──derived──> usage_package_daily_summary
 | effective_from | timestamptz | — | 业务生效时间 |
 | deprecated_at | timestamptz | — | 废弃时间 |
 | source_apn_profile_id | uuid | FK→apn_profiles | 可选 lineage（APN 仍支持 `:clone`） |
-| created_by | uuid | — | 创建者 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 | updated_at | timestamptz | NOT NULL, default now() | 更新时间 |
 
-**索引**: `idx_apn_profiles_reseller_status(reseller_id, status)`、`idx_apn_profiles_reseller_published(reseller_id, published_at desc)`
+> **归属**：连通性目录，**无** `reseller_id` 列；代理商可见性经 `reseller_suppliers(supplier_id)` 推导（与 `roaming_profiles` 一致）。
+
+**索引**: `idx_apn_profiles_supplier_status(supplier_id, status)` 等（以实际迁移为准）
 
 #### `carrier_services`
 | 列 | 类型 | 约束 | 说明 |
@@ -1541,7 +1541,7 @@ CREATE TABLE IF NOT EXISTS webhook_subscriptions (
   enterprise_id uuid REFERENCES tenants(tenant_id),
   url text NOT NULL,
   secret text NOT NULL,       -- HMAC-SHA256 签名密钥
-  event_types text[] NOT NULL, -- 订阅的事件类型列表
+  event_types text[] NOT NULL, -- Scheme A: exactly one outbound event type per subscription
   enabled boolean NOT NULL DEFAULT true,
   description text,
   created_at timestamptz NOT NULL DEFAULT current_timestamp,
@@ -1552,14 +1552,16 @@ CREATE TABLE IF NOT EXISTS webhook_subscriptions (
 
 **用途**: Webhook 投递配置（US11, FR-039），支持 HMAC-SHA256 签名。企业级订阅同时写入 **`reseller_id`**（父代理商）与 **`enterprise_id`**；仅代理商级订阅时 `enterprise_id` 为空。列名与 `jobs` / `events` 对齐（`customer_id` → `enterprise_id`，迁移 `20260808100001`）。
 
-**唯一性（与 `upstream_integrations` 同模式，迁移 `20260808120001`）**:
+**唯一性（方案 A，迁移 `20260808120001` → `20260825120001`）**:
 - 列 **`status`**: `ACTIVE` / `INACTIVE` / `DEPRECATED`
 - 列 **`deprecated_at`**: deprecate 操作时间（迁移 `20260808130001`）；live 行为 null
-- 部分唯一索引：同一 **`enterprise_id`** 至多一条 `ACTIVE|INACTIVE`；reseller-level（`enterprise_id IS NULL`）同一 **`reseller_id`** 至多一条
+- **`event_types`**: **必须恰好 1 个**元素（CHECK `cardinality(event_types) = 1`）；一条订阅 = 一类事件 = 一个 URL
+- 部分唯一索引：同一 **`enterprise_id` + `event_types[1]`** 至多一条 `ACTIVE|INACTIVE`；reseller-level（`enterprise_id IS NULL`）同一 **`reseller_id` + `event_types[1]`** 至多一条
 - **POST `:deprecate`** → `DEPRECATED` + `deprecated_at`（让出唯一位）；创建冲突 → **409 DUPLICATE**
 - `enabled=true` ↔ `ACTIVE`；`enabled=false` 且未删 ↔ `INACTIVE`（仍占唯一位）
-- **PATCH**：仅通过 `enabled` 切换 ACTIVE/INACTIVE（请求体无 `status`）；已 DEPRECATED → **409**；废弃用 `:deprecate`
+- **PATCH**：仅通过 `enabled` 切换 ACTIVE/INACTIVE（请求体无 `status`）；已 DEPRECATED → **409**；废弃用 `:deprecate`；可改 `eventType`（不得与同 scope 下另一 live 订阅冲突）
 - **GET list**：默认返回 `ACTIVE` / `INACTIVE` / `DEPRECATED`；可用 `status` 查询参数收窄
+- API 响应同时返回 **`eventType`**（单值）与 **`eventTypes`**（长度为 1 的兼容数组）
 
 ### 5.15 `webhook_deliveries` — Webhook 投递记录
 

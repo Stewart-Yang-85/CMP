@@ -56,6 +56,95 @@ function normalizeEventTypes(value) {
   )
 }
 
+/** Scheme A: exactly one event type per subscription (`eventType` or single-element `eventTypes`). */
+function resolveSingleEventType(payload) {
+  const hasSingular = payload?.eventType !== undefined || payload?.event_type !== undefined
+  const hasPlural = payload?.eventTypes !== undefined || payload?.event_types !== undefined
+
+  if (hasSingular) {
+    const eventType = String((payload?.eventType ?? payload?.event_type) || '')
+      .trim()
+      .toUpperCase()
+    if (!eventType || !supportedEventTypes.has(eventType)) {
+      return toError(400, 'BAD_REQUEST', 'eventType must be a supported outbound webhook event type.')
+    }
+    if (hasPlural) {
+      const list = normalizeEventTypes(payload?.eventTypes ?? payload?.event_types)
+      if (list.length !== 1 || list[0] !== eventType) {
+        return toError(
+          400,
+          'BAD_REQUEST',
+          'When both eventType and eventTypes are provided, eventTypes must be a single-element array matching eventType.'
+        )
+      }
+    }
+    return { ok: true, value: eventType }
+  }
+
+  if (hasPlural) {
+    const list = normalizeEventTypes(payload?.eventTypes ?? payload?.event_types)
+    if (!list.length) {
+      return toError(400, 'BAD_REQUEST', 'eventTypes must include exactly one supported event type.')
+    }
+    if (list.length > 1) {
+      return toError(
+        400,
+        'BAD_REQUEST',
+        'Each webhook subscription binds exactly one event type (Scheme A). Use one subscription per event type / URL.'
+      )
+    }
+    return { ok: true, value: list[0] }
+  }
+
+  return toError(400, 'BAD_REQUEST', 'eventType is required (or eventTypes with exactly one supported type).')
+}
+
+async function findLiveWebhookConflict({ supabase, resellerId, enterpriseId, eventType, excludeWebhookId }) {
+  const liveFilter = 'status=in.(ACTIVE,INACTIVE)'
+  const eventFilter = `event_types=eq.{${encodeURIComponent(eventType)}}`
+  const excludeFilter = excludeWebhookId
+    ? `&webhook_id=neq.${encodeURIComponent(excludeWebhookId)}`
+    : ''
+  if (enterpriseId) {
+    const rows = await supabase.select(
+      'webhook_subscriptions',
+      `select=webhook_id&enterprise_id=eq.${encodeURIComponent(enterpriseId)}&${eventFilter}&${liveFilter}${excludeFilter}&limit=1`
+    )
+    const row = Array.isArray(rows) ? rows[0] : null
+    return row?.webhook_id ? String(row.webhook_id) : null
+  }
+  if (resellerId) {
+    const rows = await supabase.select(
+      'webhook_subscriptions',
+      `select=webhook_id&reseller_id=eq.${encodeURIComponent(resellerId)}&enterprise_id=is.null&${eventFilter}&${liveFilter}${excludeFilter}&limit=1`
+    )
+    const row = Array.isArray(rows) ? rows[0] : null
+    return row?.webhook_id ? String(row.webhook_id) : null
+  }
+  return null
+}
+
+function mapSubscriptionRow(row) {
+  const status = String(row.status || (row.enabled ? 'ACTIVE' : 'INACTIVE')).toUpperCase()
+  const types = Array.isArray(row.event_types) ? row.event_types : []
+  const eventType = String(types[0] || '').trim().toUpperCase()
+  return {
+    webhookId: row.webhook_id,
+    resellerId: row.reseller_id ?? null,
+    enterpriseId: row.enterprise_id ?? null,
+    url: row.url,
+    secret: row.secret,
+    eventType,
+    eventTypes: eventType ? [eventType] : [],
+    enabled: row.enabled === true && status === 'ACTIVE',
+    status,
+    description: row.description ?? null,
+    deprecatedAt: row.deprecated_at ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
 function normalizeDescription(value) {
   if (value === undefined) return undefined
   const text = String(value || '').trim()
@@ -395,12 +484,26 @@ export async function createWebhookSubscription({ supabase, payload, resellerId,
   if (!url) return toError(400, 'BAD_REQUEST', 'url must be a valid https URL.')
   const secret = String(payload?.secret || '').trim()
   if (!secret) return toError(400, 'BAD_REQUEST', 'secret is required.')
-  const eventTypes = normalizeEventTypes(payload?.eventTypes ?? payload?.event_types)
-  if (!eventTypes.length) {
-    return toError(400, 'BAD_REQUEST', 'eventTypes must include at least one supported event type.')
-  }
+  const eventTypeResult = resolveSingleEventType(payload)
+  if (!eventTypeResult.ok) return eventTypeResult
+  const eventType = eventTypeResult.value
+  const eventTypes = [eventType]
   const enabled = payload?.enabled === undefined ? true : Boolean(payload.enabled)
+  const status = enabled ? 'ACTIVE' : 'INACTIVE'
   const description = normalizeDescription(payload?.description)
+
+  const conflictId = await findLiveWebhookConflict({ supabase, resellerId, enterpriseId, eventType })
+  if (conflictId) {
+    const scopeLabel = enterpriseId
+      ? `enterpriseId ${enterpriseId}`
+      : `resellerId ${resellerId} (reseller-level)`
+    return toError(
+      409,
+      'DUPLICATE',
+      `A live webhook subscription already exists for ${scopeLabel} and eventType ${eventType}. Deprecate it before creating another for this event type.`
+    )
+  }
+
   const rows = await supabase.insert(
     'webhook_subscriptions',
     {
@@ -410,6 +513,7 @@ export async function createWebhookSubscription({ supabase, payload, resellerId,
       secret,
       event_types: eventTypes,
       enabled,
+      status,
       description,
     },
     { returning: 'representation' }
@@ -418,18 +522,7 @@ export async function createWebhookSubscription({ supabase, payload, resellerId,
   if (!row?.webhook_id) return toError(500, 'INTERNAL_ERROR', 'Failed to create webhook subscription.')
   return {
     ok: true,
-    value: {
-      webhookId: row.webhook_id,
-      resellerId: row.reseller_id ?? null,
-      enterpriseId: row.enterprise_id ?? null,
-      url: row.url,
-      secret: row.secret,
-      eventTypes: row.event_types ?? [],
-      enabled: row.enabled,
-      description: row.description ?? null,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    },
+    value: mapSubscriptionRow(row),
   }
 }
 
@@ -460,20 +553,7 @@ export async function listWebhookSubscriptions({ supabase, resellerId, enterpris
     `select=webhook_id,reseller_id,enterprise_id,url,secret,event_types,enabled,status,description,deprecated_at,created_at,updated_at&${statusQs}&order=created_at.desc&limit=${ps}&offset=${offset}${filterQs}`
   )
   const rows = Array.isArray(data) ? data : []
-  const items = rows.map((row) => ({
-    webhookId: row.webhook_id,
-    resellerId: row.reseller_id ?? null,
-    enterpriseId: row.enterprise_id ?? null,
-    url: row.url,
-    secret: row.secret,
-    eventTypes: row.event_types ?? [],
-    enabled: row.enabled === true && String(row.status || '').toUpperCase() === 'ACTIVE',
-    status: String(row.status || (row.enabled ? 'ACTIVE' : 'INACTIVE')).toUpperCase(),
-    description: row.description ?? null,
-    deprecatedAt: row.deprecated_at ?? null,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }))
+  const items = rows.map((row) => mapSubscriptionRow(row))
   return { ok: true, value: { items, total: total ?? items.length, page: p, pageSize: ps } }
 }
 
@@ -488,18 +568,7 @@ export async function getWebhookSubscription({ supabase, webhookId }) {
   if (!row?.webhook_id) return toError(404, 'NOT_FOUND', 'webhook subscription not found.')
   return {
     ok: true,
-    value: {
-      webhookId: row.webhook_id,
-      resellerId: row.reseller_id ?? null,
-      enterpriseId: row.enterprise_id ?? null,
-      url: row.url,
-      secret: row.secret,
-      eventTypes: row.event_types ?? [],
-      enabled: row.enabled,
-      description: row.description ?? null,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    },
+    value: mapSubscriptionRow(row),
   }
 }
 
@@ -508,7 +577,7 @@ export async function updateWebhookSubscription({ supabase, webhookId, payload }
   if (!webhookId) return toError(400, 'BAD_REQUEST', 'webhookId is required.')
   const existingRows = await supabase.select(
     'webhook_subscriptions',
-    `select=webhook_id,status&webhook_id=eq.${encodeURIComponent(webhookId)}&limit=1`
+    `select=webhook_id,reseller_id,enterprise_id,event_types,status&webhook_id=eq.${encodeURIComponent(webhookId)}&limit=1`
   )
   const existing = Array.isArray(existingRows) ? existingRows[0] : null
   if (!existing?.webhook_id) return toError(404, 'NOT_FOUND', 'webhook subscription not found.')
@@ -530,12 +599,17 @@ export async function updateWebhookSubscription({ supabase, webhookId, payload }
     if (!secret) return toError(400, 'BAD_REQUEST', 'secret cannot be empty.')
     update.secret = secret
   }
-  if (payload?.eventTypes !== undefined || payload?.event_types !== undefined) {
-    const eventTypes = normalizeEventTypes(payload?.eventTypes ?? payload?.event_types)
-    if (!eventTypes.length) {
-      return toError(400, 'BAD_REQUEST', 'eventTypes must include at least one supported event type.')
-    }
-    update.event_types = eventTypes
+  let nextEventType = null
+  if (
+    payload?.eventType !== undefined ||
+    payload?.event_type !== undefined ||
+    payload?.eventTypes !== undefined ||
+    payload?.event_types !== undefined
+  ) {
+    const eventTypeResult = resolveSingleEventType(payload)
+    if (!eventTypeResult.ok) return eventTypeResult
+    nextEventType = eventTypeResult.value
+    update.event_types = [nextEventType]
   }
   if (payload?.status !== undefined) {
     return toError(
@@ -551,6 +625,25 @@ export async function updateWebhookSubscription({ supabase, webhookId, payload }
   if (payload?.description !== undefined) {
     update.description = normalizeDescription(payload.description)
   }
+  if (nextEventType) {
+    const conflictId = await findLiveWebhookConflict({
+      supabase,
+      resellerId: existing.reseller_id ?? null,
+      enterpriseId: existing.enterprise_id ?? null,
+      eventType: nextEventType,
+      excludeWebhookId: webhookId,
+    })
+    if (conflictId) {
+      const scopeLabel = existing.enterprise_id
+        ? `enterpriseId ${existing.enterprise_id}`
+        : `resellerId ${existing.reseller_id} (reseller-level)`
+      return toError(
+        409,
+        'DUPLICATE',
+        `A live webhook subscription already exists for ${scopeLabel} and eventType ${nextEventType}. Deprecate it before changing this subscription.`
+      )
+    }
+  }
   if (Object.keys(update).length === 1) {
     return toError(400, 'BAD_REQUEST', 'No valid fields to update.')
   }
@@ -561,18 +654,7 @@ export async function updateWebhookSubscription({ supabase, webhookId, payload }
   if (!row?.webhook_id) return toError(404, 'NOT_FOUND', 'webhook subscription not found.')
   return {
     ok: true,
-    value: {
-      webhookId: row.webhook_id,
-      resellerId: row.reseller_id ?? null,
-      enterpriseId: row.enterprise_id ?? null,
-      url: row.url,
-      secret: row.secret,
-      eventTypes: row.event_types ?? [],
-      enabled: row.enabled,
-      description: row.description ?? null,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    },
+    value: mapSubscriptionRow(row),
   }
 }
 

@@ -25,21 +25,19 @@ describe('Phase 21: SIM Remark Field', () => {
 
   it('T115: GET /sims and GET /sims/:simId include remark in response', async () => {
     const fs = await import('node:fs/promises')
-    const content = await fs.readFile('src/routes/simPhase4.js', 'utf-8')
-    // remark appears in select fields
+    const content = await fs.readFile('src/routes/simPhase4.ts', 'utf-8')
     expect(content).toContain("'remark'")
-    // remark appears in response mapping
-    const remarkResponseCount = (content.match(/remark:\s*r\.remark\b/g) || []).length
-    expect(remarkResponseCount).toBeGreaterThanOrEqual(2)
-    // remark in single-SIM response
-    expect(content).toContain('remark: sim.remark')
+    expect(content).toMatch(/remark:\s*r\.remark\s*\?\?\s*null/)
+    expect(content).toMatch(/remark:\s*sim\.remark\s*\?\?\s*null/)
+    expect(content).toMatch(/remark:\s*\(r\.remark as string \| null \| undefined\)\s*\?\?\s*null/)
   })
 
   it('T115: CSV export includes remark header', async () => {
     const fs = await import('node:fs/promises')
-    const content = await fs.readFile('src/routes/simPhase4.js', 'utf-8')
+    const content = await fs.readFile('src/routes/simPhase4.ts', 'utf-8')
     expect(content).toContain("'remark'")
     expect(content).toContain("escapeCsv(r.remark ?? '')")
+    expect(content).toContain("escapeCsv((r.remark as string | null | undefined) ?? '')")
   })
 
   it('T116: route file contains OpenAPI update note', async () => {

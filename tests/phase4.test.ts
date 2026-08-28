@@ -1883,22 +1883,18 @@ describe('phase5', () => {
     }
   })
 
-  it('rejects roaming profile creation when resellerId is not a uuid', async () => {
+  it('ignores invalid resellerId on roaming profile create (connectivity catalog)', async () => {
     const result = await createRoamingProfile({
       supabase,
       payload: {
-        name: 'Roaming bad reseller',
+        name: 'Roaming ignore reseller',
         resellerId: 'not-a-uuid',
         mccmncList: [{ mcc: '001', mnc: '01', ratePerMb: 0.001 }],
         supplierId,
         operatorId,
       },
     })
-    expect(result.ok).toBe(false)
-    if (!result.ok) {
-      expect(result.code).toBe('BAD_REQUEST')
-      expect(result.message).toBe('resellerId must be a valid uuid.')
-    }
+    expect(result.ok).toBe(true)
   })
 
   it('rejects roaming profile creation when operatorId is empty string', async () => {
@@ -3396,6 +3392,68 @@ describe('phase5', () => {
     if (byIdsDetail.ok) {
       expect((byIdsDetail.value as any).apnProfile?.apn).toBe('iot')
       expect((byIdsDetail.value as any).carrierService?.carrierServiceConfig?.apnProfileId).toBe(apnProfileId)
+    }
+  })
+
+  it('rejects package create when pricePlan and carrierService have different supplier/operator', async () => {
+    const otherSupplierId = randomUUID()
+    const otherOperatorId = randomUUID()
+    supabase.getTable('suppliers').push({ supplier_id: otherSupplierId, name: 'Other supplier' })
+    supabase.getTable('operators').push({
+      operator_id: otherOperatorId,
+      supplier_id: otherSupplierId,
+      carrier_id: carrierId,
+    })
+    supabase.getTable('reseller_suppliers').push({ reseller_id: resellerId, supplier_id: otherSupplierId })
+    const otherCoveredId = randomUUID()
+    const nowIso = new Date().toISOString()
+    supabase.getTable('covered_network_profiles').push({
+      covered_network_profile_id: otherCoveredId,
+      name: 'Other covered',
+      reseller_id: null,
+      supplier_id: otherSupplierId,
+      operator_id: otherOperatorId,
+      coverage_mode: 'LIST',
+      status: 'PUBLISHED',
+      published_at: nowIso,
+      effective_from: nowIso,
+      source_covered_network_profile_id: null,
+    })
+    const planResult = await createPricePlan({
+      supabase,
+      enterpriseId,
+      resellerId,
+      payload: {
+        name: 'Plan other operator',
+        type: 'SIM_DEPENDENT_BUNDLE',
+        serviceType: 'DATA',
+        currency: 'USD',
+        billingCycleType: 'CALENDAR_MONTH',
+        firstCycleProration: 'NONE',
+        prorationRounding: 'ROUND_HALF_UP',
+        monthlyFee: 10,
+        deactivatedMonthlyFee: 1,
+        perSimQuotaMb: 1024,
+        coveredNetworkProfileId: otherCoveredId,
+      },
+    })
+    expect(planResult.ok).toBe(true)
+    const pricePlanId = planResult.ok ? planResult.value.pricePlanId : ''
+    const pubPlan = await publishPricePlan({ supabase, pricePlanId })
+    expect(pubPlan.ok).toBe(true)
+    const packageResult = await createPackage({
+      supabase,
+      enterpriseId,
+      payload: {
+        name: 'Mismatched package',
+        pricePlanId,
+        ...preparePackageModules({ supabase, supplierId, operatorId, resellerId }),
+      },
+    })
+    expect(packageResult.ok).toBe(false)
+    if (!packageResult.ok) {
+      expect(packageResult.code).toBe('BAD_REQUEST')
+      expect(packageResult.message).toMatch(/same supplierId|same operatorId/)
     }
   })
 

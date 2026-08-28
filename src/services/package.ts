@@ -2571,6 +2571,62 @@ function validatePricePlanRowForPackage(
   return { ok: true, value: null }
 }
 
+/**
+ * Package connectivity context is a single supplier+operator pair.
+ * Price Plan contributes that pair via CoveredNetworkProfile; Carrier Service stores it directly.
+ */
+async function assertPackagePricePlanCarrierConnectivity(
+  supabase: SupabaseClient,
+  pricePlanRow: any,
+  carrierSupplierId: string,
+  carrierOperatorIdPk: string
+): Promise<ServiceResult<null>> {
+  const planTypeRaw = String(pricePlanRow?.type ?? '').trim()
+  const planType = planTypeRaw === 'TIERED_PRICING' ? 'TIERED_VOLUME_PRICING' : planTypeRaw
+  if (!pricePlanTypeUsesCoveredNetwork(planType)) {
+    return { ok: true, value: null }
+  }
+  const coveredId = String(pricePlanRow?.covered_network_profile_id ?? '').trim()
+  if (!coveredId || !isValidUuid(coveredId)) {
+    return toError(
+      400,
+      'BAD_REQUEST',
+      'pricePlanId must reference a CoveredNetworkProfile to align supplier/operator with carrierServiceId.'
+    )
+  }
+  const rows = await supabase.select(
+    'covered_network_profiles',
+    `select=covered_network_profile_id,supplier_id,operator_id,status&covered_network_profile_id=eq.${encodeURIComponent(coveredId)}&limit=1`
+  )
+  const profile = Array.isArray(rows) ? rows[0] : null
+  if (!(profile as any)?.covered_network_profile_id) {
+    return toError(400, 'BAD_REQUEST', 'pricePlanId coveredNetworkProfileId is not found.')
+  }
+  const coveredSupplier = String((profile as any).supplier_id ?? '').trim()
+  const coveredOperator = String((profile as any).operator_id ?? '').trim()
+  if (!coveredSupplier || !isValidUuid(coveredSupplier)) {
+    return toError(400, 'BAD_REQUEST', 'pricePlan CoveredNetworkProfile has invalid supplierId.')
+  }
+  if (!coveredOperator || !isValidUuid(coveredOperator)) {
+    return toError(400, 'BAD_REQUEST', 'pricePlan CoveredNetworkProfile has invalid operatorId.')
+  }
+  if (coveredSupplier !== String(carrierSupplierId || '').trim()) {
+    return toError(
+      400,
+      'BAD_REQUEST',
+      'pricePlanId and carrierServiceId must share the same supplierId (via CoveredNetworkProfile).'
+    )
+  }
+  if (coveredOperator !== String(carrierOperatorIdPk || '').trim()) {
+    return toError(
+      400,
+      'BAD_REQUEST',
+      'pricePlanId and carrierServiceId must share the same operatorId (via CoveredNetworkProfile).'
+    )
+  }
+  return { ok: true, value: null }
+}
+
 async function resolveModulePayloadByIds({
   supabase,
   carrierServiceId,
@@ -2670,12 +2726,15 @@ export async function createPackage({
   const resellerTenantId = scopeForModules.value
   const pricePlanVersionRows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,status,enterprise_id,reseller_id&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
+    `select=price_plan_id,status,enterprise_id,reseller_id,type,covered_network_profile_id&price_plan_id=eq.${encodeURIComponent(pricePlanId)}&limit=1`
   )
   const pricePlanVersion = Array.isArray(pricePlanVersionRows) ? pricePlanVersionRows[0] : null
   const planOk = validatePricePlanRowForPackage(pricePlanVersion, enterpriseId, resellerTenantId)
   if (!planOk.ok) return planOk
   const carrierServiceId = payload?.carrierServiceId ? String(payload.carrierServiceId).trim() : null
+  if (!carrierServiceId) {
+    return toError(400, 'BAD_REQUEST', 'carrierServiceId is required.')
+  }
   const controlPolicyId = payload?.controlPolicyId ? String(payload.controlPolicyId).trim() : null
   const commercialTermsId = payload?.commercialTermsId ? String(payload.commercialTermsId).trim() : null
   const moduleById = await resolveModulePayloadByIds({
@@ -2701,6 +2760,13 @@ export async function createPackage({
     { resellerRef: payload?.resellerId }
   )
   if (!modulesValidate.ok) return modulesValidate
+  const connectivity = await assertPackagePricePlanCarrierConnectivity(
+    supabase,
+    pricePlanVersion,
+    String((normalizedModules.value.carrierServiceConfig as any)?.supplierId ?? ''),
+    String(modulesValidate.value.operatorId ?? '')
+  )
+  if (!connectivity.ok) return connectivity
   const carrierServiceConfig = {
     ...normalizedModules.value.carrierServiceConfig,
     operatorId: modulesValidate.value.operatorId,
@@ -2800,7 +2866,7 @@ export async function updatePackage({
   }
   const prRows = await supabase.select(
     'price_plans',
-    `select=price_plan_id,status,enterprise_id,reseller_id&price_plan_id=eq.${encodeURIComponent(effectivePricePlanId)}&limit=1`
+    `select=price_plan_id,status,enterprise_id,reseller_id,type,covered_network_profile_id&price_plan_id=eq.${encodeURIComponent(effectivePricePlanId)}&limit=1`
   )
   const pr = Array.isArray(prRows) ? prRows[0] : null
   const pOk = validatePricePlanRowForPackage(pr, packageEnterpriseId, resellerTenantId)
@@ -2879,6 +2945,13 @@ export async function updatePackage({
     resellerRef: payload?.resellerId,
   })
   if (!modulesValidate.ok) return modulesValidate
+  const connectivity = await assertPackagePricePlanCarrierConnectivity(
+    supabase,
+    pr,
+    String((carrierNormalized.value as any)?.supplierId ?? ''),
+    String(modulesValidate.value.operatorId ?? '')
+  )
+  if (!connectivity.ok) return connectivity
   const carrierServiceConfigResolved = {
     ...carrierNormalized.value,
     operatorId: modulesValidate.value.operatorId,
@@ -3020,7 +3093,7 @@ export async function publishPackage({
     return toError(409, 'INVALID_STATUS', 'Price plan must be PUBLISHED.')
   }
   const planType = String((pricePlanVersion as any).type ?? '').trim()
-  if (pricePlanTypeUsesCoveredNetwork(planType)) {
+  if (pricePlanTypeUsesCoveredNetwork(planType === 'TIERED_PRICING' ? 'TIERED_VOLUME_PRICING' : planType)) {
     const coveredId = String((pricePlanVersion as any).covered_network_profile_id ?? '').trim()
     if (!coveredId) {
       return toError(
@@ -3031,11 +3104,20 @@ export async function publishPackage({
     }
     const covRows = await supabase.select(
       'covered_network_profiles',
-      `select=covered_network_profile_id,status&covered_network_profile_id=eq.${encodeURIComponent(coveredId)}&limit=1`
+      `select=covered_network_profile_id,status,supplier_id,operator_id&covered_network_profile_id=eq.${encodeURIComponent(coveredId)}&limit=1`
     )
     const cov = Array.isArray(covRows) ? covRows[0] : null
     if (!cov || String((cov as any).status ?? '').trim().toUpperCase() !== 'PUBLISHED') {
       return toError(409, 'INVALID_STATUS', 'CoveredNetworkProfile must be PUBLISHED for this price plan.')
+    }
+    const publishConnectivity = await assertPackagePricePlanCarrierConnectivity(
+      supabase,
+      pricePlanVersion,
+      String((csRow as any)?.supplier_id ?? ''),
+      String((csRow as any)?.operator_id ?? '')
+    )
+    if (!publishConnectivity.ok) {
+      return toError(409, 'INVALID_STATUS', (publishConnectivity as { message: string }).message)
     }
   }
   const externalProductId = String(publishInput?.externalProductId ?? '').trim()

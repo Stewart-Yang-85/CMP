@@ -292,8 +292,10 @@ POST /v1/alerts/{alertId}:acknowledge
 ### 2.3 告警统计
 
 ```
-GET /v1/alerts/summary?from={}&to={}&severity={}&alertType={}
+GET /v1/alerts/summary?resellerId={}&enterpriseId={}&from={}&to={}&severity={}&alertType={}
 ```
+
+**权限 / 租户筛选**: 与 **§2.1** 相同（`resellerId` / `enterpriseId` 语义一致）。
 
 **Response 200**:
 ```json
@@ -317,8 +319,10 @@ GET /v1/alerts/summary?from={}&to={}&severity={}&alertType={}
 ### 2.4 告警趋势
 
 ```
-GET /v1/alerts/trends?days={}&alertType={}&severity={}
+GET /v1/alerts/trends?resellerId={}&enterpriseId={}&days={}&alertType={}&severity={}&from={}&to={}
 ```
+
+**权限 / 租户筛选**: 与 **§2.1** 相同（`resellerId` / `enterpriseId` 语义一致）。
 
 **Response 200**:
 ```json
@@ -398,36 +402,37 @@ POST /v1/webhook-subscriptions
 
 **权限**: 代理商管理员 | 企业管理员
 
+**模型（方案 A）**: 一条订阅绑定 **恰好一个** 出站事件类型与一个 HTTPS URL。同一 `enterpriseId`（或 reseller-level `resellerId`）下，每个 `eventType` 至多一条 live（`ACTIVE`/`INACTIVE`）订阅；不同类型可创建多条订阅以对接「一类推送一个 URL」。
+
 **Request Body**:
 ```json
 {
   "url": "string (required, HTTPS)",
-  "eventTypes": [
-    "SIM_STATUS_CHANGED",
-    "JOB_FINISHED",
-    "SUBSCRIPTION_CHANGED",
-    "BILL_PUBLISHED",
-    "PAYMENT_CONFIRMED",
-    "ALERT_TRIGGERED",
-    "ENTERPRISE_STATUS_CHANGED"
-  ],
+  "eventType": "SIM_STATUS_CHANGED",
   "secret": "string (required, 用于 HMAC-SHA256 签名验证)",
   "enabled": true,
   "description": "string (optional)"
 }
 ```
 
+兼容写法：`eventTypes: ["SIM_STATUS_CHANGED"]`（数组长度必须为 1）。多元素 `eventTypes` → **400**。
+
+允许的 `eventType`：`SIM_STATUS_CHANGED` | `JOB_FINISHED` | `SUBSCRIPTION_CHANGED` | `BILL_PUBLISHED` | `PAYMENT_CONFIRMED` | `ALERT_TRIGGERED` | `ENTERPRISE_STATUS_CHANGED`。
+
 **Response 201**:
 ```json
 {
-  "subscriptionId": "uuid",
-  "url": "https://example.com/webhooks",
-  "eventTypes": [...],
+  "webhookId": "uuid",
+  "url": "https://example.com/webhooks/sim-status",
+  "eventType": "SIM_STATUS_CHANGED",
+  "eventTypes": ["SIM_STATUS_CHANGED"],
   "enabled": true,
+  "status": "ACTIVE",
   "createdAt": "2026-02-08T10:00:00Z"
 }
 ```
 
+同 scope + 同 `eventType` 已有 live 订阅 → **409 DUPLICATE**（先 `POST .../{webhookId}:deprecate`）。
 ### 3.2 Webhook 投递格式
 
 **HTTP Headers**:

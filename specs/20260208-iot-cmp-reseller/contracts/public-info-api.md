@@ -11,7 +11,7 @@
 ## 1. 只读查询（系统内所有已认证用户）
 
 ```
-GET /v1/public-infos?name={}&mcc={}&mnc={}&page={}&pageSize={}
+GET /v1/public-infos?name={}&country={}&mcc={}&mnc={}&page={}&pageSize={}
 ```
 
 **权限**: 任意**已认证**用户（platform / reseller / enterprise / department 等系统角色均可）。匿名请求 **401**。（`reseller` 角色 JWT 中的 `resellerId` 语义见 [tenant-api.md §0 — FR-058](tenant-api.md)。）
@@ -19,10 +19,11 @@ GET /v1/public-infos?name={}&mcc={}&mnc={}&page={}&pageSize={}
 **说明**:
 
 - **名称模糊**：`name` 非空时，对 `public_infos.name` 做**不区分大小写**的**子串模糊匹配**（`ilike %name%`），**不做精准等值匹配**。原因：目录行可能按运营商下属具体公司全称入库，精准匹配会漏掉可用结果。
+- **国家模糊**：`country` 非空时，对 `public_infos.country` 做同样的**不区分大小写子串模糊匹配**（`ilike %country%`），因目录中国家/地区显示名不一定与用户输入完全一致。
 - **MCC 单查**：仅提供 `mcc` 时，返回该国家（MCC）下全部运营商目录行。
 - **MCC+MNC 精确**：`mcc` 与 `mnc` **同时提供**时，按 E.212 **精确等值**过滤到目标运营商（`mnc` 会规范化为 3 位以匹配库内存储）。
 - **禁止仅 MNC**：仅提供 `mnc` → **400**（各国 MNC 大量重复，无法唯一定位）。
-- **组合语义**：若同时提供 `name` 与 `mcc`（或 `mcc`+`mnc`），结果为 **AND**。
+- **组合语义**：若同时提供 `name` / `country` 与 `mcc`（或 `mcc`+`mnc`），结果为 **AND**。
 - 过滤条件皆空：返回全量目录的分页结果。
 
 **Query Parameters**:
@@ -30,6 +31,7 @@ GET /v1/public-infos?name={}&mcc={}&mnc={}&page={}&pageSize={}
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | name | string | 否 | 运营商名称**模糊**搜索（子串，不区分大小写） |
+| country | string | 否 | 国家/地区**模糊**搜索（子串，不区分大小写） |
 | mcc | string | 否 | 单独：该国全部运营商；与 `mnc` 成对：精确 PLMN |
 | mnc | string | 否 | 须与 `mcc` 成对；单独提供 → 400 |
 | page | integer | 否 | 默认 **1** |

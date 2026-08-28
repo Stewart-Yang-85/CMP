@@ -25,7 +25,9 @@ describe('bill detail lifecycle fields', () => {
   }
 
   it('buildBillDetail maps bill lifecycle timestamps and payment fields', () => {
-    const detail = buildBillDetail({ bill, lineItems: [] })
+    const detail = buildBillDetail({ bill, lineItems: [], enterpriseName: 'Acme IoT' })
+    expect(detail.enterpriseId).toBe('e1')
+    expect(detail.enterpriseName).toBe('Acme IoT')
     expect(detail.dueDate).toBe('2026-03-31')
     expect(detail.createdAt).toBe('2026-02-01T08:00:00Z')
     expect(detail.generatedAt).toBe('2026-02-01T08:05:00Z')
@@ -42,8 +44,10 @@ describe('bill detail lifecycle fields', () => {
   })
 
   it('buildBillDetailCsv includes lifecycle bill section rows', () => {
-    const detail = buildBillDetail({ bill, lineItems: [] })
+    const detail = buildBillDetail({ bill, lineItems: [], enterpriseName: 'Acme IoT' })
     const csv = buildBillDetailCsv(detail)
+    expect(csv).toContain('bill,enterpriseId,,e1,')
+    expect(csv).toContain('bill,enterpriseName,,Acme IoT,')
     expect(csv).toContain('bill,paidAmount,,99.5,')
     expect(csv).toContain('bill,paymentRef,,TXN-001,')
     expect(csv).toContain('bill,paidAt,,2026-03-15T12:00:00Z,')

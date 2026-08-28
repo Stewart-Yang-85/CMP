@@ -39,6 +39,22 @@ function toNumberOrNull(value) {
   return Number.isFinite(n) ? n : null
 }
 
+/** True when merge should emit ALERT_MERGED / ALERT_MERGE (status or current_value changed). */
+function isAlertMergeMaterialChange(existing, nextStatus, nextCurrentValue) {
+  const prevStatus = existing?.status != null ? String(existing.status) : null
+  if (prevStatus !== nextStatus) return true
+  const prevNum = toNumberOrNull(existing?.current_value)
+  const nextNum = toNumberOrNull(nextCurrentValue)
+  if (prevNum == null && nextNum == null) {
+    const prevRaw = existing?.current_value
+    const nextRaw = nextCurrentValue
+    if (prevRaw == null && nextRaw == null) return false
+    return String(prevRaw ?? '') !== String(nextRaw ?? '')
+  }
+  if (prevNum == null || nextNum == null) return true
+  return Math.abs(prevNum - nextNum) > 1e-6
+}
+
 /** PostgREST ClientError often has object `body`; don't use String(body) alone or message is lost. */
 function supabaseErrorText(err) {
   const parts = []
@@ -308,54 +324,59 @@ export async function createAlert(input) {
   }
   const existingRows = await supabase.select(
     'alerts',
-    `select=alert_id&${matchFilters.join('&')}&limit=1`
+    `select=alert_id,status,current_value&${matchFilters.join('&')}&limit=1`
   )
   const existing = Array.isArray(existingRows) ? existingRows[0] : null
   if (existing) {
+    const nextStatus = 'OPEN'
+    const nextCurrentValue = currentValue ?? null
+    const materialChange = isAlertMergeMaterialChange(existing, nextStatus, nextCurrentValue)
     await supabase.update('alerts', `alert_id=eq.${encodeURIComponent(existing.alert_id)}`, {
       severity,
-      status: 'OPEN',
+      status: nextStatus,
       threshold: threshold ?? null,
-      current_value: currentValue ?? null,
+      current_value: nextCurrentValue,
       window_end: windowEndIso ?? null,
       last_seen_at: nowIso,
       updated_at: nowIso,
       metadata: alertMetadata,
       delivery_channels: deliveryChannels ?? null,
     }, { returning: 'minimal' })
-    await recordAlertInternalEvent({
-      supabase,
-      eventType: 'ALERT_MERGED',
-      enterpriseId: customerId ?? null,
-      resellerId,
-      payload: {
-        alertId: existing.alert_id,
-        alertType: normalizedType,
-        severity,
-        customerId: customerId ?? null,
-        simId: simId ?? null,
-        threshold: threshold ?? null,
-        currentValue: currentValue ?? null,
-        windowStart: windowStartIso,
-        windowEnd: windowEndIso ?? null,
-      },
-    })
-    await recordAlertAuditLog({
-      supabase,
-      action: 'ALERT_MERGE',
-      targetType: 'ALERT',
-      targetId: existing.alert_id ?? null,
-      tenantId: customerId ?? resellerId,
-      actorRole: 'SYSTEM',
-      afterData: {
-        alertType: normalizedType,
-        severity,
-        threshold: threshold ?? null,
-        currentValue: currentValue ?? null,
-        windowStart: windowStartIso,
-        windowEnd: windowEndIso ?? null,
-      },
-    })
+    if (materialChange) {
+      await recordAlertInternalEvent({
+        supabase,
+        eventType: 'ALERT_MERGED',
+        enterpriseId: customerId ?? null,
+        resellerId,
+        payload: {
+          alertId: existing.alert_id,
+          alertType: normalizedType,
+          severity,
+          customerId: customerId ?? null,
+          simId: simId ?? null,
+          threshold: threshold ?? null,
+          currentValue: nextCurrentValue,
+          windowStart: windowStartIso,
+          windowEnd: windowEndIso ?? null,
+        },
+      })
+      await recordAlertAuditLog({
+        supabase,
+        action: 'ALERT_MERGE',
+        targetType: 'ALERT',
+        targetId: existing.alert_id ?? null,
+        tenantId: customerId ?? resellerId,
+        actorRole: 'SYSTEM',
+        afterData: {
+          alertType: normalizedType,
+          severity,
+          threshold: threshold ?? null,
+          currentValue: nextCurrentValue,
+          windowStart: windowStartIso,
+          windowEnd: windowEndIso ?? null,
+        },
+      })
+    }
     return { ok: true, value: { created: false, alertId: existing.alert_id ?? null } }
   }
   const rows = await supabase.insert('alerts', {
@@ -589,7 +610,20 @@ async function resolveEffectiveRuleForEvaluation({
 }
 
 function effectiveThreshold(rule, fallback) {
-  return Number.isFinite(Number(rule?.thresholdValue)) ? Number(rule.thresholdValue) : Number(fallback)
+  const raw = rule?.thresholdValue
+  if (raw === null || raw === undefined || raw === '') return Number(fallback)
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : Number(fallback)
+}
+
+/** Normalize configured data-volume threshold to MB (evaluator OOP metrics are MB). */
+function thresholdValueToMb(value, unit) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return null
+  const u = String(unit || 'MB').trim().toUpperCase()
+  if (u === 'KB') return n / 1024
+  if (u === 'GB') return n * 1024
+  return n
 }
 
 function usageMbFromRow(row) {
@@ -1350,14 +1384,22 @@ export async function runAlertEvaluation(input) {
       enterpriseId,
       fallback: {
         severity: 'P1',
-        thresholdValue: null,
-        thresholdUnit: null,
+        thresholdValue: 20,
+        thresholdUnit: 'MB',
         windowMinutes: policy.windowMinutes,
         suppressMinutes: policy.suppressMinutes,
         deliveryChannels: null,
       },
     })
     if (!rule) {
+      skippedCount += 1
+      continue
+    }
+    const effectiveThresholdMb = thresholdValueToMb(
+      effectiveThreshold(rule, 20),
+      rule.thresholdUnit ?? 'MB'
+    )
+    if (effectiveThresholdMb == null || candidate.outProfileMb < effectiveThresholdMb) {
       skippedCount += 1
       continue
     }
@@ -1368,7 +1410,7 @@ export async function runAlertEvaluation(input) {
       resellerId,
       customerId: enterpriseId,
       simId,
-      threshold: null,
+      threshold: effectiveThresholdMb,
       currentValue: candidate.outProfileMb,
       windowStart: `${periodStartDay}T00:00:00.000Z`,
       windowEnd: windowEndIso,
@@ -1377,6 +1419,7 @@ export async function runAlertEvaluation(input) {
       metadata: {
         message: 'SIM has out-of-profile roaming usage in the current billing period.',
         outOfProfileMb: candidate.outProfileMb,
+        thresholdMb: effectiveThresholdMb,
         packageIds: Array.from(candidate.packageIds),
         pricePlanIds: Array.from(candidate.pricePlanIds),
         pricePlanTypes: Array.from(candidate.pricePlanTypes),
@@ -1385,6 +1428,7 @@ export async function runAlertEvaluation(input) {
           ...candidate.visitedMccMncs,
           ...(visitedNetworksBySim.get(simId) ?? []),
         ])).sort(),
+        thresholdUnit: rule.thresholdUnit ?? 'MB',
       },
       deliveryChannels: rule.deliveryChannels ?? null,
       suppressMinutes: rule.suppressMinutes ?? policy.suppressMinutes,

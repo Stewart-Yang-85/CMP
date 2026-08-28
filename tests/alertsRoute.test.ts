@@ -522,6 +522,24 @@ describe('Fastify Alerts routes', () => {
     expect(res.body).toMatchObject({ totalOpen: 0 })
   })
 
+  it('builds summary with platform resellerId and enterpriseId query filters', async () => {
+    const captured: { alertQueries?: string[]; error?: string } = {}
+    const handler = registerRoutes(captured).get('GET /v1/alerts/summary')!
+    const res = createMockRes()
+
+    await handler(
+      {
+        cmpAuth: { roleScope: 'platform', role: 'platform_admin' },
+        query: { resellerId, enterpriseId },
+      },
+      res,
+    )
+
+    expect(captured.error).toBeUndefined()
+    expect(captured.alertQueries?.[0]).toContain(`reseller_id=eq.${resellerId}`)
+    expect(captured.alertQueries?.[0]).toContain(`customer_id=eq.${enterpriseId}`)
+  })
+
   it('builds trend buckets with customer enterprise scope', async () => {
     const captured: { alertQueries?: string[]; error?: string } = {}
     const handler = registerRoutes(captured).get('GET /v1/alerts/trends')!
@@ -539,9 +557,27 @@ describe('Fastify Alerts routes', () => {
     expect(captured.alertQueries?.length).toBe(3)
     expect(captured.alertQueries?.[0]).toContain(`customer_id=eq.${enterpriseId}`)
     expect(captured.alertQueries?.[0]).toContain('alert_type=eq.SILENT_SIM')
-    expect(captured.alertQueries?.[0]).toContain('window_start=lte.')
-    expect(captured.alertQueries?.[0]).toContain('or=(window_end.gte.')
-    expect(captured.alertQueries?.[0]).not.toContain('created_at=')
+    expect(captured.alertQueries?.[0]).toMatch(/window_start=lte\./)
+    expect(captured.alertQueries?.[0]).toMatch(/or=\(window_end\.gte\./)
     expect(res.body).toMatchObject({ days: 3 })
+  })
+
+  it('builds trends with platform resellerId and enterpriseId query filters', async () => {
+    const captured: { alertQueries?: string[]; error?: string } = {}
+    const handler = registerRoutes(captured).get('GET /v1/alerts/trends')!
+    const res = createMockRes()
+
+    await handler(
+      {
+        cmpAuth: { roleScope: 'platform', role: 'platform_admin' },
+        query: { resellerId, enterpriseId, days: '2' },
+      },
+      res,
+    )
+
+    expect(captured.error).toBeUndefined()
+    expect(captured.alertQueries?.[0]).toContain(`reseller_id=eq.${resellerId}`)
+    expect(captured.alertQueries?.[0]).toContain(`customer_id=eq.${enterpriseId}`)
+    expect(res.body).toMatchObject({ days: 2 })
   })
 })

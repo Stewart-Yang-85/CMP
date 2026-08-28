@@ -212,7 +212,7 @@ These are recommended platform defaults. Actual values may be seeded by migratio
 | `POOL_USAGE_HIGH` | PLATFORM/RESELLER/ENTERPRISE | `80` | `PERCENT` | `P2` | Use percentage of configured pool/quota, not an absolute 100GB-style value |
 | `OUT_OF_PROFILE_SURGE` | PLATFORM/RESELLER/ENTERPRISE | `20` | `PERCENT` | `P2` | Use percentage of the subscribed package quota, based on current-period out-of-profile usage |
 | `SILENT_SIM` | PLATFORM/RESELLER/ENTERPRISE | `4320` | `HOURS` | `P3` | Long-running `DEACTIVATED` SIM; default is about 180 days / 6 months |
-| `UNEXPECTED_ROAMING` | PLATFORM/RESELLER/ENTERPRISE | `NULL` | `NULL` | `P1` | Current-period SIM-level out-of-profile roaming discovered; no threshold |
+| `UNEXPECTED_ROAMING` | PLATFORM/RESELLER/ENTERPRISE | `20` | `MB` | `P1` | Current-period SIM-level OOP roaming volume; absolute MB threshold (default 20 MB) |
 | `CDR_DELAY` | PLATFORM/RESELLER | configurable | `HOURS` | `P1` | Reseller-scoped CDR ingestion delay; uses `cdr_files` plus `cdr_file_sim_refs` |
 | `UPSTREAM_DISCONNECT` | PLATFORM/RESELLER | `3` | `ATTEMPTS` | `P1` | Reseller-scoped upstream integration token probe; not SIM-level |
 | `WEBHOOK_DELIVERY_FAILED` | PLATFORM/RESELLER | configurable | `ATTEMPTS` | `P2` | Example: alert after 3 failed attempts |

@@ -41,12 +41,13 @@ export function registerPublicInfoRoutes({
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const query = req.query ?? {}
     const name = query.name ? String(query.name).trim() : null
+    const country = query.country ? String(query.country).trim() : null
     const mcc = query.mcc ? String(query.mcc).trim() : null
     const mnc = query.mnc ? String(query.mnc).trim() : null
     const page = query.page ?? null
     const pageSize = query.pageSize ?? null
 
-    const result: any = await listPublicInfos({ supabase, name, mcc, mnc, page, pageSize })
+    const result: any = await listPublicInfos({ supabase, name, country, mcc, mnc, page, pageSize })
     if (!result.ok) return sendError(res, result.status, result.code, result.message)
     res.send(result.value)
   })

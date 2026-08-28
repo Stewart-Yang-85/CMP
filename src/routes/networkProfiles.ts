@@ -273,58 +273,6 @@ export function registerNetworkProfileRoutes({ app, prefix, deps }: { app: any; 
     return null
   }
 
-  async function resolveCatalogWriteResellerTenantId(
-    supabase: any,
-    auth: { scope?: string | null; resellerId?: string | null },
-    req: any,
-    res: any,
-    rawResellerId: unknown
-  ): Promise<string | null> {
-    const tokenResellerId = String(req?.cmpAuth?.resellerId || auth.resellerId || '').trim()
-    const bodyReseller =
-      rawResellerId === null || rawResellerId === undefined ? '' : String(rawResellerId).trim()
-
-    if (auth.scope === 'platform') {
-      if (!bodyReseller) {
-        sendError(res, 400, 'BAD_REQUEST', 'resellerId is required.')
-        return null
-      }
-      if (!isValidUuid(bodyReseller)) {
-        sendError(res, 400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
-        return null
-      }
-      if (!(await resellerTenantExists(supabase, bodyReseller))) {
-        sendError(res, 404, 'RESOURCE_NOT_FOUND', 'resellerId is not found.')
-        return null
-      }
-      return bodyReseller
-    }
-
-    if (auth.scope === 'reseller') {
-      if (!tokenResellerId || !isValidUuid(tokenResellerId)) {
-        sendError(res, 403, 'FORBIDDEN', 'Reseller scope is missing resellerId.')
-        return null
-      }
-      const effectiveResellerId = bodyReseller || tokenResellerId
-      if (!isValidUuid(effectiveResellerId)) {
-        sendError(res, 400, 'BAD_REQUEST', 'resellerId must be a valid uuid.')
-        return null
-      }
-      if (!(await resellerTenantExists(supabase, effectiveResellerId))) {
-        sendError(res, 404, 'RESOURCE_NOT_FOUND', 'resellerId is not found.')
-        return null
-      }
-      if (effectiveResellerId !== tokenResellerId) {
-        sendError(res, 403, 'FORBIDDEN', 'resellerId does not match authenticated reseller.')
-        return null
-      }
-      return effectiveResellerId
-    }
-
-    sendError(res, 403, 'FORBIDDEN', 'Insufficient permissions.')
-    return null
-  }
-
   async function loadApnProfileSupplierId(supabase: any, apnProfileId: string) {
     const rows = await supabase.select(
       'apn_profiles',
@@ -398,16 +346,9 @@ export function registerNetworkProfileRoutes({ app, prefix, deps }: { app: any; 
     if (!(await supplierIdExists(supabase, supplierId))) {
       return sendError(res, 400, 'BAD_REQUEST', 'supplierId is not found.')
     }
-    const payload =
-      req.body && typeof req.body === 'object' && !Array.isArray(req.body)
-        ? { ...(req.body as Record<string, unknown>) }
-        : {}
-    const resolvedResellerId = await resolveCatalogWriteResellerTenantId(supabase, auth, req, res, payload.resellerId)
-    if (!resolvedResellerId) return
-    payload.resellerId = resolvedResellerId
     const allowed = await assertResellerSupplierScope(req, res, supabase, auth, supplierId)
     if (!allowed) return
-    const result = await createRoamingProfile({ supabase, payload, audit })
+    const result = await createRoamingProfile({ supabase, payload: req.body ?? {}, audit })
     if (!result.ok) return sendError(res, (result as any).status, (result as any).code, (result as any).message)
     res.code(201).send((result as any).value)
   })
@@ -455,15 +396,12 @@ export function registerNetworkProfileRoutes({ app, prefix, deps }: { app: any; 
     if (!(await supplierIdExists(supabase, supplierId))) {
       return sendError(res, 400, 'BAD_REQUEST', 'supplierId is not found.')
     }
-    const resellerId = await resolveCatalogWriteResellerTenantId(supabase, auth, req, res, fields.resellerId)
-    if (!resellerId) return
     const allowed = await assertResellerSupplierScope(req, res, supabase, auth, supplierId)
     if (!allowed) return
     const result = await createRoamingProfile({
       supabase,
       payload: {
         name,
-        resellerId,
         supplierId,
         operatorId,
         mccmncList: parsedCsv.entries,

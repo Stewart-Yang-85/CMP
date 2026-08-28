@@ -132,6 +132,26 @@ function toNumberOrNull(value: unknown) {
   return Number.isFinite(n) ? n : null
 }
 
+/** True when merge should emit ALERT_MERGED / ALERT_MERGE (status or current_value changed). */
+function isAlertMergeMaterialChange(
+  existing: { status?: unknown; current_value?: unknown },
+  nextStatus: string,
+  nextCurrentValue: unknown
+): boolean {
+  const prevStatus = existing.status != null ? String(existing.status) : null
+  if (prevStatus !== nextStatus) return true
+  const prevNum = toNumberOrNull(existing.current_value)
+  const nextNum = toNumberOrNull(nextCurrentValue)
+  if (prevNum == null && nextNum == null) {
+    const prevRaw = existing.current_value
+    const nextRaw = nextCurrentValue
+    if (prevRaw == null && nextRaw == null) return false
+    return String(prevRaw ?? '') !== String(nextRaw ?? '')
+  }
+  if (prevNum == null || nextNum == null) return true
+  return Math.abs(prevNum - nextNum) > 1e-6
+}
+
 function buildAlertFilters({
   resellerId,
   enterpriseId,
@@ -394,54 +414,59 @@ export async function createAlert(input: CreateAlertInput): Promise<OkResult<{ c
   }
   const existingRows = await supabase.select(
     'alerts',
-    `select=alert_id&${matchFilters.join('&')}&limit=1`
+    `select=alert_id,status,current_value&${matchFilters.join('&')}&limit=1`
   )
   const existing = Array.isArray(existingRows) ? existingRows[0] : null
   if (existing) {
+    const nextStatus = 'OPEN'
+    const nextCurrentValue = currentValue ?? null
+    const materialChange = isAlertMergeMaterialChange(existing, nextStatus, nextCurrentValue)
     await supabase.update('alerts', `alert_id=eq.${encodeURIComponent(existing.alert_id)}`, {
       severity,
-      status: 'OPEN',
+      status: nextStatus,
       threshold: threshold ?? null,
-      current_value: currentValue ?? null,
+      current_value: nextCurrentValue,
       window_end: windowEndIso ?? null,
       last_seen_at: nowIso,
       updated_at: nowIso,
       metadata: metadata ?? null,
       delivery_channels: deliveryChannels ?? null,
     }, { returning: 'minimal' })
-    await recordAlertInternalEvent({
-      supabase,
-      eventType: 'ALERT_MERGED',
-      enterpriseId: customerId ?? null,
-      resellerId,
-      payload: {
-        alertId: existing.alert_id,
-        alertType: normalizedType,
-        severity,
-        customerId: customerId ?? null,
-        simId: simId ?? null,
-        threshold: threshold ?? null,
-        currentValue: currentValue ?? null,
-        windowStart: windowStartIso,
-        windowEnd: windowEndIso ?? null,
-      },
-    })
-    await recordAlertAuditLog({
-      supabase,
-      action: 'ALERT_MERGE',
-      targetType: 'ALERT',
-      targetId: existing.alert_id ?? null,
-      tenantId: customerId ?? resellerId,
-      actorRole: 'SYSTEM',
-      afterData: {
-        alertType: normalizedType,
-        severity,
-        threshold: threshold ?? null,
-        currentValue: currentValue ?? null,
-        windowStart: windowStartIso,
-        windowEnd: windowEndIso ?? null,
-      },
-    })
+    if (materialChange) {
+      await recordAlertInternalEvent({
+        supabase,
+        eventType: 'ALERT_MERGED',
+        enterpriseId: customerId ?? null,
+        resellerId,
+        payload: {
+          alertId: existing.alert_id,
+          alertType: normalizedType,
+          severity,
+          customerId: customerId ?? null,
+          simId: simId ?? null,
+          threshold: threshold ?? null,
+          currentValue: nextCurrentValue,
+          windowStart: windowStartIso,
+          windowEnd: windowEndIso ?? null,
+        },
+      })
+      await recordAlertAuditLog({
+        supabase,
+        action: 'ALERT_MERGE',
+        targetType: 'ALERT',
+        targetId: existing.alert_id ?? null,
+        tenantId: customerId ?? resellerId,
+        actorRole: 'SYSTEM',
+        afterData: {
+          alertType: normalizedType,
+          severity,
+          threshold: threshold ?? null,
+          currentValue: nextCurrentValue,
+          windowStart: windowStartIso,
+          windowEnd: windowEndIso ?? null,
+        },
+      })
+    }
     return { ok: true, value: { created: false, alertId: existing.alert_id ?? null } }
   }
   const rows = await supabase.insert('alerts', {

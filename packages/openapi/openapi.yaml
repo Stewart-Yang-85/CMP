@@ -105,7 +105,7 @@ tags:
   - name: PublicInfos
     description: |
       3GPP public carrier directory (`public_infos`). `GET /public-infos` is readable by **any authenticated system user**;
-      `name` uses fuzzy (substring) match. create/update/delete under `/admin/public-infos` for **platform_admin** only.
+      `name` and `country` use fuzzy (substring) match. create/update/delete under `/admin/public-infos` for **platform_admin** only.
       Isolated from business `operators` / SIM flows (no FK).
 
 x-tagGroups:
@@ -1734,11 +1734,17 @@ components:
         defaultThresholdValue:
           type: number
           nullable: true
-          description: Default threshold for the alert type. For `SILENT_SIM`, this is deactivated duration in hours; the catalog default is `4320` (about 180 days / 6 months).
+          description: >
+            Default threshold for the alert type.
+            `SILENT_SIM` uses deactivated duration in hours (catalog default `4320` ≈ 180 days).
+            `UNEXPECTED_ROAMING` uses absolute out-of-profile volume (catalog default `20` with unit `MB`).
         defaultThresholdUnit:
           type: string
           nullable: true
-          description: Unit for `defaultThresholdValue`; `SILENT_SIM` uses `HOURS` for long-running `DEACTIVATED` SIM detection.
+          description: >
+            Unit for `defaultThresholdValue`.
+            Examples: `PERCENT` (pool / OOP surge), `HOURS` (`SILENT_SIM`, `CDR_DELAY`),
+            `MB` (`UNEXPECTED_ROAMING`), `ATTEMPTS` (upstream / webhook).
           enum: [PERCENT, KB, MB, GB, HOURS, MINUTES, ATTEMPTS, COUNT]
         defaultWindowMinutes:
           type: integer
@@ -1964,8 +1970,8 @@ components:
           - alertType: UNEXPECTED_ROAMING
             enabled: true
             severity: P1
-            thresholdValue: null
-            thresholdUnit: null
+            thresholdValue: 20
+            thresholdUnit: MB
             windowMinutes: 60
             suppressMinutes: 60
             deliveryChannels: [PORTAL, WEBHOOK]
@@ -2103,7 +2109,19 @@ components:
 
     WebhookSubscriptionCreateRequest:
       type: object
-      required: [url, secret, eventTypes]
+      required: [url, secret, eventType]
+      description: |
+        Scheme A: one subscription = one HTTPS URL + exactly one outbound event type.
+        Prefer **`eventType`**. The `eventTypes` array is accepted only as a one-element
+        compatibility alias and must not be sent together with a conflicting `eventType`.
+      example:
+        resellerId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        enterpriseId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        url: https://customer.example.com/webhooks/sim-status
+        secret: whsec_example_shared_secret
+        eventType: SIM_STATUS_CHANGED
+        enabled: true
+        description: SIM status callbacks for this enterprise
       properties:
         resellerId:
           type: string
@@ -2126,10 +2144,30 @@ components:
             Reseller-level subscriptions (null enterpriseId) are not creatable via this API.
         url:
           type: string
+          example: https://customer.example.com/webhooks/sim-status
         secret:
           type: string
+          example: whsec_example_shared_secret
+        eventType:
+          type: string
+          description: Preferred singular event type for this subscription (exactly one URL per event type).
+          enum:
+            - SIM_STATUS_CHANGED
+            - JOB_FINISHED
+            - SUBSCRIPTION_CHANGED
+            - BILL_PUBLISHED
+            - PAYMENT_CONFIRMED
+            - ALERT_TRIGGERED
+            - ENTERPRISE_STATUS_CHANGED
+          example: SIM_STATUS_CHANGED
         eventTypes:
           type: array
+          deprecated: true
+          minItems: 1
+          maxItems: 1
+          description: |
+            Deprecated compatibility alias for `eventType`. Prefer `eventType`.
+            If used, must be a single-element array; do not send both fields unless they match.
           items:
             type: string
             enum:
@@ -2142,9 +2180,11 @@ components:
               - ENTERPRISE_STATUS_CHANGED
         enabled:
           type: boolean
+          example: true
         description:
           type: string
           nullable: true
+          example: SIM status callbacks for this enterprise
 
     OutboundWebhookEventCatalogItem:
       type: object
@@ -2176,13 +2216,42 @@ components:
 
     WebhookSubscriptionUpdateRequest:
       type: object
+      description: |
+        Partial update. Prefer **`eventType`** when changing the bound event type.
+        `eventTypes` is a deprecated one-element compatibility alias.
+      example:
+        url: https://customer.example.com/webhooks/sim-status-v2
+        secret: whsec_rotated_secret
+        eventType: SIM_STATUS_CHANGED
+        enabled: true
+        description: Rotated endpoint for SIM status callbacks
       properties:
         url:
           type: string
+          example: https://customer.example.com/webhooks/sim-status-v2
         secret:
           type: string
+          example: whsec_rotated_secret
+        eventType:
+          type: string
+          description: Change the single bound event type (must not collide with another live subscription for the same scope).
+          enum:
+            - SIM_STATUS_CHANGED
+            - JOB_FINISHED
+            - SUBSCRIPTION_CHANGED
+            - BILL_PUBLISHED
+            - PAYMENT_CONFIRMED
+            - ALERT_TRIGGERED
+            - ENTERPRISE_STATUS_CHANGED
+          example: SIM_STATUS_CHANGED
         eventTypes:
           type: array
+          deprecated: true
+          minItems: 1
+          maxItems: 1
+          description: |
+            Deprecated compatibility alias for `eventType`. Prefer `eventType`.
+            If used, must be a single-element array; do not send both fields unless they match.
           items:
             type: string
         enabled:
@@ -2190,9 +2259,11 @@ components:
           description: |
             Maps to status ACTIVE (true) / INACTIVE (false). Same pattern as upstream integrations.
             Cannot set DEPRECATED via PATCH — use `POST .../{webhookId}:deprecate`.
+          example: true
         description:
           type: string
           nullable: true
+          example: Rotated endpoint for SIM status callbacks
 
     WebhookSubscriptionResponse:
       type: object
@@ -2214,8 +2285,14 @@ components:
           type: string
         secret:
           type: string
+        eventType:
+          type: string
+          description: The single outbound event type bound to this subscription URL (Scheme A).
         eventTypes:
           type: array
+          minItems: 1
+          maxItems: 1
+          description: Compatibility mirror of `[eventType]` (always length 1).
           items:
             type: string
         enabled:
@@ -2224,8 +2301,7 @@ components:
           type: string
           enum: [ACTIVE, INACTIVE, DEPRECATED]
           description: |
-            Live uniqueness (Integration-style): at most one ACTIVE/INACTIVE row per enterpriseId
-            (or per reseller-level resellerId when enterpriseId is null).
+            Live uniqueness (Scheme A): at most one ACTIVE/INACTIVE row per (`enterpriseId`|reseller-level `resellerId`) + `eventType`.
             `POST .../{webhookId}:deprecate` sets DEPRECATED.
         description:
           type: string
@@ -2353,6 +2429,7 @@ components:
         tenantId:
           type: string
           nullable: true
+          description: Raw audit_logs.tenant_id (reseller or enterprise UUID as stored). Not a query filter alias.
         action:
           type: string
         targetType:
@@ -3256,6 +3333,11 @@ components:
         imei:
           type: string
           nullable: true
+        remark:
+          type: string
+          nullable: true
+          maxLength: 1000
+          description: Free-text remark for the SIM (nullable).
 
     SimCardListResponse:
       type: object
@@ -3331,6 +3413,11 @@ components:
           type: boolean
         imeiLocked:
           type: boolean
+        remark:
+          type: string
+          nullable: true
+          maxLength: 1000
+          description: Free-text remark for the SIM (nullable).
 
     EnterpriseSimCardListResponse:
       type: object
@@ -4602,6 +4689,10 @@ components:
         enterpriseId:
           type: string
           format: uuid
+        enterpriseName:
+          type: string
+          nullable: true
+          description: Display name of the enterprise tenant (`tenants.name`).
         type:
           type: string
           enum: [CREDIT, DEBIT]
@@ -5229,6 +5320,10 @@ components:
           type: string
         enterpriseId:
           type: string
+        enterpriseName:
+          type: string
+          nullable: true
+          description: Display name of the enterprise tenant (`tenants.name`).
         period:
           type: string
           example: "2026-02"
@@ -5290,6 +5385,10 @@ components:
         enterpriseId:
           type: string
           format: uuid
+        enterpriseName:
+          type: string
+          nullable: true
+          description: Display name of the enterprise tenant (`tenants.name`).
         period:
           type: string
           example: "2026-02"
@@ -6907,6 +7006,8 @@ components:
       type: object
       required: [name, mccmncList, supplierId, operatorId]
       description: |
+        Connectivity catalog snapshot scoped by **supplierId + operatorId** (same ownership model as APN profiles).
+        Reseller scope is enforced via **`reseller_suppliers`** bind for reseller tokens; **do not** send `resellerId`.
         mccmncList 仅做格式与冲突校验，不校验是否存在于 business_operators/operators。
         每项可选 **country** / **network** 为展示注解（可空），不参与计费与匹配。
       properties:
@@ -6916,20 +7017,12 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RoamingRateEntry'
-        resellerId:
-          type: string
-          format: uuid
-          description: >-
-            RESELLER **`tenants.tenant_id`** owning the profile (**FR-058**).
-            Required for platform admin. Optional for reseller JWT; when omitted,
-            defaults to the authenticated reseller, and when provided it must match the token.
         supplierId:
           type: string
         operatorId:
           type: string
       example:
         name: SEA roaming v1
-        resellerId: 92e24e68-5f66-4ca4-bf52-31e63294f8e7
         supplierId: 54c4b5d2-a574-4f13-a84d-3c0d17b13113
         operatorId: 1f53b6ea-0e95-4c37-82de-d425fd2f0f32
         mccmncList:
@@ -8389,13 +8482,13 @@ paths:
       description: |
         Read-only 3GPP public carrier catalog (`public_infos`).
         **Authorization**: any authenticated system user (platform / reseller / enterprise / department roles). Anonymous → 401.
-        **name**: case-insensitive **fuzzy** (substring) match via `ilike %name%` — not exact equality —
-        because catalog rows may store a specific legal/company name for a carrier.
+        **name** / **country**: case-insensitive **fuzzy** (substring) match via `ilike %…%` — not exact equality —
+        because catalog rows may store specific legal/company or country/territory display names.
         **mcc / mnc**:
         - `mcc` alone → list all carriers for that country (MCC).
         - `mcc` + `mnc` → exact PLMN match for one carrier.
         - `mnc` alone → **400** (MNC values repeat across countries).
-        Filters may combine with `name` (AND). Pagination: `page` default 1; `pageSize` default 50, maximum 100.
+        Filters may combine with `name` / `country` (AND). Pagination: `page` default 1; `pageSize` default 50, maximum 100.
       parameters:
         - in: query
           name: name
@@ -8404,6 +8497,13 @@ paths:
           description: |
             Case-insensitive fuzzy (substring) match on `name`. Example: `china` matches
             "China Mobile Communications Group Co., Ltd.".
+        - in: query
+          name: country
+          schema:
+            type: string
+          description: |
+            Case-insensitive fuzzy (substring) match on `country`. Example: `china` or `united`
+            may match longer catalog country/territory display names.
         - in: query
           name: mcc
           schema:
@@ -9312,10 +9412,15 @@ paths:
         This endpoint is informational only: it does **not** send email/SMS reminders,
         does **not** change enterprise status, and does **not** suspend or reactivate SIMs.
 
-        **Auth:** `platform` / `platform_admin`, or reseller role in
-        `reseller_admin` / `reseller_sales` / `reseller_sales_director` (enterprise must be in reseller scope).
+        **Auth:** `BearerAuth` or `ApiKeyAuth` (`X-API-Key`).
+        - `platform` / `platform_admin` (JWT or admin API key)
+        - reseller role in `reseller_admin` / `reseller_sales` / `reseller_sales_director`
+          (enterprise must be in reseller scope)
+        - customer / department JWT or enterprise **ApiKeyAuth** (`customer_m2m`): path
+          `enterpriseId` must match the token-bound enterprise
       security:
         - BearerAuth: []
+        - ApiKeyAuth: []
       parameters:
         - name: enterpriseId
           in: path
@@ -10363,7 +10468,27 @@ paths:
       tags: [Alerts]
       operationId: alertsSummary
       summary: Alert Summary
+      description: |
+        Aggregated alert counts in the caller's tenant scope.
+        **Tenant filters** match **GET /alerts**: optional `resellerId` / `enterpriseId`
+        (platform may filter either; reseller may narrow by `enterpriseId`; customer scope is fixed to the token enterprise).
       parameters:
+        - name: resellerId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: |
+            Reseller filter. Platform may set any RESELLER tenant id.
+            Reseller tokens: omit or must equal token `resellerId`.
+        - name: enterpriseId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: |
+            Enterprise filter. Platform/reseller may set a child ENTERPRISE under the effective reseller scope.
+            Customer tokens: omit or must equal the token enterprise.
         - name: from
           in: query
           description: Include alerts whose window overlaps this start time; uses coalesce(windowEnd, windowStart) >= from.
@@ -10398,7 +10523,27 @@ paths:
       tags: [Alerts]
       operationId: alertsTrends
       summary: Alert Trends
+      description: |
+        Daily alert counts in the caller's tenant scope.
+        **Tenant filters** match **GET /alerts**: optional `resellerId` / `enterpriseId`
+        (platform may filter either; reseller may narrow by `enterpriseId`; customer scope is fixed to the token enterprise).
       parameters:
+        - name: resellerId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: |
+            Reseller filter. Platform may set any RESELLER tenant id.
+            Reseller tokens: omit or must equal token `resellerId`.
+        - name: enterpriseId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: |
+            Enterprise filter. Platform/reseller may set a child ENTERPRISE under the effective reseller scope.
+            Customer tokens: omit or must equal the token enterprise.
         - name: from
           in: query
           description: Build trend buckets from this start date; each bucket counts alerts whose window overlaps that day.
@@ -10422,6 +10567,11 @@ paths:
           schema:
             type: string
             enum: [POOL_USAGE_HIGH, OUT_OF_PROFILE_SURGE, SILENT_SIM, UNEXPECTED_ROAMING, CDR_DELAY, UPSTREAM_DISCONNECT, WEBHOOK_DELIVERY_FAILED]
+        - name: severity
+          in: query
+          schema:
+            type: string
+            enum: [P0, P1, P2, P3]
       responses:
         '200':
           description: Alert trends
@@ -10938,17 +11088,26 @@ paths:
       operationId: createWebhookSubscription
       summary: Create Webhook Subscription
       description: |
-        Creates an outbound webhook subscription. Uniqueness mirrors upstream integrations:
-        at most one **ACTIVE/INACTIVE** row per `enterpriseId` (enterprise-scoped), or per
-        reseller-level `resellerId` when `enterpriseId` is omitted. Returns **409 DUPLICATE**
-        if a live subscription already exists for that scope; deprecate first via
-        `POST .../{webhookId}:deprecate` (sets DEPRECATED).
+        Creates an outbound webhook subscription (**Scheme A**): one HTTPS URL bound to **exactly one**
+        outbound event type (`eventType`, or single-element `eventTypes`).
+        Live uniqueness: at most one **ACTIVE/INACTIVE** row per (`enterpriseId` or reseller-level
+        `resellerId`) **and** `eventType`. Returns **409 DUPLICATE** if a live subscription already
+        exists for that scope+eventType; deprecate first via `POST .../{webhookId}:deprecate`.
+        Create multiple subscriptions to route different event types to different URLs.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/WebhookSubscriptionCreateRequest'
+            example:
+              resellerId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+              enterpriseId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+              url: https://customer.example.com/webhooks/sim-status
+              secret: whsec_example_shared_secret
+              eventType: SIM_STATUS_CHANGED
+              enabled: true
+              description: SIM status callbacks for this enterprise
       responses:
         '201':
           description: Webhook subscription created
@@ -11129,6 +11288,12 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/WebhookSubscriptionUpdateRequest'
+            example:
+              url: https://customer.example.com/webhooks/sim-status-v2
+              secret: whsec_rotated_secret
+              eventType: SIM_STATUS_CHANGED
+              enabled: true
+              description: Rotated endpoint for SIM status callbacks
       responses:
         '200':
           description: Webhook subscription updated
@@ -15426,6 +15591,11 @@ paths:
         Target enterprise is the path `enterpriseId`. Body `resellerId` (`reseller_id`) scopes ownership:
         - **Reseller JWT**: optional. If omitted, the token’s reseller is implied. If set, it must equal the token’s `resellerId` and the enterprise must belong to that reseller.
         - **Platform / admin API key**: `resellerId` is **required** and must form a valid reseller–enterprise pair with the path `enterpriseId`.
+
+        **Module compatibility**: `pricePlanId` and `carrierServiceId` **MUST** share the same **`supplierId` + `operatorId`**.
+        The Price Plan side is taken from its **CoveredNetworkProfile**; the Carrier Service side from its stored
+        `supplier_id` / `operator_id`. `commercialTermsId` / `controlPolicyId` need only match the package **reseller**.
+        Mismatch → **400** (e.g. `pricePlanId and carrierServiceId must share the same supplierId`).
       parameters:
         - name: enterpriseId
           in: path
@@ -16669,7 +16839,10 @@ paths:
       tags: [NetworkProfiles]
       x-sort-order: 6
       summary: Create Roaming Profile
-      description: mccmncList 支持 mcc+mnc 精确匹配与 mcc-* 通配；不校验拜访地运营商是否在 business_operators/operators。
+      description: |
+        Create a **DRAFT** roaming profile under **supplierId + operatorId** (connectivity catalog; same model as APN).
+        mccmncList 支持 mcc+mnc 精确匹配与 mcc-* 通配；不校验拜访地运营商是否在 business_operators/operators。
+        Reseller tokens must use a supplier bound via **`reseller_suppliers`**; body **`resellerId` is not used**.
       requestBody:
         required: true
         content:
@@ -16769,7 +16942,8 @@ paths:
       summary: Create Roaming Profile from CSV
       description: >-
         Upload a CSV of OOP rate rows to create a **DRAFT** roaming profile (same validation and persistence as
-        **POST /roaming-profiles**). **country** and **network** columns are optional display annotations only.
+        **POST /roaming-profiles**). Ownership is **supplierId + operatorId** only (no `resellerId` field; same as APN).
+        **country** and **network** columns are optional display annotations only.
         To revise an existing profile, **GET …:export-csv** → edit CSV → **import-csv** (creates a **new** snapshot).
       requestBody:
         required: true
@@ -16782,13 +16956,6 @@ paths:
                 name:
                   type: string
                   description: Roaming profile display name.
-                resellerId:
-                  type: string
-                  format: uuid
-                  description: >-
-                    RESELLER **`tenants.tenant_id`** (**FR-058**). Required for **platform admin**.
-                    Optional for **reseller admin** — when omitted, defaults to the authenticated reseller;
-                    when provided, must match the token reseller.
                 supplierId:
                   type: string
                   format: uuid
@@ -16818,7 +16985,6 @@ paths:
                 summary: Thailand AIS sample
                 value:
                   name: WXZG Thailand OOP v1
-                  resellerId: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
                   supplierId: 11111111-1111-1111-1111-111111111111
                   operatorId: 22222222-2222-2222-2222-222222222222
                   file: |
@@ -17751,7 +17917,7 @@ paths:
         **business_operators.operator_id**. Omit **status** to list ACTIVE + INACTIVE (default); pass
         **DEPRECATED** to audit soft-deleted rows.
         When **resellerId** and **supplierId** are both provided, they MUST be bound via
-        eseller_suppliers — otherwise **400 SUPPLIER_NOT_BOUND**. When **supplierId** + **operatorId**
+        `reseller_suppliers` — otherwise **400 SUPPLIER_NOT_BOUND**. When **supplierId** + **operatorId**
         are both provided, operator MUST belong to that supplier — otherwise **400 BAD_REQUEST**.
       security:
         - BearerAuth: []
@@ -18058,20 +18224,49 @@ paths:
       tags: [Admin]
       operationId: adminAudits
       summary: List Audit Logs (Admin)
-      description: Internal admin endpoint to query audit logs with filters.
+      description: |
+        Internal admin endpoint to query audit logs with filters.
+        Tenant scope uses **`resellerId` / `enterpriseId`** (not a generic `tenantId` query):
+        - omit both → no tenant filter
+        - `enterpriseId` only → `audit_logs.tenant_id = enterpriseId` (must be ENTERPRISE)
+        - `resellerId` only → `tenant_id IN (resellerId + child ENTERPRISE tenants)`
+        - both → enterprise must belong to reseller, then `tenant_id = enterpriseId`
       security:
         - AdminApiKeyAuth: []
         - BearerAuth: []
       parameters:
-        - name: tenantId
+        - name: enterpriseId
           in: query
           schema:
             type: string
             format: uuid
           description: >
-            Filter by tenant UUID. When provided, must be a valid UUID of an existing tenant;
+            Filter by ENTERPRISE tenant UUID written to audit_logs.tenant_id.
+            When provided, must be a valid UUID of an existing ENTERPRISE tenant;
+            otherwise the API returns 400 or 404 (not an empty list).
+        - name: resellerId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: >
+            Filter by RESELLER tenant UUID. When provided alone, matches audit rows whose tenant_id is
+            the reseller itself or any child ENTERPRISE under that reseller.
+            When provided, must be a valid UUID of an existing RESELLER tenant;
             otherwise the API returns 400 or 404 (not an empty list).
         - name: action
+          in: query
+          schema:
+            type: string
+        - name: targetType
+          in: query
+          schema:
+            type: string
+        - name: targetId
+          in: query
+          schema:
+            type: string
+        - name: requestId
           in: query
           schema:
             type: string
@@ -18129,31 +18324,43 @@ paths:
               schema:
                 $ref: '#/components/schemas/AuditLogListResponse'
         '400':
-          description: Invalid tenantId or time range
+          description: Invalid enterpriseId/resellerId, hierarchy mismatch, or time range
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
               examples:
-                invalidTenantId:
+                invalidEnterpriseId:
                   value:
                     code: VALIDATION_ERROR
-                    message: tenantId must be a valid uuid.
+                    message: enterpriseId must be a valid uuid.
+                invalidResellerId:
+                  value:
+                    code: VALIDATION_ERROR
+                    message: resellerId must be a valid uuid.
+                hierarchyMismatch:
+                  value:
+                    code: VALIDATION_ERROR
+                    message: enterpriseId does not belong to the given resellerId.
                 invalidTimeRange:
                   value:
                     code: VALIDATION_ERROR
                     message: start must be before or equal to end.
         '404':
-          description: Tenant not found
+          description: Enterprise or reseller not found
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
               examples:
-                tenantNotFound:
+                enterpriseNotFound:
                   value:
                     code: RESOURCE_NOT_FOUND
-                    message: tenant cccccccc-0000-0000-0000-999999999999 not found.
+                    message: enterprise cccccccc-0000-0000-0000-999999999999 not found.
+                resellerNotFound:
+                  value:
+                    code: RESOURCE_NOT_FOUND
+                    message: reseller rrrrrrrr-0000-0000-0000-999999999999 not found.
 
   /admin/audits:csv:
     get:
@@ -18166,15 +18373,38 @@ paths:
         - AdminApiKeyAuth: []
         - BearerAuth: []
       parameters:
-        - name: tenantId
+        - name: enterpriseId
           in: query
           schema:
             type: string
             format: uuid
           description: >
-            Filter by tenant UUID. When provided, must be a valid UUID of an existing tenant;
+            Filter by ENTERPRISE tenant UUID written to audit_logs.tenant_id.
+            When provided, must be a valid UUID of an existing ENTERPRISE tenant;
+            otherwise the API returns 400 or 404 (not an empty CSV).
+        - name: resellerId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: >
+            Filter by RESELLER tenant UUID. When provided alone, matches audit rows whose tenant_id is
+            the reseller itself or any child ENTERPRISE under that reseller.
+            When provided, must be a valid UUID of an existing RESELLER tenant;
             otherwise the API returns 400 or 404 (not an empty CSV).
         - name: action
+          in: query
+          schema:
+            type: string
+        - name: targetType
+          in: query
+          schema:
+            type: string
+        - name: targetId
+          in: query
+          schema:
+            type: string
+        - name: requestId
           in: query
           schema:
             type: string
@@ -18232,13 +18462,13 @@ paths:
               schema:
                 type: string
         '400':
-          description: Invalid tenantId or time range
+          description: Invalid enterpriseId/resellerId, hierarchy mismatch, or time range
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '404':
-          description: Tenant not found
+          description: Enterprise or reseller not found
           content:
             application/json:
               schema:

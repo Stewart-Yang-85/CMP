@@ -589,7 +589,6 @@ export async function createRoamingProfile({
   audit?: AuditContext
 }): Promise<ServiceResult<{ roamingProfileId: string; status: string; createdAt: string }>> {
   const name = String(payload?.name || '').trim()
-  const resellerId = payload?.resellerId ? String(payload.resellerId).trim() : null
   const supplierId = payload?.supplierId ? String(payload.supplierId).trim() : null
   let operatorId: string | null = null
   if (payload?.operatorId !== undefined && payload?.operatorId !== null) {
@@ -599,9 +598,6 @@ export async function createRoamingProfile({
   }
   const list = Array.isArray(payload?.mccmncList) ? payload.mccmncList : []
   if (!name) return toError(400, 'BAD_REQUEST', 'name is required.')
-  if (resellerId && !isValidUuid(resellerId)) {
-    return toError(400, 'BAD_REQUEST', 'resellerId is invalid.')
-  }
   if (!supplierId || !isValidUuid(supplierId)) {
     return toError(400, 'BAD_REQUEST', 'supplierId is invalid.')
   }
@@ -649,7 +645,6 @@ export async function createRoamingProfile({
       roamingProfileId: (profile as any).roaming_profile_id,
       status: 'DRAFT',
       name,
-      resellerId,
       supplierId,
       operatorId: resolvedOperatorId,
       carrierId: resolvedOperatorId,

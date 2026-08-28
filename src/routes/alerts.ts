@@ -322,6 +322,7 @@ export function registerAlertRoutes({ app, prefix, deps }: { app: any; prefix: s
   })
 
   app.get(`${prefix}/alerts/summary`, async (req: any, res: any) => {
+    // Tenant filters: same resolveAlertFilters as GET /alerts (query resellerId / enterpriseId).
     const query = req.query ?? {}
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const scope = await resolveAlertFilters(req, res, deps, supabase)
@@ -343,6 +344,7 @@ export function registerAlertRoutes({ app, prefix, deps }: { app: any; prefix: s
   })
 
   app.get(`${prefix}/alerts/trends`, async (req: any, res: any) => {
+    // Tenant filters: same resolveAlertFilters as GET /alerts (query resellerId / enterpriseId).
     const query = req.query ?? {}
     const supabase = createSupabaseRestClient({ useServiceRole: true, traceId: getTraceId(res) })
     const scope = await resolveAlertFilters(req, res, deps, supabase)

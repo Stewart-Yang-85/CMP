@@ -23,7 +23,7 @@ function normalizeMnc(value) {
   return s.padStart(3, '0')
 }
 
-export async function listPublicInfos({ supabase, name, mcc, mnc, page, pageSize }) {
+export async function listPublicInfos({ supabase, name, country, mcc, mnc, page, pageSize }) {
   // page default 1; pageSize default 50, max 100
   const p = Math.max(1, Number(page) || 1)
   const ps = Math.min(100, Math.max(1, Number(pageSize) || 50))
@@ -41,6 +41,10 @@ export async function listPublicInfos({ supabase, name, mcc, mnc, page, pageSize
   // legal/company name rather than a short brand, so exact equality is too strict.
   if (name) {
     filters.push(`name=ilike.${encodeURIComponent(`%${String(name).trim()}%`)}`)
+  }
+  // Same fuzzy semantics for country/territory display names (may not match exact spelling).
+  if (country) {
+    filters.push(`country=ilike.${encodeURIComponent(`%${String(country).trim()}%`)}`)
   }
   if (hasMcc) {
     const mccVal = String(mcc).trim()

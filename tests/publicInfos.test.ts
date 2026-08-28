@@ -249,6 +249,39 @@ describe('publicInfos service', () => {
       expect(result.value.items[0].name).toContain('China Mobile')
     })
 
+    it('filters by country with fuzzy substring (ilike), not exact match', async () => {
+      const supabase = createFakeSupabase({
+        public_infos: [
+          {
+            public_info_id: randomUUID(),
+            name: 'China Mobile',
+            country: 'China (People\'s Republic of)',
+            mcc: '460',
+            mnc: '000',
+          },
+          {
+            public_info_id: randomUUID(),
+            name: 'AT&T',
+            country: 'United States of America',
+            mcc: '310',
+            mnc: '410',
+          },
+        ],
+      })
+      const result = await listPublicInfos({
+        supabase,
+        name: null,
+        country: 'united',
+        mcc: null,
+        mnc: null,
+        page: 1,
+        pageSize: 50,
+      })
+      expect(result.ok).toBe(true)
+      expect(result.value.items.length).toBe(1)
+      expect(result.value.items[0].country).toContain('United States')
+    })
+
     it('filters by name (ilike)', async () => {
       const supabase = createFakeSupabase({
         public_infos: [

@@ -120,6 +120,7 @@ describe('adjustment idempotency (Phase 40)', () => {
     const supabase = {
       select: vi.fn(async (table: string) => {
         if (table === 'bills') return [{ bill_id: billId, enterprise_id: enterpriseId }]
+        if (table === 'tenants') return [{ tenant_id: enterpriseId, name: 'Acme IoT' }]
         return []
       }),
       selectWithCount: vi.fn(async () => ({ data: [note], total: 1 })),
@@ -135,6 +136,8 @@ describe('adjustment idempotency (Phase 40)', () => {
     if (result.ok) {
       expect(result.value.items).toHaveLength(1)
       expect(result.value.items[0].billId).toBe(billId)
+      expect(result.value.items[0].enterpriseId).toBe(enterpriseId)
+      expect(result.value.items[0].enterpriseName).toBe('Acme IoT')
       expect(result.value.items[0].reason).toBe('goodwill')
       expect(result.value.items[0].idempotencyKey).toBe('adjust-key-1')
     }
