@@ -566,6 +566,8 @@ rating_results ──derived──> usage_package_daily_summary
 
 > **IMEI 锁定**: imei_lock_enabled=true 时，该 SIM 仅可在绑定的 imei 设备上使用，由上游供应商实际执行锁定。
 
+> **TEST_READY 到期（与 [spec.md](./spec.md) US2 对齐）**：Worker / Admin 共用评估。路径 A：MAIN（`ACTIVE`/`PROVISIONING`/`PENDING`）→ Package → Commercial Terms（`test_period_days` / `test_quota_mb` / `test_expiry_condition` / `test_expiry_action`）→ 入队 `SIM_STATUS_CHANGE`。路径 B：无 MAIN 或无可解析条款时，超过 `TEST_READY_DAYS_WITHOUT_MAIN_SUBSCRIPTION`（默认 30）天 → 固定入队停机。起点优先 `last_status_change_at`，否则 `sim_state_history` 最近 `after_status=TEST_READY`。与 Subscription 耦合（无 ACTIVE 停机 / 唯一 ACTIVE 开机）见 `subscriptions` 节。
+
 #### `esim_profiles`
 
 | 列 | 类型 | 约束 | 说明 |
@@ -680,7 +682,7 @@ rating_results ──derived──> usage_package_daily_summary
 |------|--------|---------------------------|
 | `price_plan_fixed_bundle` | `FIXED_BUNDLE` | `monthly_fee`, `deactivated_monthly_fee`, `total_quota_mb`, `overage_rate_per_mb` |
 | `price_plan_sim_dependent_bundle` | `SIM_DEPENDENT_BUNDLE` | `monthly_fee`, `deactivated_monthly_fee`, `per_sim_quota_mb`, `overage_rate_per_mb` |
-| `price_plan_one_time` | `ONE_TIME` | `one_time_fee`, `quota_mb`, `validity_days`, `expiry_boundary` |
+| `price_plan_one_time` | `ONE_TIME` | `one_time_fee`, `quota_mb`, `validity_days`, `expiry_boundary`（**仅此类型**有日历有效期；创建订阅写入 `subscriptions.expires_at`，由 Worker `SUBSCRIPTION_ONE_TIME_EXPIRY` 到期 → `EXPIRED`） |
 | `price_plan_tiered_volume_pricing` | `TIERED_VOLUME_PRICING` | `monthly_fee`, `deactivated_monthly_fee`, `tiers` (jsonb), `overage_rate_per_mb` |
 
 **`tiers` JSONB**（仅阶梯子表；结构示例）:
@@ -879,10 +881,10 @@ rating_results ──derived──> usage_package_daily_summary
 | commercial_terms_id | uuid | PK, default gen_random_uuid() | Commercial Terms 快照 ID |
 | customer_id | uuid | NOT NULL, FK→customers | 企业 |
 | name | text | NOT NULL | 展示名称（允许重复） |
-| test_period_days | int | — | 测试期天数 |
-| test_quota_mb | bigint | — | 测试流量配额（MB） |
-| test_expiry_condition | text | — | PERIOD_ONLY / QUOTA_ONLY / PERIOD_OR_QUOTA |
-| test_expiry_action | text | — | ACTIVATED / DEACTIVATED |
+| test_period_days | int | — | 测试期天数（自 SIM 进入 `TEST_READY` 起算；TEST_READY 到期路径 A） |
+| test_quota_mb | bigint | — | 测试流量配额（MB；路径 A 配额到期） |
+| test_expiry_condition | text | — | `PERIOD_ONLY` / `QUOTA_ONLY` / `PERIOD_OR_QUOTA`（默认 `PERIOD_OR_QUOTA`） |
+| test_expiry_action | text | — | 到期目标稳态：`ACTIVATED` / `DEACTIVATED`（默认 `ACTIVATED`） |
 | commitment_period_months | int | — | 承诺期（月） |
 | status | text | NOT NULL, default 'DRAFT' | DRAFT / PUBLISHED / DEPRECATED |
 | published_at | timestamptz | — | 发布时间 |
@@ -964,13 +966,18 @@ rating_results ──derived──> usage_package_daily_summary
 | package_id | uuid | NOT NULL, FK→packages | 产品包（`packages.package_id`；迁移前列名为 `package_version_id`） |
 | state | subscription_state | NOT NULL, default 见实现 | 状态；**立即创建**默认 **`PROVISIONING`**；预约为 **`PENDING`**；上游成功后 **`ACTIVE`**；**上游失败时删除行**（不保留失败态） |
 | effective_at | timestamptz | NOT NULL | 生效时间 |
-| expires_at | timestamptz | — | 到期时间 |
+| expires_at | timestamptz | — | 到期时间。**ONE_TIME**：创建时按 `validity_days` + `expiry_boundary` 计算；到期后 cron 将 `ACTIVE` → `EXPIRED`。月度类资费通常为空（不以日历自动 EXPIRED） |
 | cancelled_at | timestamptz | — | 取消时间 |
 | first_subscribed_at | timestamptz | — | 首次订阅时间 |
 | commitment_end_at | timestamptz | — | 承诺期结束 |
 | created_at | timestamptz | NOT NULL, default now() | 创建时间 |
 
-**索引**: `idx_subscriptions_sim_effective(sim_id, effective_at)`；建议 `idx_subscriptions_package_id(package_id)`（按产品包反查订阅、废弃 Package 前占用校验）
+**索引**: `idx_subscriptions_sim_effective(sim_id, effective_at)`；建议 `idx_subscriptions_package_id(package_id)`（按产品包反查订阅、废弃 Package 前占用校验）；Worker ONE_TIME 到期扫描依赖 `state=ACTIVE` + `expires_at <= now`。
+
+**业务不变量（与 [spec.md](./spec.md) US4 / [subscription-provisioning-upstream-mapping.md](./clarifications/subscription-provisioning-upstream-mapping.md) 对齐）**：
+- **活跃订阅** = `state = ACTIVE` 行计数（不含 `PROVISIONING` / `PENDING`）。
+- 某 SIM 失去最后一条 ACTIVE（ONE_TIME 到期或排程取消执行等）→ 若稳态为 `ACTIVATED`/`TEST_READY`，入队 `SIM_STATUS_CHANGE` 停机（`SIM_DEACTIVATE`）；**不**默认取消上游产品订购。
+- 某 SIM 获得 ACTIVE 且稳态为 `DEACTIVATED`、且该卡 ACTIVE 恰好为 1 → 入队 `SIM_ACTIVATE`；`TEST_READY` / `INVENTORY` / `RETIRED` / 已 `ACTIVATED` → 不因订阅变 ACTIVE 自动改稳态。
 
 ### 4.6 用量
 

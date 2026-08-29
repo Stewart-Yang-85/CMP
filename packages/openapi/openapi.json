@@ -7851,7 +7851,8 @@
               "ACTIVE",
               "CANCELLED",
               "EXPIRED"
-            ]
+            ],
+            "description": "Subscription lifecycle. Only **ACTIVE** counts as a business-active subscription for SIM\ntraffic coupling. PROVISIONING/PENDING are not active. Upstream provision failure deletes\nthe row (no FAILED state).\n"
           },
           "effectiveAt": {
             "type": "string",
@@ -7860,7 +7861,8 @@
           "expiresAt": {
             "type": "string",
             "format": "date-time",
-            "nullable": true
+            "nullable": true,
+            "description": "End of subscription validity when set. For ONE_TIME price plans, set at create from\n`validityDays` + `expiryBoundary`; Worker auto-moves `ACTIVE` → `EXPIRED` when elapsed.\nMonthly plans usually omit this (no calendar auto-expire). After losing the last ACTIVE\nsubscription on a SIM, the platform may enqueue SIM deactivate (see US4 coupling rules).\n"
           },
           "cancelledAt": {
             "type": "string",
@@ -7942,7 +7944,8 @@
               "ACTIVE",
               "CANCELLED",
               "EXPIRED"
-            ]
+            ],
+            "description": "Subscription lifecycle. Only **ACTIVE** counts as a business-active subscription for SIM\ntraffic coupling. PROVISIONING/PENDING are not active. Upstream provision failure deletes\nthe row (no FAILED state).\n"
           },
           "effectiveAt": {
             "type": "string",
@@ -7952,7 +7955,8 @@
           "expiresAt": {
             "type": "string",
             "format": "date-time",
-            "nullable": true
+            "nullable": true,
+            "description": "End of subscription validity when set. For ONE_TIME price plans, set at create from\n`validityDays` + `expiryBoundary`; Worker auto-moves `ACTIVE` → `EXPIRED` when elapsed.\nMonthly plans usually omit this (no calendar auto-expire). After losing the last ACTIVE\nsubscription on a SIM, the platform may enqueue SIM deactivate (see US4 coupling rules).\n"
           },
           "cancelledAt": {
             "type": "string",
@@ -8064,7 +8068,8 @@
           "expiresAt": {
             "type": "string",
             "format": "date-time",
-            "nullable": true
+            "nullable": true,
+            "description": "End of subscription validity when set. For ONE_TIME price plans, set at create from\n`validityDays` + `expiryBoundary`; Worker auto-moves `ACTIVE` → `EXPIRED` when elapsed.\nMonthly plans usually omit this (no calendar auto-expire). After losing the last ACTIVE\nsubscription on a SIM, the platform may enqueue SIM deactivate (see US4 coupling rules).\n"
           },
           "commitmentEndAt": {
             "type": "string",
@@ -8146,7 +8151,8 @@
           "expiresAt": {
             "type": "string",
             "format": "date-time",
-            "nullable": true
+            "nullable": true,
+            "description": "End of subscription validity when set. For ONE_TIME price plans, set at create from\n`validityDays` + `expiryBoundary`; Worker auto-moves `ACTIVE` → `EXPIRED` when elapsed.\nMonthly plans usually omit this (no calendar auto-expire). After losing the last ACTIVE\nsubscription on a SIM, the platform may enqueue SIM deactivate (see US4 coupling rules).\n"
           },
           "commitmentEndAt": {
             "type": "string",
@@ -20673,7 +20679,7 @@
         ],
         "x-sort-order": 1,
         "summary": "Create Subscription",
-        "description": "Unified interface for 4 subscription capabilities: 1) 立即订阅 MAIN, 2) 下周期订阅 MAIN, 4) 立即订阅 ADD_ON, 5) 下周期订阅 ADD_ON.\n- **Admin key / Reseller**: `enterpriseId` required.\n- **Customer**: `enterpriseId` optional (omit or provide correct value).\n",
+        "description": "Unified interface for 4 subscription capabilities: 1) 立即订阅 MAIN, 2) 下周期订阅 MAIN, 4) 立即订阅 ADD_ON, 5) 下周期订阅 ADD_ON.\n- Sync response is **PROVISIONING** (immediate) or **PENDING** (future `effectiveAt`); **ACTIVE** only after\n  async `SUBSCRIPTION_PROVISION` succeeds upstream. Upstream failure **deletes** the local subscription row\n  (no FAILED subscription state).\n- **ONE_TIME** packages: `expiresAt` is computed from price-plan `validityDays` / `expiryBoundary`; Worker\n  expires them automatically. After expiry, if the SIM has **zero ACTIVE** subscriptions, SIM deactivate\n  may be enqueued (does not cancel upstream product by default).\n- When a subscription becomes **ACTIVE** and the SIM is **DEACTIVATED** with exactly one ACTIVE row,\n  SIM activate may be enqueued. **TEST_READY** / **INVENTORY** / **RETIRED** are not auto-activated.\n- **Admin key / Reseller**: `enterpriseId` required.\n- **Customer**: `enterpriseId` optional (omit or provide correct value).\n",
         "requestBody": {
           "required": true,
           "content": {
@@ -26410,7 +26416,7 @@
         ],
         "operationId": "adminJobsTestReadyExpiryRun",
         "summary": "Run TEST_READY Expiry Evaluation Job (Admin)",
-        "description": "Manually triggers a paginated evaluation over `TEST_READY` SIMs.\n\nExpiry rules are taken **per SIM** from the Commercial Terms of the SIM's MAIN subscription\nPackage (`testPeriodDays`, `testQuotaMb`, `testExpiryCondition`, `testExpiryAction`) —\n**not** from process-wide env vars such as `TEST_EXPIRY_CONDITION` / `TEST_PERIOD_DAYS` /\n`TEST_QUOTA_MB`.\n\n- `PERIOD_ONLY`: expire when test period elapsed since TEST_READY start\n- `QUOTA_ONLY`: expire when cumulative usage since TEST_READY start reaches `testQuotaMb`\n- `PERIOD_OR_QUOTA` (default in CT): either condition\n\nOn expiry, applies `testExpiryAction` (`ACTIVATED` or `DEACTIVATED`), writes state history,\nemits `SIM_STATUS_CHANGED`, and records a `TEST_READY_EXPIRY` job + audit log.\n",
+        "description": "Manually triggers evaluation over `TEST_READY` SIMs (paginated by default; set `sweepAll=true` to scan all).\n\nRules (same as worker cron `TEST_EXPIRY_CHECK_CRON`):\n\n1. **MAIN + Commercial Terms**: expiry from package CT (`testPeriodDays`, `testQuotaMb`, `testExpiryCondition`, `testExpiryAction`).\n2. **No MAIN (ACTIVE/PROVISIONING/PENDING) or unparseable CT**: after `TEST_READY_DAYS_WITHOUT_MAIN_SUBSCRIPTION` days\n   (env; legacy alias `TEST_PERIOD_DAYS`), force **DEACTIVATED**.\n\nOn expiry, enqueues `SIM_STATUS_CHANGE` (upstream activate/deactivate), does **not** flip status locally.\nDoes **not** use `autoSuspendEnabled`.\n",
         "security": [
           {
             "AdminApiKeyAuth": []

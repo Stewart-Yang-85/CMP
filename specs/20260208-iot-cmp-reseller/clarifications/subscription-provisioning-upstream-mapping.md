@@ -205,6 +205,46 @@ Job **`SUCCEEDED`** 且订阅进入 **`ACTIVE`**（或预约场景下进入约�
 4. **Given** SIM supplier 与 Package CS supplier 不一致, **When** `POST /subscriptions`, **Then** `409 PACKAGE_SUPPLIER_MISMATCH`（或等价码）
 5. **Given** Job 执行且上游成功, **When** Worker 完成, **Then** `subscription.state=ACTIVE`、`job.status=SUCCEEDED`，投递 `SUBSCRIPTION_CHANGED` + `JOB_FINISHED`
 6. **Given** Job 执行且上游失败, **When** Worker 完成, **Then** **无** 该 `subscriptionId` 行、`job.status=FAILED`，投递 `JOB_FINISHED` + 失败类订阅事件，Webhook 送达下游客户
+7. **Given** ACTIVE ONE_TIME 且 `expires_at` 已过, **When** ONE_TIME 到期 cron 运行, **Then** 订阅 → `EXPIRED`；若该 SIM 无其它 ACTIVE，且稳态为 `ACTIVATED`/`TEST_READY`，则入队 `SIM_DEACTIVATE`
+8. **Given** SIM 为 `DEACTIVATED` 且开通 Job 成功使该卡变为唯一 ACTIVE 订阅, **When** provision 完成, **Then** 入队 `SIM_ACTIVATE`；若 SIM 为 `TEST_READY`/`INVENTORY`/`RETIRED`/`ACTIVATED`，则不因订阅变 ACTIVE 改稳态
+
+---
+
+## 9. ONE_TIME 到期与 Subscription ↔ SIM 耦合
+
+### 9.1 活跃订阅口径
+
+**活跃** = `subscriptions.state = ACTIVE`。`PROVISIONING` / `PENDING` **不计**。
+
+### 9.2 ONE_TIME 日历到期
+
+1. 创建 ONE_TIME 订阅时写入 `expires_at`（`validity_days` + `expiry_boundary`）
+2. Worker cron `SUBSCRIPTION_ONE_TIME_EXPIRY`：`ACTIVE` + `expires_at <= now` + Price Plan type `ONE_TIME` → 本地 `EXPIRED`
+3. **MUST NOT** 默认调用上游「取消产品订购」（上游可能是无有效期 PAYG，取消会伤及仍有效 MAIN）
+4. 到期后执行 §9.3 停机检查
+
+月度类资费（`FIXED_BUNDLE` / `SIM_DEPENDENT_BUNDLE` / `TIERED_*`）**无**日历 validity；不以时间自动 `EXPIRED`。
+
+### 9.3 无 ACTIVE → 停机
+
+触发点：ONE_TIME 自动到期、`subscription_cancel_schedules` 执行等导致失去 ACTIVE 之后。
+
+若该 `sim_id` 上 `count(state=ACTIVE) = 0`，且 SIM 稳态 ∈ {`ACTIVATED`, `TEST_READY`}：
+
+- 入队 **`SIM_DEACTIVATE`**（与 [jobs-sim-status-change.md](./jobs-sim-status-change.md) 一致，含上游 suspend）
+
+### 9.4 获得 ACTIVE → 条件开机
+
+触发点：`SUBSCRIPTION_PROVISION` 成功，订阅 → `ACTIVE`。
+
+| SIM 稳态 | 行为 |
+|----------|------|
+| `DEACTIVATED` 且该卡 ACTIVE 恰好为 1 | 入队 **`SIM_ACTIVATE`** |
+| `ACTIVATED` | 不动 |
+| `TEST_READY` | 不动（测期由 Commercial Terms 约束） |
+| `INVENTORY` / `RETIRED` | 不动（运营/手工） |
+
+实现入口：`src/services/subscriptionSimCoupling.ts`。
 
 ---
 

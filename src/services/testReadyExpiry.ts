@@ -1,5 +1,6 @@
-import { emitEvent } from './eventEmitter.js'
 import { parsePagination } from '../utils/pagination.js'
+import { changeSimStatus } from './simLifecycle.js'
+import { isLifecycleInProgress } from './simStatusChangeJob.js'
 
 type SupabaseClient = {
   select: (table: string, queryString: string, options?: { suppressMissingColumns?: boolean }) => Promise<unknown>
@@ -17,18 +18,32 @@ type SupabaseClient = {
   ) => Promise<unknown>
 }
 
+export type TestReadyExpiryTrigger = 'ADMIN' | 'CRON'
+
 export type TestReadyExpiryRunOptions = {
   enterpriseId?: string | null
   page?: number
   pageSize?: number
   requestId?: string | null
   sourceIp?: string | null
+  /** ADMIN = manual API; CRON = worker schedule. Same rules either way. */
+  trigger?: TestReadyExpiryTrigger
+  /**
+   * Cron/drain: walk all TEST_READY SIMs via sim_id cursor (ignores page).
+   * Admin default remains paginated.
+   */
+  sweepAll?: boolean
+  /** Max SIMs to examine per sweep (safety). Default 5000. */
+  maxExamine?: number
 }
 
 export type TestReadyExpiryProcessedItem = {
   iccid: string
-  /** SIM lifecycle status after this run (steady state). */
+  /** Target after enqueue, or TEST_READY when skipped. */
   status: 'INVENTORY' | 'TEST_READY' | 'ACTIVATED' | 'DEACTIVATED' | 'RETIRED'
+  path?: 'COMMERCIAL_TERMS' | 'NO_MAIN_OR_TERMS_FALLBACK'
+  lifecycleJobId?: string | null
+  skipReason?: string | null
 }
 
 export type TestReadyExpiryRunResult = {
@@ -50,6 +65,26 @@ type CommercialTermsConfig = {
   testExpiryAction: 'ACTIVATED' | 'DEACTIVATED'
   commercialTermsId: string
   packageId: string
+}
+
+type SimRow = {
+  sim_id: string
+  iccid: string
+  enterprise_id?: string | null
+  reseller_id?: string | null
+  status?: string | null
+  last_status_change_at?: string | null
+  lifecycle_sub_status?: string | null
+}
+
+/** Days in TEST_READY without resolvable MAIN+Commercial Terms before force DEACTIVATED. */
+export function getTestReadyDaysWithoutMainSubscription(): number {
+  const raw =
+    process.env.TEST_READY_DAYS_WITHOUT_MAIN_SUBSCRIPTION ??
+    process.env.TEST_PERIOD_DAYS /* legacy alias */
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 1) return 30
+  return Math.min(3650, Math.floor(n))
 }
 
 function startOfDayUtc(date: Date) {
@@ -98,6 +133,7 @@ function parseCommercialTerms(
   }
 }
 
+/** MAIN in ACTIVE | PROVISIONING | PENDING, plus parseable Commercial Terms — or null. */
 async function resolveCommercialTermsForSim(
   supabase: SupabaseClient,
   simId: string
@@ -180,31 +216,221 @@ function shouldExpire(opts: {
   return opts.expireByPeriod || opts.expireByQuota
 }
 
+async function enqueueLifecycleTransition({
+  supabase,
+  sim,
+  targetStatus,
+  reason,
+  requestId,
+}: {
+  supabase: SupabaseClient
+  sim: SimRow
+  targetStatus: 'ACTIVATED' | 'DEACTIVATED'
+  reason: string
+  requestId: string | null
+}): Promise<{ ok: true; jobId: string | null } | { ok: false; skipReason: string }> {
+  const action = targetStatus === 'ACTIVATED' ? 'SIM_ACTIVATE' : 'SIM_DEACTIVATE'
+  // No fixed idempotency key: failed *ing can retry next cron; in-progress is blocked by LIFECYCLE_IN_PROGRESS.
+  const result = await changeSimStatus({
+    supabase,
+    simIdentifier: { field: 'sim_id', value: String(sim.sim_id) },
+    tenantQs: '',
+    action,
+    newStatus: targetStatus,
+    allowedFrom: new Set(['TEST_READY']),
+    reason,
+    idempotencyKey: null,
+    actor: {
+      userId: null,
+      resellerId: sim.reseller_id ? String(sim.reseller_id) : null,
+      role: 'SYSTEM',
+      roleScope: 'platform',
+    },
+    traceId: requestId,
+    sourceIp: null,
+  })
+  if (!result.ok) {
+    return { ok: false, skipReason: `${result.code}:${result.message}` }
+  }
+  return { ok: true, jobId: (result as { jobId?: string | null }).jobId ?? null }
+}
+
+type EvalDecision =
+  | { kind: 'skip'; reason: string }
+  | {
+      kind: 'enqueue'
+      targetStatus: 'ACTIVATED' | 'DEACTIVATED'
+      path: 'COMMERCIAL_TERMS' | 'NO_MAIN_OR_TERMS_FALLBACK'
+      reason: string
+      meta: Record<string, unknown>
+    }
+
+async function decideTestReadyExpiry(
+  supabase: SupabaseClient,
+  sim: SimRow,
+  fallbackDays: number
+): Promise<EvalDecision> {
+  if (isLifecycleInProgress(sim.lifecycle_sub_status)) {
+    return { kind: 'skip', reason: `LIFECYCLE_IN_PROGRESS:${sim.lifecycle_sub_status}` }
+  }
+
+  const startTimeIso = await resolveTestReadyStartIso(supabase, sim)
+  if (!startTimeIso) {
+    return { kind: 'skip', reason: 'NO_TEST_READY_START' }
+  }
+  const startTime = new Date(startTimeIso)
+
+  const terms = await resolveCommercialTermsForSim(supabase, String(sim.sim_id))
+  if (terms) {
+    const expireByPeriod = Date.now() >= addDaysUtc(startTime, terms.testPeriodDays).getTime()
+    const totalMb = await sumUsageMbSince(supabase, sim, startTime)
+    const expireByQuota = terms.testQuotaMb > 0 ? totalMb >= terms.testQuotaMb : false
+    const expired = shouldExpire({
+      condition: terms.testExpiryCondition,
+      expireByPeriod,
+      expireByQuota,
+    })
+    if (!expired) {
+      return { kind: 'skip', reason: 'COMMERCIAL_TERMS_NOT_EXPIRED' }
+    }
+    const expiryBy =
+      expireByPeriod && expireByQuota ? 'PERIOD_OR_QUOTA' : expireByPeriod ? 'PERIOD' : 'QUOTA'
+    return {
+      kind: 'enqueue',
+      targetStatus: terms.testExpiryAction,
+      path: 'COMMERCIAL_TERMS',
+      reason: `TEST_READY_EXPIRY_COMMERCIAL_TERMS:${expiryBy}`,
+      meta: {
+        expiryBy,
+        totalMb,
+        testPeriodDays: terms.testPeriodDays,
+        testQuotaMb: terms.testQuotaMb,
+        testExpiryCondition: terms.testExpiryCondition,
+        testExpiryAction: terms.testExpiryAction,
+        packageId: terms.packageId,
+        commercialTermsId: terms.commercialTermsId,
+        startTime: startTimeIso,
+      },
+    }
+  }
+
+  // No MAIN (ACTIVE/PROVISIONING/PENDING) or MAIN without parseable Commercial Terms → fallback.
+  const fallbackExpired = Date.now() >= addDaysUtc(startTime, fallbackDays).getTime()
+  if (!fallbackExpired) {
+    return { kind: 'skip', reason: 'FALLBACK_NOT_EXPIRED' }
+  }
+  return {
+    kind: 'enqueue',
+    targetStatus: 'DEACTIVATED',
+    path: 'NO_MAIN_OR_TERMS_FALLBACK',
+    reason: `TEST_READY_EXPIRY_NO_MAIN_OR_TERMS:${fallbackDays}d`,
+    meta: {
+      fallbackDays,
+      envKey: 'TEST_READY_DAYS_WITHOUT_MAIN_SUBSCRIPTION',
+      startTime: startTimeIso,
+    },
+  }
+}
+
+async function processSimBatch({
+  supabase,
+  sims,
+  requestId,
+  fallbackDays,
+}: {
+  supabase: SupabaseClient
+  sims: SimRow[]
+  requestId: string | null
+  fallbackDays: number
+}): Promise<{
+  processed: number
+  activated: number
+  deactivated: number
+  skipped: number
+  processedICCID: TestReadyExpiryProcessedItem[]
+}> {
+  let processed = 0
+  let activated = 0
+  let deactivated = 0
+  let skipped = 0
+  const processedICCID: TestReadyExpiryProcessedItem[] = []
+
+  for (const sim of sims) {
+    processed += 1
+    const iccid = String(sim.iccid)
+    const decision = await decideTestReadyExpiry(supabase, sim, fallbackDays)
+    if (decision.kind === 'skip') {
+      skipped += 1
+      processedICCID.push({ iccid, status: 'TEST_READY', skipReason: decision.reason })
+      continue
+    }
+
+    const enq = await enqueueLifecycleTransition({
+      supabase,
+      sim,
+      targetStatus: decision.targetStatus,
+      reason: decision.reason,
+      requestId,
+    })
+    if (!enq.ok) {
+      skipped += 1
+      processedICCID.push({
+        iccid,
+        status: 'TEST_READY',
+        path: decision.path,
+        skipReason: enq.skipReason,
+      })
+      continue
+    }
+
+    // SIM_STATUS_CHANGED is emitted when SIM_STATUS_CHANGE job finalizes (upstream complete).
+
+    if (decision.targetStatus === 'ACTIVATED') {
+      activated += 1
+      processedICCID.push({
+        iccid,
+        status: 'ACTIVATED',
+        path: decision.path,
+        lifecycleJobId: enq.jobId,
+      })
+    } else {
+      deactivated += 1
+      processedICCID.push({
+        iccid,
+        status: 'DEACTIVATED',
+        path: decision.path,
+        lifecycleJobId: enq.jobId,
+      })
+    }
+  }
+
+  return { processed, activated, deactivated, skipped, processedICCID }
+}
+
 /**
- * Manual admin batch: evaluate TEST_READY SIMs using each SIM's MAIN subscription
- * Package → Commercial Terms (testPeriodDays / testQuotaMb / testExpiryCondition / testExpiryAction).
- * Does NOT use process.env TEST_EXPIRY_* globals.
+ * Evaluate TEST_READY SIMs:
+ * - With MAIN + Commercial Terms → period/quota/action from terms; enqueue SIM_STATUS_CHANGE (upstream).
+ * - Without MAIN or without parseable terms → after TEST_READY_DAYS_WITHOUT_MAIN_SUBSCRIPTION, enqueue DEACTIVATE.
+ * Does not use autoSuspendEnabled / enterprise auto-suspend.
  */
 export async function runTestReadyExpiryEvaluation(
   supabase: SupabaseClient,
   options: TestReadyExpiryRunOptions = {}
 ): Promise<TestReadyExpiryRunResult> {
   const enterpriseId = options.enterpriseId ? String(options.enterpriseId).trim() : null
+  const trigger: TestReadyExpiryTrigger = options.trigger === 'CRON' ? 'CRON' : 'ADMIN'
+  const sweepAll = options.sweepAll === true || trigger === 'CRON'
+  const fallbackDays = getTestReadyDaysWithoutMainSubscription()
+  const requestId = options.requestId ?? null
+  const maxExamine = Math.max(100, Math.min(20000, Number(options.maxExamine) || 5000))
+
   const { page, pageSize, offset } = parsePagination(
     { page: options.page, pageSize: options.pageSize },
     { defaultPage: 1, defaultPageSize: 100, maxPageSize: 100 }
   )
-  const requestId = options.requestId ?? null
 
-  const filters = [`status=eq.TEST_READY`]
-  if (enterpriseId) filters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
-
-  const { data, total } = await supabase.selectWithCount(
-    'sims',
-    `select=sim_id,iccid,enterprise_id,reseller_id,status,last_status_change_at&${filters.join('&')}&order=last_status_change_at.asc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
-  )
-  const sims = Array.isArray(data) ? data : []
-  const totalCount = typeof total === 'number' ? total : sims.length
+  const baseFilters = [`status=eq.TEST_READY`]
+  if (enterpriseId) baseFilters.push(`enterprise_id=eq.${encodeURIComponent(enterpriseId)}`)
 
   const jobs = await supabase.insert(
     'jobs',
@@ -212,11 +438,18 @@ export async function runTestReadyExpiryEvaluation(
       job_type: 'TEST_READY_EXPIRY',
       status: 'RUNNING',
       progress_processed: 0,
-      progress_total: sims.length,
+      progress_total: 0,
       started_at: new Date().toISOString(),
       request_id: requestId,
       enterprise_id: enterpriseId,
-      payload: { page, pageSize, enterpriseId },
+      payload: {
+        page,
+        pageSize,
+        enterpriseId,
+        trigger,
+        sweepAll,
+        fallbackDays,
+      },
     },
     { suppressMissingColumns: true }
   )
@@ -227,106 +460,57 @@ export async function runTestReadyExpiryEvaluation(
   let deactivated = 0
   let skipped = 0
   const processedICCID: TestReadyExpiryProcessedItem[] = []
+  let totalCount = 0
 
-  for (const sim of sims as Array<{
-    sim_id: string
-    iccid: string
-    enterprise_id?: string | null
-    reseller_id?: string | null
-    last_status_change_at?: string | null
-  }>) {
-    processed += 1
-    const iccid = String(sim.iccid)
+  if (sweepAll) {
+    let afterSimId = ''
+    let examined = 0
+    for (;;) {
+      if (examined >= maxExamine) break
+      const limit = Math.min(100, maxExamine - examined)
+      const cursorQs = afterSimId ? `&sim_id=gt.${encodeURIComponent(afterSimId)}` : ''
+      const rows = await supabase.select(
+        'sims',
+        `select=sim_id,iccid,enterprise_id,reseller_id,status,last_status_change_at,lifecycle_sub_status&${baseFilters.join('&')}&order=sim_id.asc&limit=${limit}${cursorQs}`
+      )
+      const sims = (Array.isArray(rows) ? rows : []) as SimRow[]
+      if (sims.length === 0) break
+      examined += sims.length
+      afterSimId = String(sims[sims.length - 1]?.sim_id || afterSimId)
 
-    const terms = await resolveCommercialTermsForSim(supabase, String(sim.sim_id))
-    if (!terms) {
-      skipped += 1
-      processedICCID.push({ iccid, status: 'TEST_READY' })
-      continue
+      const batch = await processSimBatch({
+        supabase,
+        sims,
+        requestId,
+        fallbackDays,
+      })
+      processed += batch.processed
+      activated += batch.activated
+      deactivated += batch.deactivated
+      skipped += batch.skipped
+      processedICCID.push(...batch.processedICCID)
+
+      if (sims.length < limit) break
     }
-
-    const startTimeIso = await resolveTestReadyStartIso(supabase, sim)
-    if (!startTimeIso) {
-      skipped += 1
-      processedICCID.push({ iccid, status: 'TEST_READY' })
-      continue
-    }
-
-    const startTime = new Date(startTimeIso)
-    const expireByPeriod = Date.now() >= addDaysUtc(startTime, terms.testPeriodDays).getTime()
-    const totalMb = await sumUsageMbSince(supabase, sim, startTime)
-    const expireByQuota = terms.testQuotaMb > 0 ? totalMb >= terms.testQuotaMb : false
-    const expired = shouldExpire({
-      condition: terms.testExpiryCondition,
-      expireByPeriod,
-      expireByQuota,
-    })
-    if (!expired) {
-      skipped += 1
-      processedICCID.push({ iccid, status: 'TEST_READY' })
-      continue
-    }
-
-    const nowIso = new Date().toISOString()
-    const afterStatus = terms.testExpiryAction
-    await supabase.update(
+    totalCount = processed
+  } else {
+    const { data, total } = await supabase.selectWithCount(
       'sims',
-      `sim_id=eq.${encodeURIComponent(sim.sim_id)}`,
-      {
-        status: afterStatus,
-        lifecycle_sub_status: 'normal',
-        last_status_change_at: nowIso,
-      },
-      { returning: 'minimal', suppressMissingColumns: true }
+      `select=sim_id,iccid,enterprise_id,reseller_id,status,last_status_change_at,lifecycle_sub_status&${baseFilters.join('&')}&order=last_status_change_at.asc&limit=${encodeURIComponent(String(pageSize))}&offset=${encodeURIComponent(String(offset))}`
     )
-    await supabase.insert(
-      'sim_state_history',
-      {
-        sim_id: sim.sim_id,
-        before_status: 'TEST_READY',
-        after_status: afterStatus,
-        start_time: startTimeIso,
-        end_time: nowIso,
-        source: 'TEST_EXPIRY_JOB',
-        request_id: requestId,
-      },
-      { returning: 'minimal', suppressMissingColumns: true }
-    )
-
-    await emitEvent({
-      eventType: 'SIM_STATUS_CHANGED',
-      enterpriseId: sim.enterprise_id ?? null,
-      resellerId: sim.reseller_id ?? null,
+    const sims = (Array.isArray(data) ? data : []) as SimRow[]
+    totalCount = typeof total === 'number' ? total : sims.length
+    const batch = await processSimBatch({
+      supabase,
+      sims,
       requestId,
-      jobId,
-      occurredAt: nowIso,
-      payload: {
-        simId: sim.sim_id,
-        iccid: sim.iccid,
-        beforeStatus: 'TEST_READY',
-        afterStatus,
-        reason: 'TEST_EXPIRY_JOB',
-        expiryBy:
-          expireByPeriod && expireByQuota ? 'PERIOD_OR_QUOTA' : expireByPeriod ? 'PERIOD' : 'QUOTA',
-        totalMb,
-        testPeriodDays: terms.testPeriodDays,
-        testQuotaMb: terms.testQuotaMb,
-        testExpiryCondition: terms.testExpiryCondition,
-        testExpiryAction: terms.testExpiryAction,
-        packageId: terms.packageId,
-        commercialTermsId: terms.commercialTermsId,
-        startTime: startTimeIso,
-        endTime: nowIso,
-      },
+      fallbackDays,
     })
-
-    if (afterStatus === 'ACTIVATED') {
-      activated += 1
-      processedICCID.push({ iccid, status: 'ACTIVATED' })
-    } else {
-      deactivated += 1
-      processedICCID.push({ iccid, status: 'DEACTIVATED' })
-    }
+    processed = batch.processed
+    activated = batch.activated
+    deactivated = batch.deactivated
+    skipped = batch.skipped
+    processedICCID.push(...batch.processedICCID)
   }
 
   if (jobId) {
@@ -346,14 +530,26 @@ export async function runTestReadyExpiryEvaluation(
   await supabase.insert(
     'audit_logs',
     {
-      actor_role: 'ADMIN',
+      actor_role: trigger === 'CRON' ? 'SYSTEM' : 'ADMIN',
       tenant_id: enterpriseId ?? null,
-      action: 'ADMIN_TEST_READY_EXPIRY_RUN',
+      action: trigger === 'CRON' ? 'CRON_TEST_READY_EXPIRY_RUN' : 'ADMIN_TEST_READY_EXPIRY_RUN',
       target_type: 'SIM_BATCH',
       target_id: enterpriseId ?? 'ALL',
       request_id: requestId,
       source_ip: options.sourceIp ?? null,
-      after_data: { processed, activated, deactivated, skipped, total: totalCount, page, pageSize, processedICCID },
+      after_data: {
+        processed,
+        activated,
+        deactivated,
+        skipped,
+        total: totalCount,
+        page,
+        pageSize,
+        sweepAll,
+        fallbackDays,
+        trigger,
+        processedICCID,
+      },
     },
     { returning: 'minimal', suppressMissingColumns: true }
   )
@@ -365,8 +561,8 @@ export async function runTestReadyExpiryEvaluation(
     deactivated,
     skipped,
     total: totalCount,
-    page,
-    pageSize,
+    page: sweepAll ? 1 : page,
+    pageSize: sweepAll ? processed : pageSize,
     processedICCID,
   }
 }

@@ -5545,6 +5545,10 @@ components:
         state:
           type: string
           enum: [PENDING, PROVISIONING, ACTIVE, CANCELLED, EXPIRED]
+          description: |
+            Subscription lifecycle. Only **ACTIVE** counts as a business-active subscription for SIM
+            traffic coupling. PROVISIONING/PENDING are not active. Upstream provision failure deletes
+            the row (no FAILED state).
         effectiveAt:
           type: string
           format: date-time
@@ -5552,6 +5556,11 @@ components:
           type: string
           format: date-time
           nullable: true
+          description: |
+            End of subscription validity when set. For ONE_TIME price plans, set at create from
+            `validityDays` + `expiryBoundary`; Worker auto-moves `ACTIVE` → `EXPIRED` when elapsed.
+            Monthly plans usually omit this (no calendar auto-expire). After losing the last ACTIVE
+            subscription on a SIM, the platform may enqueue SIM deactivate (see US4 coupling rules).
         cancelledAt:
           type: string
           format: date-time
@@ -5605,6 +5614,10 @@ components:
         state:
           type: string
           enum: [PENDING, PROVISIONING, ACTIVE, CANCELLED, EXPIRED]
+          description: |
+            Subscription lifecycle. Only **ACTIVE** counts as a business-active subscription for SIM
+            traffic coupling. PROVISIONING/PENDING are not active. Upstream provision failure deletes
+            the row (no FAILED state).
         effectiveAt:
           type: string
           format: date-time
@@ -5613,6 +5626,11 @@ components:
           type: string
           format: date-time
           nullable: true
+          description: |
+            End of subscription validity when set. For ONE_TIME price plans, set at create from
+            `validityDays` + `expiryBoundary`; Worker auto-moves `ACTIVE` → `EXPIRED` when elapsed.
+            Monthly plans usually omit this (no calendar auto-expire). After losing the last ACTIVE
+            subscription on a SIM, the platform may enqueue SIM deactivate (see US4 coupling rules).
         cancelledAt:
           type: string
           format: date-time
@@ -5686,6 +5704,11 @@ components:
           type: string
           format: date-time
           nullable: true
+          description: |
+            End of subscription validity when set. For ONE_TIME price plans, set at create from
+            `validityDays` + `expiryBoundary`; Worker auto-moves `ACTIVE` → `EXPIRED` when elapsed.
+            Monthly plans usually omit this (no calendar auto-expire). After losing the last ACTIVE
+            subscription on a SIM, the platform may enqueue SIM deactivate (see US4 coupling rules).
         commitmentEndAt:
           type: string
           format: date-time
@@ -5735,6 +5758,11 @@ components:
           type: string
           format: date-time
           nullable: true
+          description: |
+            End of subscription validity when set. For ONE_TIME price plans, set at create from
+            `validityDays` + `expiryBoundary`; Worker auto-moves `ACTIVE` → `EXPIRED` when elapsed.
+            Monthly plans usually omit this (no calendar auto-expire). After losing the last ACTIVE
+            subscription on a SIM, the platform may enqueue SIM deactivate (see US4 coupling rules).
         commitmentEndAt:
           type: string
           format: date-time
@@ -13934,6 +13962,14 @@ paths:
       summary: Create Subscription
       description: |
         Unified interface for 4 subscription capabilities: 1) 立即订阅 MAIN, 2) 下周期订阅 MAIN, 4) 立即订阅 ADD_ON, 5) 下周期订阅 ADD_ON.
+        - Sync response is **PROVISIONING** (immediate) or **PENDING** (future `effectiveAt`); **ACTIVE** only after
+          async `SUBSCRIPTION_PROVISION` succeeds upstream. Upstream failure **deletes** the local subscription row
+          (no FAILED subscription state).
+        - **ONE_TIME** packages: `expiresAt` is computed from price-plan `validityDays` / `expiryBoundary`; Worker
+          expires them automatically. After expiry, if the SIM has **zero ACTIVE** subscriptions, SIM deactivate
+          may be enqueued (does not cancel upstream product by default).
+        - When a subscription becomes **ACTIVE** and the SIM is **DEACTIVATED** with exactly one ACTIVE row,
+          SIM activate may be enqueued. **TEST_READY** / **INVENTORY** / **RETIRED** are not auto-activated.
         - **Admin key / Reseller**: `enterpriseId` required.
         - **Customer**: `enterpriseId` optional (omit or provide correct value).
       requestBody:
@@ -17717,19 +17753,16 @@ paths:
       operationId: adminJobsTestReadyExpiryRun
       summary: Run TEST_READY Expiry Evaluation Job (Admin)
       description: |
-        Manually triggers a paginated evaluation over `TEST_READY` SIMs.
+        Manually triggers evaluation over `TEST_READY` SIMs (paginated by default; set `sweepAll=true` to scan all).
 
-        Expiry rules are taken **per SIM** from the Commercial Terms of the SIM's MAIN subscription
-        Package (`testPeriodDays`, `testQuotaMb`, `testExpiryCondition`, `testExpiryAction`) —
-        **not** from process-wide env vars such as `TEST_EXPIRY_CONDITION` / `TEST_PERIOD_DAYS` /
-        `TEST_QUOTA_MB`.
+        Rules (same as worker cron `TEST_EXPIRY_CHECK_CRON`):
 
-        - `PERIOD_ONLY`: expire when test period elapsed since TEST_READY start
-        - `QUOTA_ONLY`: expire when cumulative usage since TEST_READY start reaches `testQuotaMb`
-        - `PERIOD_OR_QUOTA` (default in CT): either condition
+        1. **MAIN + Commercial Terms**: expiry from package CT (`testPeriodDays`, `testQuotaMb`, `testExpiryCondition`, `testExpiryAction`).
+        2. **No MAIN (ACTIVE/PROVISIONING/PENDING) or unparseable CT**: after `TEST_READY_DAYS_WITHOUT_MAIN_SUBSCRIPTION` days
+           (env; legacy alias `TEST_PERIOD_DAYS`), force **DEACTIVATED**.
 
-        On expiry, applies `testExpiryAction` (`ACTIVATED` or `DEACTIVATED`), writes state history,
-        emits `SIM_STATUS_CHANGED`, and records a `TEST_READY_EXPIRY` job + audit log.
+        On expiry, enqueues `SIM_STATUS_CHANGE` (upstream activate/deactivate), does **not** flip status locally.
+        Does **not** use `autoSuspendEnabled`.
       security:
         - AdminApiKeyAuth: []
         - BearerAuth: []

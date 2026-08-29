@@ -367,6 +367,24 @@ async function completeProvision({
     sim,
     subscriptionId,
   })
+
+  const simId = String(sim?.sim_id || subscriptionRow?.sim_id || '').trim()
+  if (simId) {
+    try {
+      const { maybeActivateSimWhenSoleActiveSubscription } = await import('./subscriptionSimCoupling.js')
+      await maybeActivateSimWhenSoleActiveSubscription({
+        supabase,
+        simId,
+        requestId: job.request_id ?? null,
+        reason: 'SUBSCRIPTION_BECAME_ACTIVE_SOLE',
+      })
+    } catch (err) {
+      console.warn(
+        `[SUBSCRIPTION_PROVISION] SIM activate coupling skipped for ${subscriptionId}:`,
+        err?.message || err
+      )
+    }
+  }
 }
 
 async function failProvision({

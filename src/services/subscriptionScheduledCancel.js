@@ -31,6 +31,7 @@ function isMissingScheduleTable(err) {
  * Worker cron: apply pending rows in subscription_cancel_schedules.
  */
 export async function executeScheduledCancels({ supabase }) {
+  const { maybeDeactivateSimWhenNoActiveSubscription } = await import('./subscriptionSimCoupling.js')
   const nowIso = new Date().toISOString()
   let rows
   try {
@@ -52,7 +53,7 @@ export async function executeScheduledCancels({ supabase }) {
     try {
       const subRows = await supabase.select(
         'subscriptions',
-        `select=subscription_id,state,expires_at&subscription_id=eq.${encodeURIComponent(subscriptionId)}&limit=1`
+        `select=subscription_id,state,expires_at,sim_id&subscription_id=eq.${encodeURIComponent(subscriptionId)}&limit=1`
       )
       const sub = Array.isArray(subRows) ? subRows[0] : null
       if (!sub) {
@@ -80,6 +81,7 @@ export async function executeScheduledCancels({ supabase }) {
         sub.expires_at != null && String(sub.expires_at).trim() !== ''
           ? String(sub.expires_at)
           : endOfCurrentBillingPeriodIso()
+      const wasActive = state === 'ACTIVE'
       await supabase.update(
         'subscriptions',
         `subscription_id=eq.${encodeURIComponent(subscriptionId)}`,
@@ -92,7 +94,17 @@ export async function executeScheduledCancels({ supabase }) {
         { status: 'EXECUTED', executed_at: nowIso },
         { returning: 'minimal' }
       )
-      results.push({ subscriptionId, ok: true, state: 'EXPIRED', expiresAt })
+      let simLifecycle = null
+      const simId = sub.sim_id != null ? String(sub.sim_id) : ''
+      if (wasActive && simId) {
+        simLifecycle = await maybeDeactivateSimWhenNoActiveSubscription({
+          supabase,
+          simId,
+          requestId: `scheduled-cancel-${scheduleId}`,
+          reason: 'SCHEDULED_CANCEL_NO_ACTIVE_SUBSCRIPTION',
+        })
+      }
+      results.push({ subscriptionId, ok: true, state: 'EXPIRED', expiresAt, simLifecycle })
     } catch (err) {
       results.push({ subscriptionId, ok: false, reason: String(err?.message || err) })
     }

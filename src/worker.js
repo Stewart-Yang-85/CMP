@@ -20,6 +20,8 @@ import { resolveEventScopeColumns, sanitizeEventPayload } from './services/event
 import { processSubscriptionProvisionJob } from './services/subscriptionProvisionJob.js'
 import { executeScheduledCancels } from './services/subscriptionScheduledCancel.js'
 import { resolveBillingSchedule } from './services/billingSchedule.js'
+import { runTestReadyExpiryEvaluation } from './services/testReadyExpiry.js'
+import { runOneTimeSubscriptionExpiry } from './services/subscriptionOneTimeExpiry.js'
 
 const supabase = createSupabaseRestClient({ useServiceRole: true })
 const wxClient = createWxzhonggengClient()
@@ -92,6 +94,7 @@ const USAGE_RATING_ROLLUP_CRON = process.env.USAGE_RATING_ROLLUP_CRON || '*/30 *
 const USAGE_MONTHLY_ROLLUP_CRON = process.env.USAGE_MONTHLY_ROLLUP_CRON || '15 1 * * *'
 const TEST_EXPIRY_CHECK_CRON = process.env.TEST_EXPIRY_CHECK_CRON || '0 3 * * *'
 const SUBSCRIPTION_CANCEL_CRON = process.env.SUBSCRIPTION_CANCEL_CRON || '*/5 * * * *'
+const SUBSCRIPTION_ONE_TIME_EXPIRY_CRON = process.env.SUBSCRIPTION_ONE_TIME_EXPIRY_CRON || '*/10 * * * *'
 const AUTO_BILLING_CRON = process.env.AUTO_BILLING_CRON || '15 3 * * *'
 const RECONCILIATION_CRON = process.env.RECONCILIATION_CRON || '45 4 * * *'
 const WEBHOOK_DELIVERY_BATCH_LIMIT = resolveNumber(process.env.WEBHOOK_DELIVERY_BATCH_LIMIT, 50)
@@ -142,6 +145,7 @@ console.log(`Usage Rating Rollup Schedule: ${USAGE_RATING_ROLLUP_CRON}`)
 console.log(`Usage Monthly Rollup Schedule: ${USAGE_MONTHLY_ROLLUP_CRON}`)
 console.log(`Test Expiry Check Schedule: ${TEST_EXPIRY_CHECK_CRON}`)
 console.log(`Subscription Cancel Schedule: ${SUBSCRIPTION_CANCEL_CRON}`)
+console.log(`Subscription ONE_TIME Expiry Schedule: ${SUBSCRIPTION_ONE_TIME_EXPIRY_CRON}`)
 console.log(`Auto Billing Schedule: ${AUTO_BILLING_CRON}`)
 console.log(`Reconciliation Schedule: ${RECONCILIATION_CRON}`)
 
@@ -366,118 +370,16 @@ async function webhookDeliveryTask() {
 // Uses FOR UPDATE SKIP LOCKED semantics via sequential single-row updates.
 async function testExpiryCheckTask() {
   const traceId = `worker-test-expiry-${Date.now()}`
-  console.log(`[${traceId}] Starting test expiry check...`)
+  console.log(`[${traceId}] Starting TEST_READY expiry sweep (Commercial Terms + no-MAIN fallback)...`)
   try {
-    // Find TEST_READY SIMs with test_expires_at in the past
-    // We check both sims.status = 'TEST_READY' and look for activation_code expiry patterns
-    const nowIso = new Date().toISOString()
-    const rows = await supabase.select(
-      'sims',
-      `select=sim_id,iccid,status,enterprise_id,reseller_id,supplier_id,activation_date&status=eq.TEST_READY&limit=500`
+    const result = await runTestReadyExpiryEvaluation(supabase, {
+      trigger: 'CRON',
+      sweepAll: true,
+      requestId: traceId,
+    })
+    console.log(
+      `[${traceId}] Test expiry completed. processed=${result.processed} activatedQueued=${result.activated} deactivatedQueued=${result.deactivated} skipped=${result.skipped} batchJob=${result.jobId ?? 'n/a'}`
     )
-    const sims = Array.isArray(rows) ? rows : []
-    if (sims.length === 0) {
-      console.log(`[${traceId}] No TEST_READY SIMs to check.`)
-      return
-    }
-
-    // Check each SIM's test period via sim_state_history
-    // Test period = time since SIM entered TEST_READY state
-    // Default test period: 30 days (configurable via env)
-    const testPeriodDays = resolveNumber(process.env.TEST_PERIOD_DAYS, 30)
-    const cutoffDate = new Date(Date.now() - testPeriodDays * 24 * 60 * 60 * 1000)
-    let activated = 0
-    let deactivated = 0
-
-    for (const sim of sims) {
-      try {
-        // Find when SIM entered TEST_READY
-        const historyRows = await supabase.select(
-          'sim_state_history',
-          `select=start_time&sim_id=eq.${encodeURIComponent(String(sim.sim_id))}&after_status=eq.TEST_READY&order=start_time.desc&limit=1`
-        )
-        const entry = Array.isArray(historyRows) ? historyRows[0] : null
-        if (!entry?.start_time) continue
-
-        const testReadySince = new Date(entry.start_time)
-        if (testReadySince > cutoffDate) continue // Not expired yet
-
-        // Check enterprise auto_suspend_enabled to decide action
-        let autoActivate = true
-        if (sim.enterprise_id) {
-          const tenantRows = await supabase.select(
-            'tenants',
-            `select=auto_suspend_enabled&tenant_id=eq.${encodeURIComponent(String(sim.enterprise_id))}&limit=1`
-          )
-          const tenant = Array.isArray(tenantRows) ? tenantRows[0] : null
-          if (tenant && tenant.auto_suspend_enabled === false) {
-            autoActivate = false
-          }
-        }
-
-        const newStatus = autoActivate ? 'ACTIVATED' : 'DEACTIVATED'
-        const updatePayload = {
-          status: newStatus,
-          last_status_change_at: nowIso,
-        }
-        if (newStatus === 'ACTIVATED' && !sim.activation_date) {
-          updatePayload.activation_date = nowIso
-        }
-
-        await supabase.update(
-          'sims',
-          `sim_id=eq.${encodeURIComponent(String(sim.sim_id))}`,
-          updatePayload,
-          { returning: 'minimal' }
-        )
-        await supabase.insert('sim_state_history', {
-          sim_id: sim.sim_id,
-          before_status: 'TEST_READY',
-          after_status: newStatus,
-          start_time: nowIso,
-          source: 'TEST_EXPIRY_AUTO',
-          request_id: traceId,
-        }, { returning: 'minimal' })
-        const testExpiryEventScope = await resolveEventScopeColumns(supabase, {
-          enterpriseId: sim.enterprise_id ?? null,
-          resellerId: sim.reseller_id ?? null,
-        })
-        await supabase.insert('events', {
-          event_type: 'SIM_STATUS_CHANGED',
-          occurred_at: nowIso,
-          enterprise_id: testExpiryEventScope.enterpriseId,
-          reseller_id: testExpiryEventScope.resellerId,
-          request_id: traceId,
-          payload: sanitizeEventPayload({
-            iccid: sim.iccid,
-            beforeStatus: 'TEST_READY',
-            afterStatus: newStatus,
-            reason: `Test period expired (${testPeriodDays} days)`,
-            autoTriggered: true,
-          }),
-        }, { returning: 'minimal' })
-        await supabase.insert('audit_logs', {
-          actor_role: 'SYSTEM',
-          tenant_id: sim.enterprise_id ?? null,
-          action: 'TEST_EXPIRY_AUTO_TRANSITION',
-          target_type: 'SIM',
-          target_id: sim.iccid,
-          request_id: traceId,
-          after_data: {
-            beforeStatus: 'TEST_READY',
-            afterStatus: newStatus,
-            testReadySince: entry.start_time,
-            testPeriodDays,
-          },
-        }, { returning: 'minimal' })
-
-        if (newStatus === 'ACTIVATED') activated += 1
-        else deactivated += 1
-      } catch (err) {
-        console.error(`[${traceId}] Failed to process test expiry for SIM ${sim.iccid}:`, err.message)
-      }
-    }
-    console.log(`[${traceId}] Test expiry check completed. activated=${activated} deactivated=${deactivated}`)
   } catch (err) {
     console.error(`[${traceId}] Test expiry check failed:`, err)
   }
@@ -497,6 +399,24 @@ async function subscriptionCancelTask() {
     } else {
       console.error(`[${traceId}] Subscription cancel task failed:`, err)
     }
+  }
+}
+
+async function subscriptionOneTimeExpiryTask() {
+  const traceId = `worker-one-time-expiry-${Date.now()}`
+  try {
+    const result = await runOneTimeSubscriptionExpiry({
+      supabase,
+      requestId: traceId,
+      limit: resolveNumber(process.env.SUBSCRIPTION_ONE_TIME_EXPIRY_BATCH_LIMIT, 100),
+    })
+    if (result.ok && (result.value.processed > 0 || result.value.examined > 0)) {
+      console.log(
+        `[${traceId}] ONE_TIME expiry: examined=${result.value.examined} expired=${result.value.processed} skipped=${result.value.skipped}`
+      )
+    }
+  } catch (err) {
+    console.error(`[${traceId}] ONE_TIME subscription expiry failed:`, err)
   }
 }
 
@@ -1102,6 +1022,7 @@ scheduleCron('USAGE_RATING_ROLLUP_CRON', USAGE_RATING_ROLLUP_CRON, usageRatingRo
 scheduleCron('USAGE_MONTHLY_ROLLUP_CRON', USAGE_MONTHLY_ROLLUP_CRON, usageMonthlyRollupTask)
 scheduleCron('TEST_EXPIRY_CHECK_CRON', TEST_EXPIRY_CHECK_CRON, testExpiryCheckTask)
 scheduleCron('SUBSCRIPTION_CANCEL_CRON', SUBSCRIPTION_CANCEL_CRON, subscriptionCancelTask)
+scheduleCron('SUBSCRIPTION_ONE_TIME_EXPIRY_CRON', SUBSCRIPTION_ONE_TIME_EXPIRY_CRON, subscriptionOneTimeExpiryTask)
 scheduleCron('AUTO_BILLING_CRON', AUTO_BILLING_CRON, autoBillingTask)
 scheduleCron('RECONCILIATION_CRON', RECONCILIATION_CRON, reconciliationTask)
 

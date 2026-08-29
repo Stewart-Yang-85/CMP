@@ -285,6 +285,20 @@ V1.1 以**物理 SIM** 管理为主线，围绕 `sims` 表提供入库、查询�
 - `ACTIVATED` / `DEACTIVATED` / `RETIRED`：通过异步生命周期 API 受理，worker/adapter 完成后落稳态。
 - 禁止 `ACTIVATED -> RETIRED`，退网必须先 `DEACTIVATED`。
 
+**TEST_READY 到期自动迁移（MUST）**：
+
+Worker cron（`TEST_EXPIRY_CHECK_CRON`）与 Admin `POST /v1/admin/jobs:test-ready-expiry-run` **共用**同一评估实现（`src/services/testReadyExpiry.ts`）。到期后 **MUST** 入队正式生命周期 Job（`SIM_ACTIVATE` / `SIM_DEACTIVATE`），**MUST NOT** 仅本地翻 `sims.status` 而不走上游。
+
+| 路径 | 条件 | 判定依据 | 目标稳态 |
+|------|------|----------|----------|
+| **A · Commercial Terms** | 存在 MAIN 订阅且 `state ∈ {ACTIVE, PROVISIONING, PENDING}`，且 Package 绑定可解析的 Commercial Terms | `testPeriodDays`、`testQuotaMb`、`testExpiryCondition`（`PERIOD_ONLY` / `QUOTA_ONLY` / `PERIOD_OR_QUOTA`）、自进入 `TEST_READY` 起算的用量 | 按 `testExpiryAction`：`ACTIVATED` 或 `DEACTIVATED` |
+| **B · 无 MAIN / 无条款兜底** | 无上述 MAIN，或无可解析 CT | 进入 `TEST_READY` 后超过环境变量 **`TEST_READY_DAYS_WITHOUT_MAIN_SUBSCRIPTION`**（默认 30；兼容旧名 `TEST_PERIOD_DAYS`）天 | **固定** `DEACTIVATED` |
+
+- 测试期起点：优先 `sims.last_status_change_at`，否则 `sim_state_history` 最近一次 `after_status=TEST_READY`。
+- **MUST NOT** 再使用企业级 `auto_suspend_enabled` 或全局 `TEST_EXPIRY_*` 环境变量作为到期目标态/条件（已废弃于本路径）。
+- 生命周期进行中（`*ing`）的 SIM **跳过**；入队失败可下次重试。
+- 与 **Subscription ↔ SIM 耦合**（见 US4）独立：订阅变 `ACTIVE` **不会**把 `TEST_READY` 强行改为 `ACTIVATED`（测期流量仍由本条款约束）。
+
 **过渡子状态**：
 | `lifecycle_sub_status` | 说明 |
 |------------------------|------|
@@ -317,7 +331,6 @@ V1.1 以**物理 SIM** 管理为主线，围绕 `sims` 表提供入库、查询�
 - `PATCH /v1/esim-profiles/{profileId}` 支持更新 eSIM Profile 的 `remark`。
 
 **V1.1 不纳入当前验收的目标态**：
-- 自动测试期到期批处理（如 PERIOD_ONLY / QUOTA_ONLY / PERIOD_OR_QUOTA 自动转态）不作为 Fastify V1.1 当前主路径验收项。
 - `status_sync_conflict=true` 后冻结所有新生命周期 outbound 不作为 V1.1 当前验收项。
 - 完整 SM-DP+ Profile 下载、启用、停用、删除编排不作为 V1.1 当前验收项。
 - 独立长期数据保留/GDPR 清理策略放在合规与运维章节，不在 US2 展开。
@@ -326,8 +339,8 @@ V1.1 以**物理 SIM** 管理为主线，围绕 `sims` 表提供入库、查询�
 
 **Technical Implementation**:
 
-- Canonical HTTP runtime：Fastify routes in `src/routes/simPhase4.ts`、`src/routes/esimProfiles.js`、`src/routes/simDiagnostics.ts`。
-- 核心服务：`src/services/simLifecycle.ts`、`src/services/simStatusChangeJob.js`、`src/services/simLifecycleFinalize.js`、`src/services/simImport.ts`。
+- Canonical HTTP runtime：Fastify routes in `src/routes/simPhase4.ts`、`src/routes/esimProfiles.js`、`src/routes/simDiagnostics.ts`、`src/routes/adminTestReadyExpiry.ts`。
+- 核心服务：`src/services/simLifecycle.ts`、`src/services/simStatusChangeJob.js`、`src/services/simLifecycleFinalize.js`、`src/services/simImport.ts`、`src/services/testReadyExpiry.ts`（TEST_READY 到期评估；cron 与 Admin 共用）。
 - 事件通知：`SIM_STATUS_CHANGED`（稳态 `status` 变更后）、`JOB_FINISHED`（`SIM_STATUS_CHANGE` Job 终态）。
 - 主要 API：
   - `POST /v1/sims/import-jobs`
@@ -337,6 +350,7 @@ V1.1 以**物理 SIM** 管理为主线，围绕 `sims` 表提供入库、查询�
   - `PATCH /v1/sims/{iccid}`（remark）
   - `POST /v1/sims/{simId}:activate|deactivate|reactivate|retire|mark-test-ready`
   - `POST /v1/sims:batch-status-change`
+  - `POST /v1/admin/jobs:test-ready-expiry-run`（手工触发与 cron 同规则的 TEST_READY 到期评估）
   - `GET /v1/jobs/{jobId}`
   - `GET/POST/PATCH /v1/esim-profiles...`（轻量 Profile 管理）
 
@@ -355,7 +369,8 @@ V1.1 以**物理 SIM** 管理为主线，围绕 `sims` 表提供入库、查询�
 9. **Given** 用户查询 SIM 列表或导出 CSV, **When** 携带 reseller/enterprise/department scope, **Then** 只返回授权范围内 SIM
 10. **Given** 用户更新 SIM 或 eSIM Profile 备注, **When** 调用对应 PATCH 接口, **Then** 返回更新后的 `remark`
 11. **Given** eSIM Profile 已创建, **When** 代理商管理员调用 eSIM 同步状态动作, **Then** 按当前状态校验后更新 `esim_profiles.status` 并记录历史（若历史表存在）
-
+12. **Given** SIM 为 `TEST_READY` 且 MAIN→Package→Commercial Terms 可解析且按 `testExpiryCondition` 已到期, **When** cron 或 Admin test-ready-expiry 运行, **Then** 按 `testExpiryAction` 入队 `SIM_ACTIVATE` 或 `SIM_DEACTIVATE`
+13. **Given** SIM 为 `TEST_READY` 且无 MAIN（或无可解析 CT）且已超过 `TEST_READY_DAYS_WITHOUT_MAIN_SUBSCRIPTION`, **When** 到期评估运行, **Then** 入队 `SIM_DEACTIVATE`
 ---
 
 ### User Story 3 - 产品包与资费计划配置 (Priority: P1)
@@ -556,6 +571,7 @@ V1.1 以**物理 SIM** 管理为主线，围绕 `sims` 表提供入库、查询�
 - Test Expiry Condition：PERIOD_ONLY / QUOTA_ONLY / PERIOD_OR_QUOTA（默认 PERIOD_OR_QUOTA）
 - Test Expiry Action：ACTIVATED / DEACTIVATED（默认 ACTIVATED）
 - Commitment Period（承诺期）
+- **与 SIM TEST_READY 到期**：上述测试期字段由 US2 到期评估路径 A 消费（MAIN 订阅 → Package → 本快照）；无 MAIN/无可解析条款时走路径 B 环境变量兜底，见 User Story 2。
 
 **控制策略（Control Policy）**：
 - **数据模型边界（MUST 区分表名）**：**HTTP `/v1/control-policies` 系列 API** 所管理、且产品包通过 **`controlPolicyId`** 引用的 **Control Policy 模块快照**，持久化在表 **`control_policy_modules`**（主键 **`control_policy_id`**，策略正文为列 **`control_policy` JSONB**，含生命周期 `DRAFT` / `PUBLISHED` / `DEPRECATED`）。数据库中另存在表 **`control_policies`**（计费/用量域迁移），用于**企业级账单或用量侧开关类配置**，**与上述模块快照非同一资源**；**MUST NOT** 将二者混读、混写或混用 OpenAPI 契约。文档、数据模型与运维 SQL **MUST** 显式使用 **`control_policy_modules`** 指代产品包可选绑定的 Control Policy 模块。
@@ -735,14 +751,25 @@ V1.1 以**物理 SIM** 管理为主线，围绕 `sims` 表提供入库、查询�
 **订阅规则**：
 - 生效时间精确到秒（TIMESTAMPTZ）
 - 订阅状态：**PENDING / PROVISIONING / ACTIVE / CANCELLED / EXPIRED**（见 [subscription-provisioning-upstream-mapping.md](clarifications/subscription-provisioning-upstream-mapping.md)）
+- **业务「活跃订阅」口径（MUST）**：仅 `state = ACTIVE` 视为活跃（可放行计费/用网语义上的有效订户）。`PROVISIONING` / `PENDING` **不**计为活跃。
 - 互斥校验：同一时间一张 SIM 仅允许 1 个主数据产品包，叠加包不限
 - **上游开通（MUST）**：创建订阅 **MUST** 经异步 **`SUBSCRIPTION_PROVISION` Job** 调用上游供应商接口；同步 API **仅** 受理并入队，**MUST NOT** 在无上游确认时返回 `ACTIVE`
+- **上游开通结果（MUST）**：Job 成功 → 本地订阅 → `ACTIVE`；Job 失败 → **删除**本地订阅行（**不**引入 `FAILED` 订阅态），并投递失败类 Job/事件（见 clarifications）
 - **SIM ↔ Package 对齐（MUST）**：`sim.supplier_id` / `sim.operator_id` **MUST** 与 Package → Carrier Service 一致；Package **MUST** 为 `PUBLISHED` 且存在 **`vendor_product_mappings`**
 - 变更限制：当前 V1.1 对 **ACTIVE MAIN** 仅允许 `NEXT_CYCLE` 切换；对未生效的 `PENDING MAIN`，在无 ACTIVE MAIN 冲突时可按 `IMMEDIATE` 策略切换
 - 退订保护：当前 V1.1 对 **ACTIVE** 订阅拒绝立即取消（`immediate=true`），必须通过 `immediate=false` 排程到周期末或 ONE_TIME ADD_ON 到期时执行；`PENDING` 订阅可直接取消为 `CANCELLED`
 - 每次订阅记录生效时间与承诺期，用于计算承诺期结束日
 - 最早可拆机时间 = max(各订阅承诺期结束日)
 - 主套餐/叠加包是订阅关系的语义，不限定资费类型；资费类型由产品包定义
+
+**资费类型与日历到期（MUST）**：
+- **ONE_TIME**：创建时按 `validityDays` + `expiryBoundary` 写入 `expires_at`；Worker cron（`SUBSCRIPTION_ONE_TIME_EXPIRY`）扫描 `state=ACTIVE` 且 `expires_at <= now` 的 ONE_TIME 订阅，**MUST** 自动迁移为 `EXPIRED`（事件 `SUBSCRIPTION_CHANGED`，原因如 `ONE_TIME_VALIDITY_EXPIRED`）。
+- **SIM_DEPENDENT_BUNDLE / FIXED_BUNDLE / TIERED_PRICING**：设计上**无**日历 `validityDays`；系统 **MUST NOT** 因日历超期自动将此类订阅改为 `EXPIRED`。其结束靠退订排程、切换归档等业务操作。
+
+**Subscription ↔ SIM 生命周期耦合（MUST）**（防上游 pay-as-you-go 在本地已无可用订阅时继续放行流量）：
+1. **失去 ACTIVE 之后**（含 ONE_TIME 自动到期、排程取消执行等路径将订阅置为 `EXPIRED`）：若该 SIM 上 **剩余 ACTIVE 订阅数为 0**，则 **MUST** 对该 SIM 入队停机（`SIM_DEACTIVATE` → 本地 `DEACTIVATED` + 上游 suspend）。适用当前稳态为 `ACTIVATED` 或 `TEST_READY`；已是 `DEACTIVATED` / `RETIRED` / 过渡态等则跳过。
+2. **获得 ACTIVE 之后**（`SUBSCRIPTION_PROVISION` 成功使订阅变为 `ACTIVE`）：若该 SIM 稳态为 **`DEACTIVATED`** 且此刻该卡上 **恰好 1 条 ACTIVE** 订阅，则 **MUST** 入队开机（`SIM_ACTIVATE` → 本地 `ACTIVATED` + 上游 activate）。若已是 `ACTIVATED` → 不动；若为 `TEST_READY` / `INVENTORY` / `RETIRED` → **不动**（测期流量仍由 Commercial Terms 约束；库存/退役由运营手工）。
+3. **MUST NOT** 在 ONE_TIME 到期时默认调用「取消上游产品包」接口（上游可能是无有效期的批发 PAYG，乱取消会伤及仍有效的 MAIN）；本期以防泄露的 **SIM 停机** 为保底。
 
 **场景模板：东南亚主包 + 中国叠加包**
 - 目标：东南亚为主流量低成本覆盖；中国为少量高成本按量计费
@@ -773,13 +800,14 @@ V1.1 以**物理 SIM** 管理为主线，围绕 `sims` 表提供入库、查询�
 - 产品包订阅语义：
   - **PROVISIONING**：已受理，上游开通 Job 排队或执行中；**尚未** 获得上游确认
   - **PENDING**：**仅** 表示尚未到达 **`effectiveAt`** 的预约订阅（到点后进入开通 Job / **PROVISIONING**）
-  - **ACTIVE**：上游开通已成功且满足生效条件；当前账期生效
+  - **ACTIVE**：上游开通已成功且满足生效条件；当前账期生效；**唯一**计入「活跃订阅」
   - **CANCELLED**：撤销（当月计数与配额不回收）
-  - **EXPIRED**：到期或被替换后归档
+  - **EXPIRED**：到期或被替换后归档（含 ONE_TIME 有效期自动到期、排程取消执行、切换归档）
   - **上游失败**：**MUST** **删除** 本地 `subscriptions` 行（**不** 保留失败态订阅）；**MUST** 投递 **`JOB_FINISHED`（FAILED）** 及失败类订阅事件，并经 **Webhook** 通知 **下游客户系统**
 - 月内取消订阅：当月仍按全额月租计费，配额保留至月底
-- 取消队列：`subscription_cancel_schedules` 表存储已生效订阅的待执行取消；定时任务扫描并执行
-- 开通 Job：详见 [subscription-provisioning-upstream-mapping.md](clarifications/subscription-provisioning-upstream-mapping.md)
+- 取消队列：`subscription_cancel_schedules` 表存储已生效订阅的待执行取消；定时任务扫描并执行；执行后若 SIM 无剩余 ACTIVE 订阅，触发上述 **SIM 停机耦合**
+- ONE_TIME 到期任务：Worker 扫描并自动 `EXPIRED`；随后应用 **无 ACTIVE → SIM 停机** 规则
+- 开通 Job：详见 [subscription-provisioning-upstream-mapping.md](clarifications/subscription-provisioning-upstream-mapping.md)；成功变 `ACTIVE` 后应用 **唯一 ACTIVE + DEACTIVATED → SIM 开机** 规则
 
 - API 接口：
   - `GET /v1/subscriptions` 列表订阅（企业维度过滤等以 OpenAPI 为准）

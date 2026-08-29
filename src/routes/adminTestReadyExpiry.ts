@@ -68,6 +68,8 @@ export function registerAdminTestReadyExpiryRoutes({
       pageSize,
       requestId: getTraceId(res),
       sourceIp: req.ip ?? null,
+      trigger: 'ADMIN',
+      sweepAll: body.sweepAll === true,
     })
     res.send(result)
   })
